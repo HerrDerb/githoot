@@ -1,4 +1,4 @@
-//! The hoot: one short sound, played when a PR axis goes from nothing to something.
+//! The hoot: one short sound, played when the number of pull requests on an axis goes up.
 //!
 //! ## Why an embedded file and a temp copy
 //!

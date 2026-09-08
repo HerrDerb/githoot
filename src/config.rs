@@ -87,7 +87,7 @@ pub struct Config {
     /// entries silently swaps which bar a setting controls — it compiles, type-checks, and is
     /// visible only by looking at the tray.
     pr_enabled: [bool; 3],
-    /// Whether a PR arriving plays the hoot. On unless explicitly turned off — see `sound`.
+    /// Whether a rising PR count plays the hoot. On unless explicitly turned off — see `sound`.
     ///
     /// Only the *sound* is switched off. The icon, the tooltip and the menu counts are untouched, so
     /// silencing this loses nothing but the noise, which is why it needs no more than one flag.
@@ -219,8 +219,8 @@ fn default_config() -> String {
          {KEY_READY_TO_MERGE}=on\n\
          {KEY_CHANGES_REQUESTED}=on\n\
          \n\
-         # Play a short hoot when a pull-request signal goes from none to some. Only the sound is\n\
-         # affected: the icon, tooltip and counts behave the same either way.\n\
+         # Play a short hoot whenever a pull-request count goes up. Only the sound is affected:\n\
+         # the icon, tooltip and counts behave the same either way.\n\
          {KEY_SOUND}=on\n\
          \n\
          # How much the log file records. \"error\" (the default) logs only failures; \"info\" adds\n\

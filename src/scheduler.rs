@@ -460,8 +460,8 @@ fn run_poll_loop(
         *PR_URLS.lock().expect("PR-URLs lock poisoned") = PrAxis::ALL.map(|axis| state.pr_urls(axis));
 
         // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
-        // this cycle's responses, and taking them next to the code that produced them is what keeps
-        // "0 -> 1" meaning one poll's worth of change. The sound itself waits until after `emit`.
+        // this cycle's responses, and taking them next to the code that produced them is what keeps a
+        // rise meaning one poll's worth of change. The sound itself waits until after `emit`.
         //
         // Taken unconditionally, even with the sound off, so the latch cannot accumulate. Turning the
         // sound back on takes a restart (see `settings_watch`), which would clear it anyway — but a

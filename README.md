@@ -199,7 +199,7 @@ appear in it, and the table below is the complete list.
 | `reviewRequested` | `on` | The red bar |
 | `readyToMerge` | `on` | The green bar (approved PRs; the key keeps its old name so existing `config.txt` files still work) |
 | `changesRequested` | `on` | The amber bar |
-| `sound` | `on` | Play the hoot when a PR signal goes from none to some |
+| `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | every component | Which parts of GitHub may raise the outage mark — see below |
 
@@ -339,20 +339,29 @@ renewal needs a browser does the exclamation come back.
 
 ## The hoot
 
-When a PR signal goes from **none to some**, the app plays a short hoot. Each of the three axes hoots for
-itself: reviews requested of you, your PRs that were approved, your PRs with changes requested.
+Whenever a PR count **goes up**, the app plays a short hoot. Each of the three axes hoots for itself:
+reviews requested of you, your PRs that were approved, your PRs with changes requested.
 
-Only that one edge. Going from one PR to four does not hoot again — you already know, and the count is in
-the tooltip and the menu. It re-arms once the axis has genuinely gone back to zero.
+Any rise counts. Zero to three hoots, and so does one to four — four reviews waiting where one was
+waiting is three pieces of news, and the tray having been lit already is no reason not to mention them.
+Two or three axes rising in the same poll is still one hoot, not three: overlapping plays of the same
+clip are a noise rather than a notification.
 
-Launching into a queue that already has PRs in it hoots too, once. Strictly that is not a 0-to-1 edge —
-the app knew nothing before it asked — but it is the moment you want telling, and staying silent there
-would mean the hoot only ever worked for people who left the app running.
+The other direction is silent. A count falling is work leaving, which is what you wanted, and a flat
+count is nothing at all.
 
-One case stays deliberately silent: an axis recovering from a run of failed polls. It looks identical to
-a launch from the inside — "we do not know" either way — but that axis has already had its say, and the
-PRs it comes back with are a number you have seen. Hooting there would turn every network blip into a
-notification.
+Launching into a queue that already has PRs in it hoots too, once. Strictly that is not a rise — the app
+knew nothing before it asked — but it is the moment you want telling, and staying silent there would mean
+the hoot only ever worked for people who left the app running. Signing in works the same way.
+
+One case stays deliberately silent: an axis recovering from a run of failed polls at the same count it
+left. The last known count is held through the failures precisely so that comparison can be made, which
+is what stops every network blip becoming a notification. If it comes back *higher*, that does hoot —
+those PRs turned up while the poll was down, and they are as new to you as if the app had been watching.
+
+One limit worth knowing: the searches cap at 100 hits, so an axis already pinned at 100 cannot show
+growth and stays quiet. The count in the tooltip has always undercounted the same way, and for a sound,
+erring quiet is the right direction.
 
 The clip is embedded in the binary, unpacked once per run into the system temp directory, and played by
 whatever the platform already has: `winmm` (MCI) on Windows, `afplay` on macOS, and the first of `mpv`,

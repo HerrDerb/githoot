@@ -295,7 +295,7 @@ struct Track {
     detail: Option<String>,
     count: Option<u32>,
     needs_reauth: bool,
-    /// Nothing has just turned into something, and nobody has been told yet.
+    /// The count has just gone up, and nobody has been told yet.
     ///
     /// Latched rather than derived, because the only caller reads it once per cycle and the edge it
     /// describes exists only between two `apply` calls. See `PollState::take_pr_arrivals` for which
@@ -313,6 +313,34 @@ struct Track {
     /// streak, which is not). Nothing else can distinguish them, because both look identical in
     /// `value`, and `failures` is reset by the very response that would need to consult it.
     ever_confirmed: bool,
+}
+
+/// Whether this answer is *more* than the last one, and so worth a hoot.
+///
+/// Split out of `Track::apply` because it is the whole feature, and because the fallback deserves to
+/// be stated once rather than inlined into a condition nobody can read.
+///
+/// - Both counts known: strictly greater. `2 -> 5` is three new pull requests and hoots; `5 -> 2` and
+///   `2 -> 2` do not. This is what makes a busy axis able to speak again — under the old rule an axis
+///   already showing `Yes` was permanently silent no matter how much piled up in it.
+/// - No previous count (`None`): nothing to compare, so fall back to `presence_edge`, the pre-count
+///   rule. Reachable on the first confirmed answer of a run, after `clear_pr_auth` hands out a fresh
+///   `Track`, and for any endpoint that reports presence without a total. Notifications are the only
+///   such endpoint today and never reach this code, but the type allows it and guessing "no count
+///   means new" would hoot on every single poll of such an axis.
+/// - No new count on a track that had one: treated as no news. A `present` answer that stopped
+///   carrying a total says nothing about direction, and the alternative — hooting because the number
+///   became unreadable — is a sound the user cannot act on.
+///
+/// One consequence of the counts coming from a capped search (`github::SEARCH_HITS_CAP`): once an
+/// axis is pinned at the cap, further growth is invisible and stays silent. That is the same
+/// undercount the tooltip already lives with, and erring quiet is the right direction for a sound.
+fn rose(previous: Option<u32>, current: Option<u32>, presence_edge: bool) -> bool {
+    match (previous, current) {
+        (Some(before), Some(now)) => now > before,
+        (None, _) => presence_edge,
+        (Some(_), None) => false,
+    }
 }
 
 impl Track {
@@ -335,19 +363,24 @@ impl Track {
         match result {
             PollResult::Fresh { present, etag, count, urls } => {
                 self.etag = etag;
+                // Read before the write: the new rule is a comparison, so the old number has to be
+                // taken here or it is gone.
+                let previous_count = self.count;
                 self.count = count;
                 self.urls = urls;
                 self.failures = 0;
                 self.detail = None;
-                // Both reads happen before their writes. `No` is a known-empty axis filling up;
-                // `!ever_confirmed` is the first answer of a launch, which is news for the same
-                // reason even though what it replaced was `Unknown`. A recovered failure streak is
-                // neither: it is `Unknown` on a track that has already spoken.
+                // The presence edge, still computed because it is `rose`'s fallback when there is
+                // no number to compare against. Both reads happen before their writes. `No` is a
+                // known-empty axis filling up; `!ever_confirmed` is the first answer of a launch,
+                // which is news for the same reason even though what it replaced was `Unknown`. A
+                // recovered failure streak is neither: it is `Unknown` on a track that has already
+                // spoken.
                 let was_confirmed_absent = self.value == Presence::No;
                 let is_first_answer = !self.ever_confirmed;
                 self.ever_confirmed = true;
                 self.value = if present { Presence::Yes } else { Presence::No };
-                if present && (was_confirmed_absent || is_first_answer) {
+                if present && rose(previous_count, count, was_confirmed_absent || is_first_answer) {
                     self.arrived = true;
                 }
                 None
@@ -625,19 +658,28 @@ impl PollState {
     ///
     /// ## Which transitions count
     ///
-    /// Two of them, and the difference between them is the point:
+    /// **Any rise in the count**, which is the rule — see `rose`. `0 -> 3` hoots, and so does `2 -> 5`:
+    /// three pull requests turning up on an axis that was already busy is three pieces of news, and
+    /// hearing nothing because the dot was lit already was the reason this was changed.
     ///
-    /// - `No` -> `Yes`: a known-empty axis filling up. The plain case.
+    /// The other direction is silent. `5 -> 2` is work leaving, `2 -> 2` is no work at all, and
+    /// `NotModified` cannot be either by construction: it means nothing changed.
+    ///
+    /// Two cases have no number to compare against, and there `rose` falls back to the old presence
+    /// edge:
+    ///
     /// - The **first** confirmed answer of the process, when it is `Yes`. What it replaced was
-    ///   `Unknown`, not a known zero, so this is not strictly a 0-to-1 edge — but starting the app and
-    ///   finding PRs already waiting is exactly when the user wants telling, and staying silent there
-    ///   would mean the hoot only ever worked for people who left the app running.
+    ///   `Unknown`, not a known zero — but starting the app and finding PRs already waiting is exactly
+    ///   when the user wants telling, and staying silent there would mean the hoot only ever worked
+    ///   for people who left the app running.
+    /// - The same thing after `clear_pr_auth`, which hands out fresh `Track`s on purpose.
     ///
-    /// What deliberately does **not** count is the other `Unknown` -> `Yes`: a failure streak
-    /// recovering. It looks identical in `value`, which is why `Track::ever_confirmed` exists to tell
-    /// them apart. That axis has already had its say, so re-announcing a number the user has seen
-    /// would make every network blip a hoot. `NotModified` cannot arrive either, by construction: it
-    /// means nothing changed.
+    /// What deliberately does **not** count is a failure streak recovering at the count it left. It
+    /// looks identical in `value` to the launch case, which is why `Track::ever_confirmed` exists to
+    /// tell them apart — without it, every network blip would re-announce a number the user has
+    /// already seen. Recovering at a *higher* count does hoot, and should: the count is held through
+    /// failures (see `Track::apply`), so the comparison still has a real number on both sides and the
+    /// rise it finds is real work that turned up while the poll was down.
     ///
     /// ## Why taking, rather than asking
     ///
@@ -1927,9 +1969,9 @@ mod tests {
         assert!(!state.icon().shows_exclamation(), "a recovered poll must take the mark down");
     }
 
-    // ─── Rising-edge arrivals (the hoot) ──────────────────────────────────────
+    // ─── Rising counts (the hoot) ─────────────────────────────────────────────
 
-    /// The whole point: a *confirmed* zero turning into a confirmed one or more is news, and it is
+    /// The plainest case: a *confirmed* zero turning into a confirmed one or more is news, and it is
     /// news exactly once.
     #[test]
     fn a_confirmed_zero_to_one_is_an_arrival_reported_once() {
@@ -1942,16 +1984,48 @@ mod tests {
         assert_eq!(state.take_pr_arrivals(), [false; 3], "taking it must consume it");
     }
 
-    /// 1 to 2 is not the transition asked for. Only the quiet-to-busy edge is.
+    /// The feature this rule was changed for: an axis that is *already* busy still speaks up when it
+    /// gets busier. Under the presence-edge rule this was silent, because `Presence` was `Yes` both
+    /// before and after — so three pull requests could land unannounced.
     #[test]
-    fn a_growing_count_is_not_a_second_arrival() {
+    fn a_growing_count_hoots_again() {
         let mut state = PollState::new(false, [true; 3]);
         state.apply_pr(PrAxis::ReviewRequested, fresh_count(0));
         state.apply_pr(PrAxis::ReviewRequested, fresh_count(1));
         assert_eq!(state.take_pr_arrivals(), [true, false, false]);
 
         state.apply_pr(PrAxis::ReviewRequested, fresh_count(4));
-        assert_eq!(state.take_pr_arrivals(), [false; 3], "still busy is not newly busy");
+        assert_eq!(state.take_pr_arrivals(), [true, false, false], "1 to 4 is three new PRs");
+        assert_eq!(state.take_pr_arrivals(), [false; 3], "and it is still consumed by the take");
+    }
+
+    /// The other direction is not news. Work leaving is what the user wanted; it needs no sound, and
+    /// a hoot on every close would make the app unbearable.
+    #[test]
+    fn a_shrinking_or_flat_count_is_silent() {
+        let mut state = PollState::new(false, [true; 3]);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(5));
+        let _ = state.take_pr_arrivals();
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        assert_eq!(state.take_pr_arrivals(), [false; 3], "5 to 2 is work going away");
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        assert_eq!(state.take_pr_arrivals(), [false; 3], "2 to 2 is nothing at all");
+    }
+
+    /// A dip and a recovery back to the same number is a rise on the way up, and hoots. The pull
+    /// request that closed is not the one that opened, so there is genuinely something new to look
+    /// at even though the total is where it started.
+    #[test]
+    fn a_dip_and_a_climb_back_hoots_on_the_way_up() {
+        let mut state = PollState::new(false, [true; 3]);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(3));
+        let _ = state.take_pr_arrivals();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        assert_eq!(state.take_pr_arrivals(), [false; 3]);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(3));
+        assert_eq!(state.take_pr_arrivals(), [true, false, false]);
     }
 
     /// And it can fire again after the axis has genuinely gone quiet.
@@ -1993,16 +2067,41 @@ mod tests {
         assert_eq!(state.take_pr_arrivals(), [false; 3]);
     }
 
-    /// A failure streak is the one `Unknown` that stays silent: unlike a launch, this axis has already
-    /// had its say, so coming back from "we lost track" is re-reading a number the user has seen.
+    /// A failure streak recovering at the number it left is silent. The count is held through the
+    /// failure precisely so this comparison has something real on both sides — otherwise every
+    /// network blip would re-announce a number the user has already seen.
     #[test]
-    fn recovering_from_unknown_is_not_an_arrival() {
+    fn recovering_from_unknown_at_the_same_count_is_silent() {
+        let mut state = PollState::new(false, [true; 3]);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        let _ = state.take_pr_arrivals();
+        state.apply_pr(PrAxis::ReviewRequested, respond(PollResult::Unauthorized));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        assert_eq!(state.take_pr_arrivals(), [false; 3], "we lost track and nothing had changed");
+    }
+
+    /// But recovering at a *higher* count does hoot, and must: those pull requests turned up while
+    /// the poll was down, and they are exactly as new to the user as if we had been watching.
+    #[test]
+    fn recovering_from_unknown_at_a_higher_count_hoots() {
         let mut state = PollState::new(false, [true; 3]);
         state.apply_pr(PrAxis::ReviewRequested, fresh_count(0));
         state.apply_pr(PrAxis::ReviewRequested, respond(PollResult::Unauthorized));
         let _ = state.take_pr_arrivals();
         state.apply_pr(PrAxis::ReviewRequested, fresh_count(1));
-        assert_eq!(state.take_pr_arrivals(), [false; 3], "unknown to present is not zero to one");
+        assert_eq!(state.take_pr_arrivals(), [true, false, false]);
+    }
+
+    /// `clear_pr_auth` hands out fresh `Track`s on purpose, so the axis has no previous count and
+    /// falls back to the launch rule. Signing in and finding PRs waiting hoots, like a launch does.
+    #[test]
+    fn the_first_poll_after_a_sign_in_hoots() {
+        let mut state = PollState::new(false, [true; 3]);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(4));
+        let _ = state.take_pr_arrivals();
+        state.clear_pr_auth();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(4));
+        assert_eq!(state.take_pr_arrivals(), [true, false, false], "a fresh track has no history");
     }
 
     /// A 304 says nothing changed, so it cannot be an arrival either.
