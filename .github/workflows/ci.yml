@@ -1,0 +1,76 @@
+# Every push and pull request, on all three shipped platforms.
+#
+# `release.yml` already builds all three, but only on a tag — by which point a break is expensive:
+# a published release is immutable and cannot be re-cut (see docs/updates-and-releases.md). This
+# workflow moves that discovery to the commit that caused it.
+#
+# Deliberately *not* gated on `cargo fmt`: the source is written to a wider line than rustfmt's
+# default and carries long explanatory comments, so a fmt gate would mean reformatting the whole
+# tree for no behavioural gain. Clippy runs but does not fail the build for the same reason —
+# its findings are advice here, not a contract.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # One platform breaking should not hide the state of the other two.
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v5
+
+      # The same two packages release.yml installs: the tray is libappindicator + GTK 3 on Linux.
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libappindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--all-targets` picks up tests/, where version_resource.rs reads the VERSIONINFO back out
+      # of the linked Windows binary — the one check that only a real build can answer.
+      - name: Build
+        run: cargo build --all-targets --locked
+
+      - name: Test
+        run: cargo test --locked
+
+  clippy:
+    name: clippy (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libappindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No `-D warnings`: see the note at the top of this file.
+      - name: Clippy
+        run: cargo clippy --all-targets --locked
