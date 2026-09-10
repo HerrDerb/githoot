@@ -116,12 +116,13 @@ impl Drop for Key {
 
 #[cfg(target_os = "windows")]
 impl Key {
-    /// Opens an existing key under `HKCU` with exactly the access asked for.
+    /// Opens an **existing** key under `HKCU`, failing if it is not there.
     ///
-    /// Open, not create: every key this module touches is part of a stock Windows profile, so a
-    /// failure to open one is a real fault worth reporting rather than something to paper over by
-    /// creating a key somewhere this app does not own. It is also how Windows 10 is detected —
-    /// `Control Panel\NotifyIconSettings` simply is not there.
+    /// Used for `NotifyIconSettings`, where absence is information rather than an obstacle: it is how
+    /// Windows 10 and older are detected, since the key simply does not exist there. Creating it would
+    /// be worse than useless — the subkeys that matter are hashes only the shell can compute.
+    ///
+    /// Not used for the `Run` key. See [`Key::create`].
     fn open(path: &str, access: u32) -> Result<Self, String> {
         use std::ptr::null_mut;
         use winapi::um::winreg::{HKEY_CURRENT_USER, RegOpenKeyExW};
@@ -135,6 +136,46 @@ impl Key {
             Ok(Self(key))
         } else {
             Err(format!("could not open HKCU\\{path} ({status})"))
+        }
+    }
+
+    /// Opens a key under `HKCU`, creating it if it is not there.
+    ///
+    /// **`HKCU\…\CurrentVersion\Run` is not guaranteed to exist.** That assumption is what an earlier
+    /// version of this file got wrong, and CI proved it: on a GitHub `windows-latest` runner the key is
+    /// absent and every `RegOpenKeyExW` against it returned `2` (`ERROR_FILE_NOT_FOUND`). The subkey is
+    /// created by whatever first adds a startup entry, so a profile that has never had one has never
+    /// had the key — which is precisely the fresh install this whole feature exists for.
+    ///
+    /// Creating it is what Windows itself does when you add a startup entry, and `Run` is a
+    /// Microsoft-defined location, so this is not the app inventing a key somewhere it does not
+    /// belong. `REG_OPTION_NON_VOLATILE` so it survives a reboot; an existing key is opened untouched.
+    fn create(path: &str, access: u32) -> Result<Self, String> {
+        use std::ptr::null_mut;
+        use winapi::um::winnt::REG_OPTION_NON_VOLATILE;
+        use winapi::um::winreg::{HKEY_CURRENT_USER, RegCreateKeyExW};
+
+        let path_w = wide(path);
+        let mut key = null_mut();
+        // SAFETY: `path_w` is NUL-terminated and outlives the call; `key` is a valid out-pointer, and
+        // the class, security-attributes and disposition out-parameters are all optional.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path_w.as_ptr(),
+                0,
+                null_mut(),
+                REG_OPTION_NON_VOLATILE,
+                access,
+                null_mut(),
+                &mut key,
+                null_mut(),
+            )
+        };
+        if status == 0 {
+            Ok(Self(key))
+        } else {
+            Err(format!("could not open or create HKCU\\{path} ({status})"))
         }
     }
 
@@ -307,6 +348,31 @@ impl Key {
             Err(format!("could not remove {name} ({status})"))
         }
     }
+
+    /// Removes a subkey of this key.
+    ///
+    /// Test-only, like `delete_value`, and for a stronger reason: nothing in the app ever deletes a
+    /// key. It exists so the registry tests can build their own small tree, prove the read, write and
+    /// enumeration operations agree, and then take it away again — rather than exercising the real
+    /// `Run` key, which would mean writing a live startup entry on the machine running the tests.
+    ///
+    /// Only ever called on a key this process created under a PID-suffixed name, and only deletes one
+    /// level: `RegDeleteKeyW` refuses a key that still has subkeys, which is a useful guard rather
+    /// than a limitation.
+    #[cfg(test)]
+    fn delete_subkey(&self, name: &str) -> Result<(), String> {
+        use winapi::shared::winerror::ERROR_FILE_NOT_FOUND;
+        use winapi::um::winreg::RegDeleteKeyW;
+
+        let name_w = wide(name);
+        // SAFETY: `name_w` is NUL-terminated and outlives the call.
+        let status = unsafe { RegDeleteKeyW(self.0, name_w.as_ptr()) };
+        if status == 0 || status == ERROR_FILE_NOT_FOUND as i32 {
+            Ok(())
+        } else {
+            Err(format!("could not remove the {name} subkey ({status})"))
+        }
+    }
 }
 
 // ─── Windows: starting at sign-in ─────────────────────────────────────────────
@@ -327,7 +393,9 @@ pub fn enable(exe: &Path) -> Result<(), String> {
     use winapi::um::winnt::{KEY_QUERY_VALUE, KEY_SET_VALUE};
 
     let command = run_command(exe);
-    let key = Key::open(RUN_KEY, KEY_SET_VALUE | KEY_QUERY_VALUE)?;
+    // `create`, not `open`: a profile that has never had a startup entry has no `Run` key at all —
+    // see `Key::create` for the CI run that proved it. That is the fresh install this feature is for.
+    let key = Key::create(RUN_KEY, KEY_SET_VALUE | KEY_QUERY_VALUE)?;
     key.set_string(ENTRY_NAME, &command)?;
 
     match key.string(ENTRY_NAME) {
@@ -701,28 +769,57 @@ fn exec_escape(s: &str) -> String {
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
     use super::*;
+    use winapi::um::winnt::{KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE};
 
-    /// Removes a test value however the test ends, so a panicking assertion cannot leave a stray
-    /// startup entry behind in the registry of whoever is running the tests.
-    struct Cleanup(String);
+    /// Where the registry tests do their work: a key this process makes and takes away again.
+    ///
+    /// Deliberately **not** the real `Run` key. An earlier version of these tests used it, on the
+    /// grounds that a stand-in proves nothing about the registry — and it was right about that, but
+    /// wrong about the cost: exercising `Run` for real means writing a live startup entry on whatever
+    /// machine runs `cargo test`. This owns its own patch instead, and `enable`'s six lines over the
+    /// same `Key` are covered by the `#[ignore]`d test at the bottom.
+    ///
+    /// Named per **test**, not per process. Cargo runs these on parallel threads of a single process,
+    /// so a PID-only name handed every test the same key: the non-ASCII test overwrote the round-trip
+    /// test's value, and each `Cleanup` deleted a tree another test was still using. The PID stays in
+    /// the name so two concurrent `cargo test` runs cannot collide either.
+    fn test_root(label: &str) -> String {
+        format!("Software\\{ENTRY_NAME}-selftest-{}-{label}", std::process::id())
+    }
+
+    /// Deletes the whole test tree however the test ends, so a panicking assertion leaves nothing
+    /// behind. Depth-first, because `RegDeleteKeyW` refuses a key that still has subkeys.
+    struct Cleanup {
+        root: String,
+        children: Vec<String>,
+    }
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            if let Ok(key) = Key::open(RUN_KEY, winapi::um::winnt::KEY_SET_VALUE) {
-                let _ = key.delete_value(&self.0);
+            if let Ok(root) = Key::open(&self.root, KEY_SET_VALUE) {
+                for child in &self.children {
+                    let _ = root.delete_subkey(child);
+                }
+            }
+            if let Ok(software) = Key::open("Software", KEY_SET_VALUE) {
+                let leaf = self.root.rsplit('\\').next().unwrap_or(&self.root);
+                let _ = software.delete_subkey(leaf);
             }
         }
     }
 
-    /// A value name no real install could collide with, so these tests can use the *real* `Run` key —
-    /// which is the point, since a stand-in would prove nothing about the registry.
-    fn test_value_name(suffix: &str) -> String {
-        format!("{ENTRY_NAME}-selftest-{suffix}-{}", std::process::id())
-    }
-
-    fn run_key() -> Key {
-        use winapi::um::winnt::{KEY_QUERY_VALUE, KEY_SET_VALUE};
-        Key::open(RUN_KEY, KEY_SET_VALUE | KEY_QUERY_VALUE)
-            .expect("HKCU Run must be openable without elevation")
+    fn fresh_test_key(label: &str, children: &[&str]) -> (Key, Cleanup) {
+        let root = test_root(label);
+        let cleanup = Cleanup {
+            root: root.clone(),
+            children: children.iter().map(|c| c.to_string()).collect(),
+        };
+        let key = Key::create(&root, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_READ)
+            .expect("a key under HKCU\\Software must be creatable without elevation");
+        for child in children {
+            Key::create(&format!("{root}\\{child}"), KEY_SET_VALUE)
+                .expect("a subkey must be creatable");
+        }
+        (key, cleanup)
     }
 
     #[test]
@@ -731,70 +828,91 @@ mod windows_tests {
         assert_eq!(command, "\"C:\\Program Files\\GitHoot\\githoot-tray.exe\"");
     }
 
-    /// The real thing: `HKCU\…\Run` is writable without elevation, so this exercises the actual
-    /// registry rather than a stand-in. Under a test-only value name, because the point is to prove
-    /// the operations agree with each other, not to register anything.
+    /// The `Run` key is **not** guaranteed to exist: on a GitHub `windows-latest` runner it is absent,
+    /// because the subkey is created by whatever first adds a startup entry and that profile never
+    /// has. `create` must therefore succeed where `open` would return `ERROR_FILE_NOT_FOUND` — this is
+    /// the regression test for the bug that shipped in the first draft of this module.
+    ///
+    /// Only opens or creates the key; writes no value, so no startup entry is registered. An empty
+    /// `Run` key is exactly what a profile that has never had a startup entry would grow the moment
+    /// anything added one.
     #[test]
-    fn a_string_value_round_trips_through_the_registry() {
-        let name = test_value_name("string");
-        let _guard = Cleanup(name.clone());
-        let key = run_key();
-
-        let command = run_command(Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe"));
-        key.set_string(&name, &command).expect("HKCU Run must be writable without elevation");
-
-        let read_back = key.string(&name).expect("the value just written must read back");
-        assert_eq!(read_back, command, "what comes out must be what went in");
-        assert!(key.has_value(&name), "a written value must report as present");
-
-        key.delete_value(&name).expect("a value this test wrote must be removable");
-        assert_eq!(key.string(&name), None, "a removed value must read back as absent");
-        assert!(!key.has_value(&name), "a removed value must not report as present");
+    fn the_run_key_can_be_reached_even_on_a_profile_that_has_never_had_one() {
+        Key::create(RUN_KEY, KEY_SET_VALUE | KEY_QUERY_VALUE)
+            .expect("Run must be creatable when absent, not just openable when present");
     }
 
-    /// `has_value` is the whole basis of the icon promotion's restraint — a decision that exists is
-    /// never overwritten — so it has to notice a value of a type `string` deliberately refuses to
-    /// return. A `DWORD` read as a string is `None`, but it is emphatically *present*.
+    #[test]
+    fn a_string_value_round_trips_through_the_registry() {
+        let (key, _cleanup) = fresh_test_key("round-trip", &[]);
+
+        let command = run_command(Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe"));
+        key.set_string(ENTRY_NAME, &command).expect("the test key must be writable");
+
+        let read_back = key.string(ENTRY_NAME).expect("the value just written must read back");
+        assert_eq!(read_back, command, "what comes out must be what went in");
+        assert!(key.has_value(ENTRY_NAME), "a written value must report as present");
+
+        key.delete_value(ENTRY_NAME).expect("a value this test wrote must be removable");
+        assert_eq!(key.string(ENTRY_NAME), None, "a removed value must read back as absent");
+        assert!(!key.has_value(ENTRY_NAME), "a removed value must not report as present");
+    }
+
+    /// A path long enough to force the two-pass read to allocate properly, and non-ASCII so the
+    /// UTF-16 round trip is exercised rather than assumed. A user name with an umlaut is not exotic.
+    #[test]
+    fn a_long_non_ascii_path_survives_the_utf16_round_trip() {
+        let (key, _cleanup) = fresh_test_key("utf16", &[]);
+
+        let exe = Path::new(r"C:\Users\Jörg Müller\AppData\Local\Programs\GitHoot Tray\githoot-tray.exe");
+        let command = run_command(exe);
+        key.set_string(ENTRY_NAME, &command).expect("the test key must be writable");
+
+        assert_eq!(key.string(ENTRY_NAME).as_deref(), Some(command.as_str()));
+    }
+
+    /// `has_value` is the whole basis of the icon promotion's restraint — a decision that already
+    /// exists is never overwritten — so it has to notice a value of a type `string` deliberately
+    /// refuses to return. A `DWORD` read as a string is `None`, but it is emphatically *present*.
     #[test]
     fn a_dword_is_present_even_though_it_is_not_a_string() {
-        let name = test_value_name("dword");
-        let _guard = Cleanup(name.clone());
-        let key = run_key();
+        let (key, _cleanup) = fresh_test_key("dword", &[]);
 
-        key.set_dword(&name, 1).expect("HKCU Run must be writable without elevation");
+        key.set_dword(IS_PROMOTED, 1).expect("the test key must be writable");
 
-        assert!(key.has_value(&name), "a DWORD that was just written must report as present");
-        assert_eq!(key.string(&name), None, "a DWORD is not a string and must not be read as one");
-
-        key.delete_value(&name).expect("a value this test wrote must be removable");
-        assert!(!key.has_value(&name));
+        assert!(key.has_value(IS_PROMOTED), "a DWORD that was just written must report as present");
+        assert_eq!(key.string(IS_PROMOTED), None, "a DWORD is not a string and must not be read as one");
     }
 
     /// Absent is not an error: it is the ordinary state, and the read has to say so plainly rather
     /// than by failing, or nothing could tell deletion from a broken read.
     #[test]
     fn a_value_that_was_never_written_reads_back_as_absent() {
-        let key = run_key();
-        let name = test_value_name("never-written");
-        assert_eq!(key.string(&name), None);
-        assert!(!key.has_value(&name));
+        let (key, _cleanup) = fresh_test_key("absent", &[]);
+        assert_eq!(key.string("never-written"), None);
+        assert!(!key.has_value("never-written"));
     }
 
     /// `NotifyIconSettings` is enumerated to find our own entry among everything else on the machine,
-    /// so the walk has to actually return names. Read-only, and asserted loosely: what is in there is
-    /// whatever this machine happens to run.
+    /// so the walk has to return every name and cut each at its terminator. Asserted against a tree
+    /// this test built, so the expectation is exact rather than whatever the machine happens to run.
     #[test]
-    fn subkeys_enumerates_the_run_keys_neighbours() {
-        let key = Key::open(r"Software\Microsoft\Windows\CurrentVersion", winapi::um::winnt::KEY_READ)
-            .expect("a stock Windows profile always has this key");
-        let names = key.subkeys();
-        assert!(names.len() > 1, "expected several subkeys, got {names:?}");
-        assert!(names.iter().any(|n| n == "Run"), "Run must be among them, got {names:?}");
-        assert!(names.iter().all(|n| !n.is_empty()), "no name may come back empty: {names:?}");
+    fn subkeys_returns_exactly_the_children_that_are_there() {
+        let (key, _cleanup) = fresh_test_key("subkeys", &["first", "second-with-a-much-longer-name"]);
+
+        let mut names = key.subkeys();
+        names.sort();
+        assert_eq!(names, vec!["first".to_string(), "second-with-a-much-longer-name".to_string()]);
         assert!(
             names.iter().all(|n| !n.contains('\0')),
             "a name must be cut at its terminator, not padded with NULs: {names:?}"
         );
+    }
+
+    #[test]
+    fn subkeys_of_a_key_with_no_children_is_empty() {
+        let (key, _cleanup) = fresh_test_key("no-children", &[]);
+        assert_eq!(key.subkeys(), Vec::<String>::new());
     }
 
     #[test]
@@ -830,21 +948,35 @@ mod windows_tests {
         assert!(!refers_to("", exe));
     }
 
-    /// A sweep against a real `NotifyIconSettings` for an executable that is certainly not in it. It
-    /// must come back `NotListedYet` — the outcome that makes the caller wait and try again — and
-    /// must not write anything. `Failed` here would mean Windows 10 or a key that has moved, which is
-    /// worth knowing about too, so it is allowed for and named.
+    /// A sweep against the real `NotifyIconSettings` for an executable that is certainly not in it. It
+    /// must come back `NotListedYet` — the outcome that makes the caller wait and try again — and must
+    /// not write anything. On a CI runner, and on Windows 10, the key is absent entirely, which is
+    /// `Failed` and is equally correct: that is how this feature detects it does not apply.
     #[test]
     fn a_sweep_for_an_unlisted_executable_writes_nothing() {
         let nowhere = Path::new(r"C:\definitely\not\a\tray\app\nothing-here.exe");
         match promote_once(nowhere) {
             Promotion::NotListedYet => {}
             Promotion::Failed(e) => {
-                // Windows 10 and older have no such key at all. Not a failure of this code.
                 assert!(e.contains(NOTIFY_ICON_SETTINGS), "unexpected failure: {e}");
             }
             other => panic!("an executable with no tray icon must not be promoted: {other:?}"),
         }
+    }
+
+    /// The one path no automated test may take: `enable` writes a **real** startup entry for the
+    /// account running the tests. `#[ignore]`d because `cargo test` must never do that to anyone.
+    /// Run by hand with `cargo test -- --ignored registers_a_real_startup_entry`, then check Task
+    /// Manager › Startup apps and remove it — this test deliberately does not clean up, because the
+    /// thing worth seeing is the entry sitting where a user would find it.
+    #[test]
+    #[ignore = "writes a real startup entry for the current account; remove it by hand afterwards"]
+    fn registers_a_real_startup_entry() {
+        let exe = std::env::current_exe().expect("the test binary has a path");
+        enable(&exe).expect("enable must succeed and read its own value back");
+
+        let key = Key::create(RUN_KEY, KEY_QUERY_VALUE).expect("Run must be reachable");
+        assert_eq!(key.string(ENTRY_NAME).as_deref(), Some(run_command(&exe).as_str()));
     }
 }
 
