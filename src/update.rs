@@ -35,6 +35,13 @@ use serde::Deserialize;
 /// *itself*, and a settable update source would be a way to talk someone into installing anything.
 const REPO: &str = "HerrDerb/githoot-tray";
 
+/// The same repository as a page a browser can open, for the tray's Settings entry.
+///
+/// Here rather than next to the menu wording in `state`, because this module already owns *which*
+/// repository this app is: one literal, and a test pinning this URL to `REPO`, so the menu cannot end
+/// up offering a fork or an old name the updater never installs from.
+pub const REPOSITORY_URL: &str = "https://github.com/HerrDerb/githoot-tray";
+
 /// Matches the User-Agent the other GitHub-facing modules send.
 const AGENT: &str = "githoot-tray";
 
@@ -1118,6 +1125,15 @@ mod tests {
             "https://github.com/HerrDerb/githoot-tray/releases/download/v1.4.0/githoot-tray"
         );
         assert!(url.starts_with("https://"), "the scheme must never be interpolated");
+    }
+
+    /// The repository entry in the tray's Settings submenu goes to the same repository the updater
+    /// talks to. Two literals for one repository is how the menu ends up pointing at a fork or an old
+    /// name while the updater still installs from here; this is the guard against that drift.
+    #[test]
+    fn the_repository_url_names_the_repo_the_updater_talks_to() {
+        assert_eq!(REPOSITORY_URL, format!("https://github.com/{REPO}"));
+        assert!(REPOSITORY_URL.starts_with("https://"), "the scheme must never be interpolated");
     }
 
     // ── Signature verification ─────────────────────────────────────────────

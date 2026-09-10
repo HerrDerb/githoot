@@ -439,14 +439,26 @@ fn main() {
         }
     });
 
+    // Where the app itself lives: its releases, its issues, and the docs the rest of this menu is
+    // explained in. Inside Settings rather than in the main menu because it is about the app rather
+    // than about your pull requests, which is the same line the update and status entries sit on — and
+    // unlike those two, nobody needs it twice a day.
+    let repository_item = MenuItem::with_label(state::REPOSITORY_MENU_LABEL);
+    repository_item.connect_activate(move |_| {
+        if let Err(e) = open::that(update::REPOSITORY_URL) {
+            errorln!("failed to open the repository: {e}");
+        }
+    });
+
     let settings_menu = Menu::new();
     settings_menu.append(&hoot_item);
     settings_menu.append(&autostart_item);
     // The rule separates what a click changes from what a click opens.
     settings_menu.append(&gtk::SeparatorMenuItem::new());
     settings_menu.append(&settings_file_item);
+    settings_menu.append(&repository_item);
     // `show_all` on the parent menu does **not** reach in here: a `GtkMenuItem` does not iterate its
-    // submenu as a child, so the three items above would exist, be attached, and never be drawn.
+    // submenu as a child, so the items above would exist, be attached, and never be drawn.
     settings_menu.show_all();
     let settings_item = MenuItem::with_label(state::SETTINGS_MENU_LABEL);
     settings_item.set_submenu(Some(&settings_menu));
@@ -731,13 +743,16 @@ fn main() {
         /// The start-at-sign-in checkbox. Backed by the OS, not by `config.txt` — see `autostart`.
         autostart_item: tray_icon::menu::CheckMenuItem,
         autostart_item_id: tray_icon::menu::MenuId,
-        /// The old Settings entry, now the last item inside the submenu: `config.txt` still holds the
+        /// The old Settings entry, now an item inside the submenu: `config.txt` still holds the
         /// settings that are a list or a level rather than a switch.
         ///
         /// Only the id is kept, unlike every entry above. Submenu children are never taken out and put
         /// back — `rebuild_menu` re-appends the submenu, which still holds them — and nothing here
         /// rewrites this one's label, so the handle would be a field nobody reads.
         settings_file_item_id: tray_icon::menu::MenuId,
+        /// The Settings entry that opens this app's own repository. Id only, for the same reason as
+        /// the entry above it: a submenu child whose label never changes needs no handle.
+        repository_item_id: tray_icon::menu::MenuId,
         /// Shown only while GitHub reports an incident.
         status_item: tray_icon::menu::MenuItem,
         status_item_id: tray_icon::menu::MenuId,
@@ -826,6 +841,8 @@ fn main() {
         let autostart_item_id = autostart_item.id().clone();
         let settings_file_item = MenuItem::new(state::SETTINGS_FILE_MENU_LABEL, true, None);
         let settings_file_item_id = settings_file_item.id().clone();
+        let repository_item = MenuItem::new(state::REPOSITORY_MENU_LABEL, true, None);
+        let repository_item_id = repository_item.id().clone();
         let settings_menu = Submenu::with_items(
             state::SETTINGS_MENU_LABEL,
             true,
@@ -835,6 +852,7 @@ fn main() {
                 // The rule separates what a click changes from what a click opens.
                 &tray_icon::menu::PredefinedMenuItem::separator(),
                 &settings_file_item,
+                &repository_item,
             ],
         )
         .map_err(|e| format!("Failed to build the settings submenu: {e}"))?;
@@ -899,6 +917,7 @@ fn main() {
             autostart_item,
             autostart_item_id,
             settings_file_item_id,
+            repository_item_id,
             status_item,
             status_item_id,
             authenticate_item,
@@ -1098,6 +1117,10 @@ fn main() {
                 // here and the fifteen-minute watch is armed on the poll thread.
                 if settings_watch::open_for_editing(&config::config_path(&self.app_asset_path)) {
                     let _ = self.wake_tx.send(scheduler::Wake::SettingsOpened);
+                }
+            } else if *id == tray.repository_item_id {
+                if let Err(e) = open::that(update::REPOSITORY_URL) {
+                    errorln!("failed to open the repository: {e}");
                 }
             } else if *id == tray.status_item_id {
                 if let Err(e) = open::that(github_status::STATUS_PAGE_URL) {

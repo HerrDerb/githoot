@@ -14,7 +14,7 @@
 | **Open Changes Requested (N)** | A reviewer asked for changes and it is still on you | Opens the exact PRs the bar counts, one tab each; falls back to GitHub's changes-requested list when it has no confirmed list (see below) |
 | **Open PR inbox** | None of the three entries above is shown | Opens [GitHub's own PR inbox](https://github.com/pulls/inbox) |
 | *— separator —* | Always | |
-| **Settings ▸** | Always | A submenu: two checkboxes, and the settings file (see below) |
+| **Settings ▸** | Always | A submenu: two checkboxes, the settings file, and the repository (see below) |
 | **Quit** | Always | Exits |
 
 The update and GitHub-status entries come first: they are about the app and the service rather than about
@@ -51,6 +51,7 @@ that page is simply your open PRs; for changes requested it is GitHub's changes-
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
+| **Open GitHoot on GitHub** | Opens this app's own repository: releases, issues, and these docs | — |
 
 Both checkboxes **take effect the moment you click them**, with no restart: the hoot is a flag the poll
 loop reads each cycle, and the startup entry is written straight to the OS. Everything else in

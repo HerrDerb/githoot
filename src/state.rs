@@ -204,8 +204,8 @@ pub const STATUS_MENU_LABEL: &str = "GitHub is githubing again, check status";
 /// update, and it is the one thing that still works when everything else is switched off.
 ///
 /// A submenu since 1.16.0. It used to be a single entry that opened `config.txt`, which is still in
-/// there as its last item — the two settings people actually change now have a checkbox, and the file
-/// keeps the ones that are a list or a level rather than a switch.
+/// there — the two settings people actually change now have a checkbox, and the file keeps the ones
+/// that are a list or a level rather than a switch.
 pub const SETTINGS_MENU_LABEL: &str = "Settings";
 
 /// Text of the Settings entry that opens `config.txt` itself.
@@ -213,6 +213,14 @@ pub const SETTINGS_MENU_LABEL: &str = "Settings";
 /// Named "file" rather than "Open Settings" now that it sits *inside* Settings, where the old wording
 /// would have read as a second, different settings screen.
 pub const SETTINGS_FILE_MENU_LABEL: &str = "Open settings file";
+
+/// Text of the Settings entry that opens this app's own repository on GitHub.
+///
+/// Named after the app rather than "Open repository", which inside a tool full of GitHub links would
+/// read as one of *your* repositories. The URL itself is `update::REPOSITORY_URL`, next to the
+/// repository the updater installs from — the same split as [`STATUS_MENU_LABEL`] and
+/// `github_status::STATUS_PAGE_URL`.
+pub const REPOSITORY_MENU_LABEL: &str = "Open GitHoot on GitHub";
 
 /// Text of the Settings checkbox for the hoot.
 ///
