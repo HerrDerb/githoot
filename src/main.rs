@@ -163,6 +163,21 @@ fn load_pr_credential(app_asset_path: &std::path::Path) -> github_app::PrStatus 
     }
 }
 
+/// Reports a failure without blocking the thread the menu runs on.
+///
+/// `dialog::report` waits for the box to be dismissed — `MessageBoxW` on Windows, a `zenity` process
+/// on Linux — and every caller here is a menu click on the UI thread. Blocking there freezes the GTK
+/// main loop, or the winit one, and with it the tray icon: a failed setting would look like a hung app
+/// rather than a message. Detached because there is nothing to wait for; the message is the whole job.
+fn report_in_background(title: &'static str, message: String) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("report".to_string())
+        .spawn(move || dialog::report(title, &message))
+    {
+        errorln!("could not show the failure dialog ({e})");
+    }
+}
+
 /// Returns the path to the application's asset directory in the user's home.
 /// Creates the directory if it does not exist.
 fn get_app_asset_path() -> Result<std::path::PathBuf, String> {
@@ -241,6 +256,10 @@ fn main() {
         infoln!("all PR signals are off in config.txt — skipping PR sign-in entirely");
         github_app::PrStatus::Off("PR status off in config.txt".to_string())
     };
+
+    // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
+    // `sound::Switch` for why this is shared state rather than a value copied into the loop.
+    let sound = sound::Switch::new(config.sound);
 
     let mut indicator = AppIndicator::new("github_notifications", "");
     indicator.set_status(AppIndicatorStatus::Active);
@@ -330,18 +349,107 @@ fn main() {
         let _ = update_wake_tx.send(scheduler::Wake::UpdateNow);
     });
 
+    // ── Settings ─────────────────────────────────────────────────────────────
+    //
+    // A submenu: two checkboxes for the settings people actually change, and the file underneath for
+    // the ones that are a list or a level rather than a switch.
+    //
+    // **Every handler here re-enters itself.** `set_active` emits `toggled` exactly as a click does,
+    // so the revert after a failed write would run the handler again, fail again, and revert again.
+    // A shared `Cell` closed over by both handlers is the guard; `Rc<Cell<bool>>` rather than an
+    // atomic because GTK signal handlers all run on this one thread and nothing else touches it.
+    let reverting = std::rc::Rc::new(std::cell::Cell::new(false));
+
+    let hoot_item = gtk::CheckMenuItem::with_label(state::HOOT_MENU_LABEL);
+    hoot_item.set_active(sound.is_on());
+    let hoot_sound = sound.clone();
+    let hoot_config_path = app_asset_path.clone();
+    let hoot_reverting = reverting.clone();
+    hoot_item.connect_toggled(move |item| {
+        if hoot_reverting.get() {
+            return;
+        }
+        let on = item.is_active();
+        // The live flag first, so a pull request arriving in this same instant obeys the new answer
+        // whatever the disk does; the file second, since it only decides what the next start believes.
+        hoot_sound.set(on);
+        if let Err(e) = config::set_sound(&hoot_config_path, on) {
+            errorln!("could not save the hoot setting ({e})");
+            report_in_background(
+                "githoot-tray: could not save the setting",
+                format!(
+                    "The hoot is {} for now, but the setting could not be written, so the next start \
+                     will not remember it.\n\n{e}",
+                    if on { "on" } else { "off" }
+                ),
+            );
+            hoot_sound.set(!on);
+            hoot_reverting.set(true);
+            item.set_active(!on);
+            hoot_reverting.set(false);
+            return;
+        }
+        infoln!("hoot {}", if on { "on" } else { "off" });
+        // Enabling plays one, because the question behind ticking this box is "what will I hear",
+        // and a silent tick leaves you waiting for a pull request to find out. Nothing plays on the
+        // way off, where the silence is the confirmation.
+        if on {
+            sound::hoot();
+        }
+    });
+
+    // Read from the session's own autostart directory rather than from `config.txt`: the OS entry is
+    // the only record of this answer, and a copy in the settings file would be a second one to keep in
+    // step with a directory the user can edit behind our back. See `docs/startup.md`.
+    let autostart_item = gtk::CheckMenuItem::with_label(state::AUTOSTART_MENU_LABEL);
+    autostart_item.set_active(autostart::is_enabled());
+    let autostart_reverting = reverting.clone();
+    autostart_item.connect_toggled(move |item| {
+        if autostart_reverting.get() {
+            return;
+        }
+        let on = item.is_active();
+        match autostart::set_enabled(on) {
+            Ok(()) => infoln!("start at sign-in {}", if on { "on" } else { "off" }),
+            Err(e) => {
+                // A dialog rather than only a log line: the symptom of a tick that did not take is the
+                // app not being there after a sign-in weeks later, which nobody connects back to this.
+                errorln!("could not change the startup entry ({e})");
+                report_in_background(
+                    "githoot-tray: could not change startup",
+                    format!("The startup entry was not changed.\n\n{e}"),
+                );
+                autostart_reverting.set(true);
+                item.set_active(!on);
+                autostart_reverting.set(false);
+            }
+        }
+    });
+
     // Opens the file and hands off to the poll thread, which arms the watcher that offers a restart once
     // the edits settle. The open happens here because it is instant; the fifteen-minute watch does not.
-    let settings_item = MenuItem::with_label(state::SETTINGS_MENU_LABEL);
+    let settings_file_item = MenuItem::with_label(state::SETTINGS_FILE_MENU_LABEL);
     let settings_path = config::config_path(&app_asset_path);
     let settings_wake_tx = wake_tx.clone();
-    settings_item.connect_activate(move |_| {
+    settings_file_item.connect_activate(move |_| {
         // Only arm the watch if a window is actually coming — a failed open would otherwise leave a
         // thread reading a file nobody is editing.
         if settings_watch::open_for_editing(&settings_path) {
             let _ = settings_wake_tx.send(scheduler::Wake::SettingsOpened);
         }
     });
+
+    let settings_menu = Menu::new();
+    settings_menu.append(&hoot_item);
+    settings_menu.append(&autostart_item);
+    // The rule separates what a click changes from what a click opens.
+    settings_menu.append(&gtk::SeparatorMenuItem::new());
+    settings_menu.append(&settings_file_item);
+    // `show_all` on the parent menu does **not** reach in here: a `GtkMenuItem` does not iterate its
+    // submenu as a child, so the three items above would exist, be attached, and never be drawn.
+    settings_menu.show_all();
+    let settings_item = MenuItem::with_label(state::SETTINGS_MENU_LABEL);
+    settings_item.set_submenu(Some(&settings_menu));
 
     // Sibling of the Authenticate entry: conditional, and the counterpart of a mark on the icon. Since
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
@@ -422,7 +530,7 @@ fn main() {
             // sides of each pairing. A literal `[a, b, c]` compiles, type-checks, and silently swaps
             // which bar a setting controls.
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
-            sound: config.sound,
+            sound: sound.clone(),
             status_components: config.status_components.clone(),
         },
         wake_rx,
@@ -493,7 +601,7 @@ fn fatal(message: &str) -> ! {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn main() {
     use scheduler::{TrayEvent, Update};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, Submenu};
     use tray_icon::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use winit::application::ApplicationHandler;
     use winit::event::WindowEvent;
@@ -579,6 +687,10 @@ fn main() {
         github_app::PrStatus::Off("PR status off in config.txt".to_string())
     };
 
+    // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
+    // `sound::Switch` for why this is shared state rather than a value copied into the loop.
+    let sound = sound::Switch::new(config.sound);
+
     // ── Tray ─────────────────────────────────────────────────────────────────
 
     /// The tray icon, its menu, and what we believe is currently on screen.
@@ -608,8 +720,24 @@ fn main() {
         pr_inbox_item_id: tray_icon::menu::MenuId,
         /// Always present, so unlike the conditional entries it is never taken out or put back — but it
         /// still has to be re-appended by every `rebuild_menu`, which is exactly what it was missing.
-        settings_item: tray_icon::menu::MenuItem,
-        settings_item_id: tray_icon::menu::MenuId,
+        ///
+        /// A submenu, so the settings worth a click are one rather than a file to edit. Its children
+        /// are held below because their state is read and written on every toggle; the submenu itself
+        /// is held because `rebuild_menu` re-appends it.
+        settings_menu: tray_icon::menu::Submenu,
+        /// The hoot checkbox. Its tick is the truth the user sees, so a failed write puts it back.
+        hoot_item: tray_icon::menu::CheckMenuItem,
+        hoot_item_id: tray_icon::menu::MenuId,
+        /// The start-at-sign-in checkbox. Backed by the OS, not by `config.txt` — see `autostart`.
+        autostart_item: tray_icon::menu::CheckMenuItem,
+        autostart_item_id: tray_icon::menu::MenuId,
+        /// The old Settings entry, now the last item inside the submenu: `config.txt` still holds the
+        /// settings that are a list or a level rather than a switch.
+        ///
+        /// Only the id is kept, unlike every entry above. Submenu children are never taken out and put
+        /// back — `rebuild_menu` re-appends the submenu, which still holds them — and nothing here
+        /// rewrites this one's label, so the handle would be a field nobody reads.
+        settings_file_item_id: tray_icon::menu::MenuId,
         /// Shown only while GitHub reports an incident.
         status_item: tray_icon::menu::MenuItem,
         status_item_id: tray_icon::menu::MenuId,
@@ -662,7 +790,7 @@ fn main() {
     /// moments: on Windows the tray must be created up front on the main thread, while on macOS an
     /// `NSStatusItem` has nothing to attach to until `NSApplication` is running. Returning `Result`
     /// rather than calling `fatal` directly keeps that decision with the caller.
-    fn build_tray() -> Result<Tray, String> {
+    fn build_tray(sound_on: bool) -> Result<Tray, String> {
         // Decode and composite the embedded PNG assets.
         let icons = icons::load_tray_icons()?;
 
@@ -687,8 +815,29 @@ fn main() {
         let authenticate_item_id = authenticate_item.id().clone();
         let update_item = MenuItem::new(state::UPDATE_MENU_LABEL, true, None);
         let update_item_id = update_item.id().clone();
-        let settings_item = MenuItem::new(state::SETTINGS_MENU_LABEL, true, None);
-        let settings_item_id = settings_item.id().clone();
+        // The checkboxes are built with the state they are describing, not with a default: a tick
+        // that has to be corrected by the first poll would be wrong on screen for as long as that
+        // takes, and this one is read from the registry (or the plist, or the desktop entry) here and
+        // now. Cheap enough to do on the way in, and the only way the box can open telling the truth.
+        let hoot_item = CheckMenuItem::new(state::HOOT_MENU_LABEL, true, sound_on, None);
+        let hoot_item_id = hoot_item.id().clone();
+        let autostart_item =
+            CheckMenuItem::new(state::AUTOSTART_MENU_LABEL, true, autostart::is_enabled(), None);
+        let autostart_item_id = autostart_item.id().clone();
+        let settings_file_item = MenuItem::new(state::SETTINGS_FILE_MENU_LABEL, true, None);
+        let settings_file_item_id = settings_file_item.id().clone();
+        let settings_menu = Submenu::with_items(
+            state::SETTINGS_MENU_LABEL,
+            true,
+            &[
+                &hoot_item,
+                &autostart_item,
+                // The rule separates what a click changes from what a click opens.
+                &tray_icon::menu::PredefinedMenuItem::separator(),
+                &settings_file_item,
+            ],
+        )
+        .map_err(|e| format!("Failed to build the settings submenu: {e}"))?;
         let status_item = MenuItem::new(state::STATUS_MENU_LABEL, true, None);
         let status_item_id = status_item.id().clone();
         let quit_item = MenuItem::new("Quit", true, None);
@@ -700,12 +849,12 @@ fn main() {
         // something that may already be authorized is the misleading direction. The first update
         // arrives within a second and puts it in if it is needed.
         for (item, what) in [
-            (&open_item, "open"),
+            (&open_item as &dyn tray_icon::menu::IsMenuItem, "open"),
             (&reviews_item, "reviews"),
             (&ready_to_merge_item, "ready to merge"),
             (&changes_requested_item, "changes requested"),
             (&pr_inbox_item, "PR inbox"),
-            (&settings_item, "settings"),
+            (&settings_menu as &dyn tray_icon::menu::IsMenuItem, "settings"),
             (&quit_item, "quit"),
         ] {
             menu.append(item)
@@ -744,8 +893,12 @@ fn main() {
             changes_requested_item_id,
             pr_inbox_item,
             pr_inbox_item_id,
-            settings_item,
-            settings_item_id,
+            settings_menu,
+            hoot_item,
+            hoot_item_id,
+            autostart_item,
+            autostart_item_id,
+            settings_file_item_id,
             status_item,
             status_item_id,
             authenticate_item,
@@ -777,7 +930,7 @@ fn main() {
     // — an `NSStatusItem` created before `NSApplication` exists never appears in the menu bar — so
     // there it is deferred to `App::resumed`.
     #[cfg(target_os = "windows")]
-    let tray = match build_tray() {
+    let tray = match build_tray(sound.is_on()) {
         Ok(tray) => Some(tray),
         Err(e) => fatal(&e),
     };
@@ -852,7 +1005,7 @@ fn main() {
             // sides of each pairing. A literal `[a, b, c]` compiles, type-checks, and silently swaps
             // which bar a setting controls.
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
-            sound: config.sound,
+            sound: sound.clone(),
             status_components: config.status_components.clone(),
         },
         wake_rx,
@@ -871,9 +1024,11 @@ fn main() {
         /// visibly wrong for a whole poll interval.
         pending: Option<Update>,
         wake_tx: std::sync::mpsc::Sender<scheduler::Wake>,
-        /// Resolved once rather than rebuilt per click, and held here for the same reason the Linux
-        /// closure captures it: the click handler has no access to `app_asset_path`.
-        settings_path: std::path::PathBuf,
+        /// Held for the same reason the Linux closures capture it: a click handler otherwise has no
+        /// way back to the settings file it opens and the one setting it writes.
+        app_asset_path: std::path::PathBuf,
+        /// The menu's handle on the hoot switch. The poll loop holds the other one.
+        sound: sound::Switch,
     }
 
     impl App {
@@ -932,10 +1087,16 @@ fn main() {
                 // Only asks. The download, verification and swap all happen on the update thread —
                 // see `scheduler::Wake::UpdateNow`.
                 let _ = self.wake_tx.send(scheduler::Wake::UpdateNow);
-            } else if *id == tray.settings_item_id {
+            } else if *id == tray.hoot_item_id {
+                // `muda` has already flipped the tick, so the item is the request rather than the
+                // state: read it, try to make it true, and put it back if that fails.
+                self.set_hoot(tray.hoot_item.is_checked(), &tray.hoot_item);
+            } else if *id == tray.autostart_item_id {
+                self.set_autostart(tray.autostart_item.is_checked(), &tray.autostart_item);
+            } else if *id == tray.settings_file_item_id {
                 // Opening is instant; the watch that follows is not, which is why only the open happens
                 // here and the fifteen-minute watch is armed on the poll thread.
-                if settings_watch::open_for_editing(&self.settings_path) {
+                if settings_watch::open_for_editing(&config::config_path(&self.app_asset_path)) {
                     let _ = self.wake_tx.send(scheduler::Wake::SettingsOpened);
                 }
             } else if *id == tray.status_item_id {
@@ -944,6 +1105,60 @@ fn main() {
                 }
             } else if *id == tray.quit_item_id {
                 event_loop.exit();
+            }
+        }
+
+        /// Switches the hoot on or off: the live flag, the file, and one hoot to prove it.
+        ///
+        /// The order matters. The switch is set first so a PR arriving in the same instant obeys the
+        /// new answer whatever the disk does, and the file is written second because it only decides
+        /// what the *next* start believes.
+        ///
+        /// **Enabling plays one hoot**, which is the only way to answer the question someone ticking
+        /// this box is actually asking: not "is the setting on" but "what will I hear". A silent tick
+        /// leaves you waiting for a pull request to find out whether it works. Nothing plays on the way
+        /// off, where silence is the confirmation.
+        fn set_hoot(&self, on: bool, item: &tray_icon::menu::CheckMenuItem) {
+            self.sound.set(on);
+            if let Err(e) = config::set_sound(&self.app_asset_path, on) {
+                // The switch above still applies for this run, so the tick is not a lie about *now* —
+                // but it would be one about the next start, which is what the user just asked for.
+                errorln!("could not save the hoot setting ({e})");
+                report_in_background(
+                    "githoot-tray: could not save the setting",
+                    format!(
+                        "The hoot is {} for now, but the setting could not be written, so the next \
+                         start will not remember it.\n\n{e}",
+                        if on { "on" } else { "off" }
+                    ),
+                );
+                item.set_checked(!on);
+                self.sound.set(!on);
+                return;
+            }
+            infoln!("hoot {}", if on { "on" } else { "off" });
+            if on {
+                sound::hoot();
+            }
+        }
+
+        /// Registers or unregisters the startup entry, and keeps the tick honest about the result.
+        ///
+        /// Reported in a dialog rather than only logged, unlike most failures here: this one is
+        /// invisible until the day the app is not there after a sign-in, weeks later, and by then
+        /// nobody connects it to a tick that did not take.
+        fn set_autostart(&self, on: bool, item: &tray_icon::menu::CheckMenuItem) {
+            match autostart::set_enabled(on) {
+                Ok(()) => infoln!("start at sign-in {}", if on { "on" } else { "off" }),
+                Err(e) => {
+                    errorln!("could not change the startup entry ({e})");
+                    report_in_background(
+                        "githoot-tray: could not change startup",
+                        format!("The startup entry was not changed.\n\n{e}"),
+                    );
+                    // Back to what the OS actually says, which after a failure is what it said before.
+                    item.set_checked(!on);
+                }
             }
         }
 
@@ -1104,7 +1319,7 @@ fn main() {
                 // silently deleted it on the first rebuild — the hazard a full rebuild trades for not
                 // having to compute insert positions, and the reason every entry must be listed here.
                 (&bottom_separator, true, "bottom-separator"),
-                (&self.settings_item, true, "settings"),
+                (&self.settings_menu, true, "settings"),
                 (&self.quit_item, true, "quit"),
             ];
 
@@ -1231,7 +1446,7 @@ fn main() {
                 return;
             }
 
-            let mut tray = match build_tray() {
+            let mut tray = match build_tray(self.sound.is_on()) {
                 Ok(tray) => tray,
                 Err(e) => fatal(&e),
             };
@@ -1315,7 +1530,8 @@ fn main() {
         tray,
         pending: None,
         wake_tx,
-        settings_path: config::config_path(&app_asset_path),
+        app_asset_path: app_asset_path.clone(),
+        sound,
     };
 
     if let Err(e) = event_loop.run_app(&mut app) {

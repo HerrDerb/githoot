@@ -88,6 +88,25 @@ pub fn offer_on_first_run(first_run: FirstRun) {
     });
 }
 
+/// Registers or unregisters the startup entry, for the tray's Start-at-sign-in checkbox.
+///
+/// The one place the "which executable" decision lives, so the menu never has to make it. Same
+/// `current_exe` as [`offer_on_first_run`], and for the same reason: `update::resolve_current_exe`
+/// refuses anything under `target/`, which would make the checkbox impossible to try out from a
+/// development build.
+///
+/// Synchronous, unlike `offer_on_first_run`: this is a registry write or a file delete with no dialog
+/// in front of it, and the caller is a menu click that wants to know whether to leave the tick where
+/// the user just put it.
+pub fn set_enabled(on: bool) -> Result<(), String> {
+    if !on {
+        return disable();
+    }
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not locate this executable ({e})"))?;
+    enable(&exe)
+}
+
 // ─── Windows: the little bit of registry this needs ──────────────────────────
 //
 // Hand-rolled on `winapi`, which is already a dependency, rather than adding `windows-registry` for
@@ -326,15 +345,15 @@ impl Key {
 
     /// Removes a value.
     ///
-    /// Test-only, and deliberately not offered to the rest of the app. Nothing here ever
-    /// un-registers: the question is asked once and the OS entry is the only record of the answer, so
-    /// a `disable` would be a second way to change a state nothing reconciles (see the module docs).
-    /// This exists so the round-trip test can clean up after itself rather than leaving a stray
-    /// startup entry in a real user's registry.
+    /// Test-only until the tray grew a Start-at-sign-in checkbox, which is what unticking it does.
+    /// The old note here said the app never un-registers, on the grounds that the OS entry is the
+    /// only record of the answer and a second way to change it would be a second source of truth.
+    /// The checkbox does not break that: it *reads* the OS entry every time the menu is built, so
+    /// there is still exactly one record, and this is how the user edits it.
     ///
-    /// Already gone counts as success: the contract is "this value is not there", and a test cleaning
-    /// up after a failure part-way through should not have to know whether the write ever happened.
-    #[cfg(test)]
+    /// Already gone counts as success: the contract is "this value is not there", and neither an
+    /// unticked box nor a test cleaning up after a part-way failure should have to know whether the
+    /// write ever happened.
     fn delete_value(&self, name: &str) -> Result<(), String> {
         use winapi::shared::winerror::ERROR_FILE_NOT_FOUND;
         use winapi::um::winreg::RegDeleteValueW;
@@ -390,12 +409,36 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// because the only symptom is the app not being there weeks later. Better to say so now.
 #[cfg(target_os = "windows")]
 pub fn enable(exe: &Path) -> Result<(), String> {
+    enable_in(RUN_KEY, exe)
+}
+
+/// Whether an entry is registered at all.
+///
+/// **Presence, not correctness.** An entry left by an install in another directory still starts the
+/// app at sign-in, so the checkbox has to show it ticked; ticking it again rewrites the value to this
+/// executable, which is the repair. Asking "does it point at *me*" would show an empty box beside an
+/// app that does start itself, and unticking would then be the only way to fix a path nobody can see.
+#[cfg(target_os = "windows")]
+pub fn is_enabled() -> bool {
+    is_enabled_in(RUN_KEY)
+}
+
+/// Removes the entry. Nothing registered is success: the user asked for the box to be empty, and it is.
+#[cfg(target_os = "windows")]
+pub fn disable() -> Result<(), String> {
+    disable_in(RUN_KEY)
+}
+
+/// The three operations against a named key, so the tests can exercise the whole round trip without
+/// registering a real startup entry on the machine running them. Only the path differs.
+#[cfg(target_os = "windows")]
+fn enable_in(run_key: &str, exe: &Path) -> Result<(), String> {
     use winapi::um::winnt::{KEY_QUERY_VALUE, KEY_SET_VALUE};
 
     let command = run_command(exe);
     // `create`, not `open`: a profile that has never had a startup entry has no `Run` key at all —
     // see `Key::create` for the CI run that proved it. That is the fresh install this feature is for.
-    let key = Key::create(RUN_KEY, KEY_SET_VALUE | KEY_QUERY_VALUE)?;
+    let key = Key::create(run_key, KEY_SET_VALUE | KEY_QUERY_VALUE)?;
     key.set_string(ENTRY_NAME, &command)?;
 
     match key.string(ENTRY_NAME) {
@@ -405,6 +448,28 @@ pub fn enable(exe: &Path) -> Result<(), String> {
         }
         None => Err(format!("the {ENTRY_NAME} value was written but is not there when read back")),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn is_enabled_in(run_key: &str) -> bool {
+    use winapi::um::winnt::KEY_QUERY_VALUE;
+
+    // `open`, never `create`: reading whether something is registered must not create the key it reads
+    // from. An absent key is the answer rather than an obstacle — it is what a profile that has never
+    // had a startup entry looks like.
+    Key::open(run_key, KEY_QUERY_VALUE).is_ok_and(|key| key.string(ENTRY_NAME).is_some())
+}
+
+#[cfg(target_os = "windows")]
+fn disable_in(run_key: &str) -> Result<(), String> {
+    use winapi::um::winnt::KEY_SET_VALUE;
+
+    // An absent key means nothing is registered, which is the state being asked for. Creating it in
+    // order to delete nothing out of it would leave a key behind as the only trace of unticking a box.
+    let Ok(key) = Key::open(run_key, KEY_SET_VALUE) else {
+        return Ok(());
+    };
+    key.delete_value(ENTRY_NAME)
 }
 
 /// The command line the `Run` value holds.
@@ -611,12 +676,64 @@ fn refers_to(recorded: &str, exe: &Path) -> bool {
     }
 }
 
+/// Deletes a file, treating "it was not there" as success.
+///
+/// Shared by the two platforms whose entry is a file. An entry the user has already deleted by hand is
+/// the state they are asking for, so reporting it as a failure would put an error in front of someone
+/// who got what they wanted.
+#[cfg(not(target_os = "windows"))]
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {} ({e})", path.display())),
+    }
+}
+
 // ─── macOS ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
 pub fn enable(exe: &Path) -> Result<(), String> {
     let dir = launch_agents_dir()?;
     write_launch_agent(&dir, exe)
+}
+
+/// Whether a Launch Agent is installed. Presence, not correctness — see the Windows [`is_enabled`].
+///
+/// A home directory that cannot be resolved reads as "not enabled": nothing can be starting from a
+/// plist nobody can find, and the alternative is a checkbox showing a state it could not verify.
+#[cfg(target_os = "macos")]
+pub fn is_enabled() -> bool {
+    launch_agents_dir().is_ok_and(|dir| is_enabled_in(&dir))
+}
+
+/// Removes the Launch Agent.
+///
+/// Deleting the plist is the whole of it, with no `launchctl unload` to match: the agent carries
+/// `RunAtLoad` and deliberately no `KeepAlive`, so nothing of it is still running once the app has
+/// been started. `launchd` reads the directory again at the next sign-in, the only moment it matters.
+#[cfg(target_os = "macos")]
+pub fn disable() -> Result<(), String> {
+    let dir = launch_agents_dir()?;
+    disable_in(&dir)
+}
+
+/// The two operations against a named directory, so the tests need no `~/Library/LaunchAgents`.
+#[cfg(target_os = "macos")]
+fn is_enabled_in(dir: &Path) -> bool {
+    launch_agent_path(dir).exists()
+}
+
+#[cfg(target_os = "macos")]
+fn disable_in(dir: &Path) -> Result<(), String> {
+    remove_if_present(&launch_agent_path(dir))
+}
+
+/// Where the plist goes. One definition, so what `enable` writes is what `disable` deletes and what
+/// `is_enabled` looks for.
+#[cfg(target_os = "macos")]
+fn launch_agent_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(format!("{}.plist", launch_agent_label()))
 }
 
 /// The reverse-DNS label `launchd` files everything under, and the plist's file name bar the suffix.
@@ -644,7 +761,7 @@ fn write_launch_agent(dir: &Path, exe: &Path) -> Result<(), String> {
     // `create_dir_all`: `~/Library/LaunchAgents` genuinely does not exist on an account that has never
     // installed one, so a plain write would fail on exactly the fresh machine this runs on.
     std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let path = dir.join(format!("{}.plist", launch_agent_label()));
+    let path = launch_agent_path(dir);
     std::fs::write(&path, launch_agent(exe))
         .map_err(|e| format!("could not write {}: {e}", path.display()))
 }
@@ -695,6 +812,34 @@ fn xml_escape(s: &str) -> String {
 pub fn enable(exe: &Path) -> Result<(), String> {
     let dir = autostart_dir()?;
     write_desktop_entry(&dir, exe)
+}
+
+/// Whether an autostart entry is installed. Presence, not correctness — see the Windows [`is_enabled`].
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn is_enabled() -> bool {
+    autostart_dir().is_ok_and(|dir| is_enabled_in(&dir))
+}
+
+/// Removes the autostart entry.
+///
+/// The file is deleted rather than left in place with `X-GNOME-Autostart-enabled=false`. That key is a
+/// GNOME extension every other session ignores, so an entry "disabled" that way would still start the
+/// app on KDE, Xfce and the rest — a checkbox that unticks itself and changes nothing.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn disable() -> Result<(), String> {
+    let dir = autostart_dir()?;
+    disable_in(&dir)
+}
+
+/// The two operations against a named directory, so the tests need no `~/.config/autostart`.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn is_enabled_in(dir: &Path) -> bool {
+    dir.join(DESKTOP_FILE).exists()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn disable_in(dir: &Path) -> Result<(), String> {
+    remove_if_present(&dir.join(DESKTOP_FILE))
 }
 
 /// The entry's file name. Named after the binary rather than after [`ENTRY_NAME`], because this is the
@@ -978,6 +1123,46 @@ mod windows_tests {
         let key = Key::create(RUN_KEY, KEY_QUERY_VALUE).expect("Run must be reachable");
         assert_eq!(key.string(ENTRY_NAME).as_deref(), Some(run_command(&exe).as_str()));
     }
+
+    // ── Reading and removing the entry ──────────────────────────────────────
+    //
+    // Against the same scratch key the rest of these tests use, never the real `Run`: the whole round
+    // trip can be proved without registering a startup entry on the machine running `cargo test`.
+
+    /// The three states the menu's checkbox moves between: nothing registered, registered, and
+    /// removed again. The second removal is not padding — a user can untick a box whose entry they
+    /// have already cleared in Task Manager, and that has to be success rather than an error dialog.
+    #[test]
+    fn an_entry_can_be_written_read_back_and_removed() {
+        let root = test_root("autostart-toggle");
+        let _cleanup = Cleanup { root: root.clone(), children: Vec::new() };
+        let exe = std::env::current_exe().expect("the test binary has a path");
+
+        assert!(!is_enabled_in(&root), "a key that does not exist yet registers nothing");
+
+        enable_in(&root, &exe).expect("writing the entry must succeed");
+        assert!(is_enabled_in(&root), "a written entry must read back as enabled");
+
+        disable_in(&root).expect("removing the entry must succeed");
+        assert!(!is_enabled_in(&root), "a removed entry must read back as disabled");
+
+        disable_in(&root).expect("removing an entry that is already gone is not a failure");
+    }
+
+    /// A `Run` key that does not exist at all is what a profile that has never had a startup entry
+    /// looks like — see `Key::create`. Reading it must answer "not enabled" rather than fail, and
+    /// asking to remove an entry from it must not create the key in order to delete nothing.
+    #[test]
+    fn a_run_key_that_does_not_exist_reads_as_not_enabled() {
+        let absent = test_root("autostart-absent");
+
+        assert!(!is_enabled_in(&absent));
+        disable_in(&absent).expect("nothing to remove is success, not failure");
+        assert!(
+            Key::open(&absent, KEY_QUERY_VALUE).is_err(),
+            "asking to disable must not have created the key"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -1016,6 +1201,28 @@ mod macos_tests {
         let written = std::fs::read_to_string(dir.join(format!("com.githoot.{ENTRY_NAME}.plist")))
             .expect("the plist must be where the loader looks for it");
         assert_eq!(written, launch_agent(exe));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The three states the menu's checkbox turns on, against a temp directory rather than the real
+    /// `~/Library/LaunchAgents`. Removing twice is included because a user can uncheck a box whose
+    /// plist they have already deleted by hand.
+    #[test]
+    fn a_launch_agent_can_be_written_read_back_and_removed() {
+        let dir = std::env::temp_dir().join(format!("githoot-agent-toggle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot-tray");
+
+        assert!(!is_enabled_in(&dir), "an empty directory holds no agent");
+
+        write_launch_agent(&dir, exe).expect("the plist must be written");
+        assert!(is_enabled_in(&dir), "a written plist must read back as enabled");
+
+        disable_in(&dir).expect("removing the plist must succeed");
+        assert!(!is_enabled_in(&dir), "a removed plist must read back as disabled");
+
+        disable_in(&dir).expect("removing a plist that is already gone is not a failure");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1060,6 +1267,28 @@ mod unix_tests {
         let written = std::fs::read_to_string(dir.join("githoot-tray.desktop"))
             .expect("the entry must be where the session looks for it");
         assert_eq!(written, desktop_entry(exe));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The three states the menu's checkbox turns on, against a temp directory rather than the real
+    /// `~/.config/autostart`. Removing twice is included because a user can uncheck a box whose entry
+    /// their desktop's own startup tool has already deleted.
+    #[test]
+    fn a_desktop_entry_can_be_written_read_back_and_removed() {
+        let dir = std::env::temp_dir().join(format!("githoot-desktop-toggle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let exe = Path::new("/usr/local/bin/githoot-tray");
+
+        assert!(!is_enabled_in(&dir), "an empty directory holds no entry");
+
+        write_desktop_entry(&dir, exe).expect("the entry must be written");
+        assert!(is_enabled_in(&dir), "a written entry must read back as enabled");
+
+        disable_in(&dir).expect("removing the entry must succeed");
+        assert!(!is_enabled_in(&dir), "a removed entry must read back as disabled");
+
+        disable_in(&dir).expect("removing an entry that is already gone is not a failure");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

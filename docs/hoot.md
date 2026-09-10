@@ -31,7 +31,9 @@ dependency tree for one short sound, and a Linux box with none of those players 
 in the log rather than failing. Playback runs on its own thread and never delays a poll; hoots that
 overlap are dropped rather than layered.
 
-Set `sound=off` in `config.txt` to silence it. That switches off the sound and nothing else — the icon,
+Untick **Settings ▸ Hoot on new pull requests** to silence it, which takes effect at once and writes
+`sound=off` to `config.txt` for the next start; setting that key by hand does the same thing. Ticking the
+box plays one hoot, so you hear what you have just switched on. That switches off the sound and nothing else — the icon,
 the tooltip and the menu counts behave identically either way, so silence costs no information. There is
 no volume setting; the system mixer is the only control over how loud it is.
 

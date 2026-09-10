@@ -198,11 +198,33 @@ pub const UPDATE_MENU_LABEL: &str = "Install update";
 /// apart at a glance.
 pub const STATUS_MENU_LABEL: &str = "GitHub is githubing again, check status";
 
-/// Text of the tray menu item that opens `config.txt`.
+/// Text of the tray's Settings submenu.
 ///
 /// Always present, unlike every other entry here: it needs no credential, no poll and no available
 /// update, and it is the one thing that still works when everything else is switched off.
-pub const SETTINGS_MENU_LABEL: &str = "Open Settings";
+///
+/// A submenu since 1.16.0. It used to be a single entry that opened `config.txt`, which is still in
+/// there as its last item — the two settings people actually change now have a checkbox, and the file
+/// keeps the ones that are a list or a level rather than a switch.
+pub const SETTINGS_MENU_LABEL: &str = "Settings";
+
+/// Text of the Settings entry that opens `config.txt` itself.
+///
+/// Named "file" rather than "Open Settings" now that it sits *inside* Settings, where the old wording
+/// would have read as a second, different settings screen.
+pub const SETTINGS_FILE_MENU_LABEL: &str = "Open settings file";
+
+/// Text of the Settings checkbox for the hoot.
+///
+/// Says what it does rather than naming the `sound` key: the file is one click away for anyone who
+/// wants the key, and "sound" alone would suggest the app makes noise for more than this one thing.
+pub const HOOT_MENU_LABEL: &str = "Hoot on new pull requests";
+
+/// Text of the Settings checkbox for starting with the session.
+///
+/// The one entry in the whole menu backed by the operating system rather than by `config.txt` — see
+/// `autostart`, and `docs/startup.md` for why that stays true.
+pub const AUTOSTART_MENU_LABEL: &str = "Start at sign-in";
 
 /// One of the three independent PR-search signals.
 ///

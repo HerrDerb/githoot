@@ -14,7 +14,7 @@
 | **Open Changes Requested (N)** | A reviewer asked for changes and it is still on you | Opens the exact PRs the bar counts, one tab each; falls back to GitHub's changes-requested list when it has no confirmed list (see below) |
 | **Open PR inbox** | None of the three entries above is shown | Opens [GitHub's own PR inbox](https://github.com/pulls/inbox) |
 | *— separator —* | Always | |
-| **Open Settings** | Always | Opens `config.txt`, then offers a restart once your edits settle (see below) |
+| **Settings ▸** | Always | A submenu: two checkboxes, and the settings file (see below) |
 | **Quit** | Always | Exits |
 
 The update and GitHub-status entries come first: they are about the app and the service rather than about
@@ -44,11 +44,52 @@ that page is simply your open PRs; for changes requested it is GitHub's changes-
 
 ---
 
+## The Settings submenu
+
+| Item | Does | Where the answer is kept |
+|---|---|---|
+| ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
+| ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
+| **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
+
+Both checkboxes **take effect the moment you click them**, with no restart: the hoot is a flag the poll
+loop reads each cycle, and the startup entry is written straight to the OS. Everything else in
+`config.txt` is still read only at startup, which is why editing the file still ends in a restart
+prompt.
+
+**Ticking Hoot plays one hoot.** The question behind that box is not "is the setting on" but "what will
+I hear", and a silent tick leaves you waiting for a pull request to find out whether it works. Unticking
+plays nothing; the silence is the confirmation.
+
+**The menu closes when you click a checkbox.** Every platform draws this menu itself — a native
+`TrackPopupMenu` on Windows, an `NSMenu` on macOS, and on Linux whatever your panel makes of the menu we
+export over DBus — and all three dismiss the popup on any click, with no flag to say otherwise. Re-opening
+it afterwards was tried and thrown away: a submenu is positioned by Windows against its parent, that
+position cannot be read back, and a menu that reappears somewhere else is worse than one that closes.
+
+So two settings means two trips into the menu. The tick you find there next time is read fresh: the hoot
+from the file, the startup entry from the OS.
+
+**Start at sign-in shows presence, not correctness.** An entry left behind by a copy of GitHoot in
+another directory still starts something at sign-in, so the box is ticked. Ticking an already-ticked box
+is not possible, but *unticking and ticking again* rewrites the entry to point at the copy you are
+running, which is the repair for a stale path.
+
+A failure is never silent: if the setting cannot be written, or the startup entry cannot be changed, the
+tick goes back to what it was and a dialog says why.
+
+---
+
 ## Settings
 
 `~/.githoot-tray/config.txt` is created on first run with every setting at its default. An existing
-file is **never** rewritten, so your edits are safe — which also means a later version's new keys will not
-appear in it, and the table below is the complete list.
+file is **never** rewritten wholesale, so your edits are safe — which also means a later version's new keys
+will not appear in it, and the table below is the complete list.
+
+The one thing that edits an existing file is the **Hoot** checkbox, and it changes exactly one value
+line: comments, blank lines, spacing and keys this version has never heard of all survive it byte for
+byte. If the file has no `sound` line at all — every file written before that key existed — the key is
+appended rather than the file regenerated.
 
 > **Upgrading from `git-system-tray`?** The app was renamed, and with it the asset names, the binary
 > and this directory — settings and log used to live in `~/.github-trayicon/`. Nothing is migrated
@@ -75,7 +116,9 @@ silently disable a feature. Two keys are not toggles: `logLevel` takes `error` o
 **Two things are deliberately not keys here:** whether GitHoot starts when you sign in, and whether its
 icon sits on the Windows taskbar or in the overflow flyout. Both are stored by the operating system
 already — a registry value, an autostart entry, a Launch Agent — so a copy in this file would be a
-second source of truth to keep in step with reality. The startup question is asked once, on a first run
+second source of truth to keep in step with reality. That is why **Start at sign-in** is a checkbox and
+not a key: it reads the OS entry every time the menu opens and writes the same one when you click, so
+there is still exactly one record of the answer. The startup question is also asked once, on a first run
 → [Startup](startup.md).
 
 ## Which parts of GitHub count as an outage
@@ -108,8 +151,8 @@ statusComponents=Git Operations, Webhooks, API Requests, Issues, Pull Requests, 
 Naming components costs one extra request per five minutes' check: `components.json` rather than the
 219-byte `status.json`. An unfiltered install still reads the small one.
 
-**Restart after editing — the menu offers it.** Settings are read once at startup, so **Open Settings**
-opens the file and then watches it. Once the contents change and stay unchanged for a few seconds, a dialog
+**Restart after editing — the menu offers it.** Settings are read once at startup, so **Open settings
+file** opens the file and then watches it. Once the contents change and stay unchanged for a few seconds, a dialog
 offers to restart. Details worth knowing:
 
 - It watches the **file**, not the editor. The usual handler for a text file is a DBus-activated,

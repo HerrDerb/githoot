@@ -4,6 +4,10 @@ Two things GitHoot Tray does on the way in, both about being *there* rather than
 Neither is a `config.txt` key, for the same reason: the operating system already stores the answer, and
 a second copy in a settings file would be one more thing that can disagree with reality.
 
+Starting with your session is also a checkbox: **Settings ▸ Start at sign-in**. It reads the OS entry
+described below every time the menu opens, and writes that same entry when you click it — so it is a way
+to *edit* the one record, not a second record of the answer. Everything on this page still applies.
+
 ## The question you get exactly once
 
 On a genuinely first run, GitHoot asks:
@@ -18,11 +22,10 @@ never asked. Every later start finds the file and says nothing.
 
 Three consequences worth knowing:
 
-- **If you already had a `config.txt` before this feature shipped, you will never be asked.** Add the
-  entry by hand from the table below if you want it, or delete `config.txt` to be asked on the next
-  start — the file is rewritten with every setting at its default, so you lose your edits.
+- **If you already had a `config.txt` before this feature shipped, you will never be asked.** Tick
+  **Settings ▸ Start at sign-in** instead, or add the entry by hand from the table below.
 - **Declining is permanent**, in the sense that nothing asks again. Nothing is written anywhere; the
-  entry simply is not created.
+  entry simply is not created — tick the box in the menu whenever you change your mind.
 - **If no dialog can be shown at all** — a headless box, a systemd user service, no `zenity` or
   `kdialog` — the answer is taken as *no*. "Could not ask" must never register something that outlives
   the process. The log line says so.

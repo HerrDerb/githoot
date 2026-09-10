@@ -278,7 +278,10 @@ pub struct PollInputs {
     ///
     /// Checked at the call site rather than inside `sound::hoot`, so the module stays a plain "play
     /// this" with no opinion about settings, and the loop's own log line is silent too when it is off.
-    pub sound: bool,
+    ///
+    /// A shared switch rather than the `bool` it was, because the tray's Hoot checkbox changes it while
+    /// this loop is running — see `sound::Switch`. Read once per cycle, at the moment it matters.
+    pub sound: crate::sound::Switch,
     /// Which parts of GitHub may raise the outage mark. Empty means the whole page — see
     /// `config::Config::status_components`.
     pub status_components: Vec<String>,
@@ -463,9 +466,10 @@ fn run_poll_loop(
         // this cycle's responses, and taking them next to the code that produced them is what keeps a
         // rise meaning one poll's worth of change. The sound itself waits until after `emit`.
         //
-        // Taken unconditionally, even with the sound off, so the latch cannot accumulate. Turning the
-        // sound back on takes a restart (see `settings_watch`), which would clear it anyway — but a
-        // drain that depends on a setting is a stale-state bug waiting for the day it does not.
+        // Taken unconditionally, even with the sound off, so the latch cannot accumulate. That matters
+        // more now than it used to: the sound can be switched back on from the menu mid-run, and a
+        // latch drained only while hooting was enabled would fire for every arrival missed while it
+        // was off — one click, and a hoot for news the user has already seen.
         let arrivals = state.take_pr_arrivals();
 
         let icon = state.icon();
@@ -486,7 +490,7 @@ fn run_poll_loop(
         // to look at yet would send the user to a tray that has not caught up. One hoot even when two
         // or three axes turn over in the same cycle: `crate::sound::hoot` drops overlapping plays
         // anyway, and three of the same clip at once is a noise rather than a notification.
-        if sound_enabled && arrivals.iter().any(|&arrived| arrived) {
+        if sound_enabled.is_on() && arrivals.iter().any(|&arrived| arrived) {
             let axes: Vec<&str> = PrAxis::ALL
                 .iter()
                 .filter(|axis| arrivals[axis.index()])

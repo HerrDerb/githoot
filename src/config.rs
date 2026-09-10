@@ -8,7 +8,12 @@
 //!
 //! The file is **written on first run** with every setting at its default, so the settings are
 //! discoverable by opening it rather than only by reading the README. An existing file is never
-//! touched — not even to add a key it is missing.
+//! rewritten wholesale — not even to add a key it is missing.
+//!
+//! The one thing that edits an existing file is the tray's Hoot toggle, through [`set_sound`], and it
+//! changes exactly one value line: comments, blank lines, spacing and keys this version has never
+//! heard of all survive it byte for byte. That is the same promise stated the other way round — the
+//! file belongs to the user, and the app may change a value in it but never its shape.
 
 use crate::log::Level;
 use crate::{errorln, infoln};
@@ -133,6 +138,92 @@ pub struct Config {
 /// (`settings_watch`). One definition, so the menu can never open a file the app does not read.
 pub fn config_path(app_asset_path: &Path) -> std::path::PathBuf {
     app_asset_path.join(CONFIG_FILE)
+}
+
+/// Rewrites the hoot setting in `config.txt`, leaving every other byte of the file alone.
+///
+/// The counterpart of the menu's Hoot toggle. Nothing else writes a setting: the toggle is the only
+/// place in the app that changes a value the user owns, which is why this takes a single named
+/// setting rather than a whole `Config` — a "write the config back" function would rewrite the file
+/// from the parsed values and silently discard every comment, blank line and unread key in it.
+pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
+    set_flag(&config_path(app_asset_path), KEY_SOUND, on)
+}
+
+/// Reads the file, replaces one value, writes it back.
+///
+/// A missing or unreadable file reads as empty and so grows the one key, rather than failing: the
+/// user asked for a setting, and the file is a convenience — the same posture the rest of this module
+/// takes. `Config::load` has already written the default file by the time any menu exists, so this is
+/// only reached when something has since deleted it.
+fn set_flag(path: &Path, key: &str, on: bool) -> Result<(), String> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let updated = with_value_set(&content, key, if on { "on" } else { "off" });
+    std::fs::write(path, updated)
+        .map_err(|e| format!("could not write {} ({e})", path.display()))
+}
+
+/// The file with one setting's value changed, and nothing else different.
+///
+/// Pure, so the whole risk in writing a file someone hand-edited can be tested without a disk.
+///
+/// Three rules, each of which is a way this could quietly destroy someone's file:
+///
+/// - **The line that wins is the line that is rewritten.** `parse` lets a later duplicate override an
+///   earlier one, so editing the first of two would leave the app reading the second — a file whose
+///   visible top line disagrees with the app's behaviour.
+/// - **Comments are never matched.** A `# sound=on` line is a note, and rewriting it would destroy the
+///   note *and* leave the real setting unchanged.
+/// - **Line endings are preserved per line.** A `config.txt` edited in Notepad is CRLF, and rebuilding
+///   the file with `\n` would rewrite every line of it — exactly the wholesale rewrite this function
+///   exists to avoid.
+fn with_value_set(content: &str, key: &str, value: &str) -> String {
+    // `split_inclusive` rather than `lines`: it keeps each line's own terminator, which is what makes
+    // the CRLF promise above possible.
+    let mut pieces: Vec<String> = content.split_inclusive('\n').map(str::to_string).collect();
+
+    match pieces.iter().rposition(|piece| line_sets(piece, key)) {
+        Some(i) => {
+            let terminator = line_ending(&pieces[i]);
+            pieces[i] = format!("{key}={value}{terminator}");
+        }
+        // Not there at all: the ordinary case for an existing install, since the file is never
+        // rewritten and so never grows a key added after it was written.
+        None => {
+            let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+            // A last line with no terminator would otherwise have the new key glued onto its end.
+            if let Some(last) = pieces.last_mut()
+                && !last.ends_with('\n')
+            {
+                last.push_str(newline);
+            }
+            pieces.push(format!("{key}={value}{newline}"));
+        }
+    }
+
+    pieces.concat()
+}
+
+/// Whether this line sets `key`. The writer's half of `parse`, and it has to agree with it: the same
+/// comment rule, the same trimming, and an **exact** key match, or `sound` would rewrite a
+/// `soundVolume` line and append the setting it was asked for below it.
+fn line_sets(line: &str, key: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return false;
+    }
+    trimmed.split_once('=').is_some_and(|(k, _)| k.trim() == key)
+}
+
+/// A line's own terminator, so a rewritten line keeps it. Empty for a last line that has none.
+fn line_ending(line: &str) -> &'static str {
+    if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    }
 }
 
 impl Config {
@@ -733,5 +824,107 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), keys.len(), "duplicate axis keys: {keys:?}");
+    }
+
+    // ── Writing one setting back ────────────────────────────────────────────
+    //
+    // The menu's toggles edit this file. Every test here is about the same fear: that changing one
+    // value throws away something the user wrote.
+
+    /// The whole point. One line changes; every comment, blank line and unrelated setting is
+    /// byte-for-byte what it was.
+    #[test]
+    fn setting_a_value_leaves_the_rest_of_the_file_untouched() {
+        let before = "# my notes\n\
+                      updateCheck=off\n\
+                      \n\
+                      # the hoot\n\
+                      sound=on\n\
+                      logLevel=info\n";
+        let after = with_value_set(before, KEY_SOUND, "off");
+        assert_eq!(
+            after,
+            "# my notes\n\
+             updateCheck=off\n\
+             \n\
+             # the hoot\n\
+             sound=off\n\
+             logLevel=info\n"
+        );
+    }
+
+    /// `parse` lets a later duplicate win, so the writer has to edit *that* one. Editing the first
+    /// would produce a file whose visible top line disagrees with what the app actually reads.
+    #[test]
+    fn the_line_that_wins_is_the_line_that_is_rewritten() {
+        let after = with_value_set("sound=on\nsound=on\n", KEY_SOUND, "off");
+        assert_eq!(after, "sound=on\nsound=off\n");
+        assert!(!Config::from_values(&parse(&after)).sound, "the file must read back as off");
+    }
+
+    /// A commented-out line is someone's note, not a setting. Rewriting it would both destroy the
+    /// note and leave the real value unchanged, which is the worst of both.
+    #[test]
+    fn a_commented_out_line_is_not_mistaken_for_the_setting() {
+        let after = with_value_set("# sound=on\nupdateCheck=on\n", KEY_SOUND, "off");
+        assert!(after.starts_with("# sound=on\n"), "the comment must survive: {after:?}");
+        assert!(!Config::from_values(&parse(&after)).sound, "the setting must still take: {after:?}");
+    }
+
+    /// The case every existing install is in: `config.txt` is never rewritten, so a file written
+    /// before a key existed will not have it. Appending is what makes the toggle work there.
+    #[test]
+    fn a_key_the_file_does_not_have_is_appended() {
+        let after = with_value_set("updateCheck=on\n", KEY_SOUND, "off");
+        assert!(after.starts_with("updateCheck=on\n"), "got {after:?}");
+        assert!(!Config::from_values(&parse(&after)).sound, "got {after:?}");
+    }
+
+    /// A file whose last line has no newline is ordinary — plenty of editors write one. Appending
+    /// without a separator would glue the new key onto the end of the last value.
+    #[test]
+    fn a_file_with_no_trailing_newline_still_gets_a_line_of_its_own() {
+        let after = with_value_set("updateCheck=on", KEY_SOUND, "off");
+        assert_eq!(parse(&after).get(KEY_UPDATE_CHECK), Some(&"on"), "got {after:?}");
+        assert_eq!(parse(&after).get(KEY_SOUND), Some(&"off"), "got {after:?}");
+    }
+
+    /// Spacing around the `=` is legal and `parse` trims it, so a file written that way must still
+    /// be recognised as holding the key rather than having a second copy appended.
+    #[test]
+    fn spaced_out_lines_are_rewritten_rather_than_duplicated() {
+        let after = with_value_set("  sound = on  \n", KEY_SOUND, "off");
+        assert_eq!(after.lines().filter(|l| l.contains(KEY_SOUND)).count(), 1, "got {after:?}");
+        assert!(!Config::from_values(&parse(&after)).sound, "got {after:?}");
+    }
+
+    /// A key that merely *starts* with another key's name is a different key. Without an exact
+    /// match, `sound` would rewrite `soundVolume` and the real setting would be appended below it.
+    #[test]
+    fn a_longer_key_that_starts_the_same_is_a_different_key() {
+        let after = with_value_set("soundVolume=3\n", KEY_SOUND, "off");
+        assert!(after.contains("soundVolume=3"), "got {after:?}");
+        assert_eq!(parse(&after).get(KEY_SOUND), Some(&"off"), "got {after:?}");
+    }
+
+    /// End to end through a real file: what the menu writes is what the next start reads.
+    #[test]
+    fn set_sound_round_trips_through_the_file_load_reads() {
+        let dir = std::env::temp_dir().join(format!("githoot-config-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test temp dir");
+
+        let (config, _) = Config::load(&dir);
+        assert!(config.sound, "a fresh config.txt hoots");
+
+        set_sound(&dir, false).expect("the menu must be able to write the file");
+        let (config, first) = Config::load(&dir);
+        assert!(!config.sound, "the file must now say off");
+        assert_eq!(first, FirstRun::No, "writing a setting must not look like a fresh install");
+
+        set_sound(&dir, true).expect("and back on again");
+        assert!(Config::load(&dir).0.sound);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
