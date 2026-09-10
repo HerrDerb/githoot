@@ -315,6 +315,24 @@ pub fn confirm_restart(title: &str, msg: &str) -> bool {
     confirm(title, msg, "Restart now", "Later", false)
 }
 
+/// Asks whether to register the app to start when the user signs in, and **declines if it cannot
+/// ask**.
+///
+/// `on_unavailable: false`, the same as the installer and the restart prompt, and for a stronger
+/// reason than either: this one outlives the process. A headless box — a systemd user service, a CI
+/// container, a bare TTY — would otherwise grant itself a permanent place in someone's session on the
+/// strength of a prompt no human ever saw, and the app would be the wrong thing to have to uninstall to
+/// get rid of it.
+///
+/// The declining label is `Leave it off`, not the `Not now` the other two use, because this question is
+/// asked exactly once (see `autostart`) and `Not now` would promise a second chance that never comes.
+///
+/// Blocks until answered, so call it from a background thread — `autostart::offer_on_first_run` spawns
+/// one, since this runs during startup with the tray icon not yet on the bar.
+pub fn confirm_autostart(title: &str, msg: &str) -> bool {
+    confirm(title, msg, "Start automatically", "Leave it off", false)
+}
+
 /// Reports an update outcome the user should see, without ever blocking on stdin.
 ///
 /// `dialog::message`'s Linux arm waits on `stdin().read_line`, which on a machine launched from a
@@ -418,6 +436,7 @@ mod confirm_tests {
         // was never on screen.
         let install_declined = !confirm_install("headless", "no display here");
         let restart_declined = !confirm_restart("headless", "no display here");
+        let autostart_declined = !confirm_autostart("headless", "no display here");
 
         unsafe {
             if let Some(v) = display {
@@ -436,6 +455,10 @@ mod confirm_tests {
         assert!(
             restart_declined,
             "confirm_restart must never read an unaskable prompt as consent to restart the app"
+        );
+        assert!(
+            autostart_declined,
+            "confirm_autostart must never read an unaskable prompt as consent to add a startup entry"
         );
     }
 }

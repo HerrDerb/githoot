@@ -5,6 +5,7 @@
 //! Handles cross-platform initialization and tray icon setup.
 
 mod access_token;
+mod autostart;
 mod config;
 mod dialog;
 mod github;
@@ -209,11 +210,15 @@ fn main() {
         }
     };
 
-    let config = config::Config::load(&app_asset_path);
+    let (config, first_run) = config::Config::load(&app_asset_path);
     // Apply the configured verbosity before anything past startup logs. The few lines emitted
     // earlier (icon setup, a first-run default-config write) ran at the quiet default, which is the
     // right floor for them anyway.
     log::set_level(config.log_level);
+    // Straight after the level is applied, so the line it logs lands at the verbosity the user asked
+    // for, and before the credential work below, which can take a network round trip. Returns at once
+    // on every start but the first — see `autostart::offer_on_first_run`.
+    autostart::offer_on_first_run(first_run);
     let tokens = if config.notification_indication {
         match access_token::TokenStore::load(&app_asset_path) {
             Ok(tokens) => Some(tokens),
@@ -546,10 +551,14 @@ fn main() {
     // and that process is this one's predecessor.
     update::clean_up_after_update();
 
-    let config = config::Config::load(&app_asset_path);
+    let (config, first_run) = config::Config::load(&app_asset_path);
     // Apply the configured verbosity before anything past startup logs (see the other platform's
     // entry point for the reasoning).
     log::set_level(config.log_level);
+    // Straight after the level is applied, so the line it logs lands at the verbosity the user asked
+    // for, and before the credential work below, which can take a network round trip. Returns at once
+    // on every start but the first — see `autostart::offer_on_first_run`.
+    autostart::offer_on_first_run(first_run);
     let tokens = if config.notification_indication {
         match access_token::TokenStore::load(&app_asset_path) {
             Ok(tokens) => Some(tokens),
@@ -711,6 +720,15 @@ fn main() {
             .with_menu(Box::new(menu.clone()))
             .build()
             .map_err(|e| format!("Failed to create tray icon: {e}"))?;
+
+        // Here rather than at either call site, because this is the exact moment the shell has been
+        // handed an icon — which is what has to have happened before Windows will have a visibility
+        // setting for it to read. Returns immediately; it waits for the shell on its own thread.
+        //
+        // Windows only. macOS has no overflow flyout: a status item is either in the menu bar or it
+        // does not exist, so there is nothing to promote.
+        #[cfg(target_os = "windows")]
+        crate::autostart::promote_tray_icon();
 
         Ok(Tray {
             tray_icon,

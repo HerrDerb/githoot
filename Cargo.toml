@@ -64,4 +64,8 @@ winit = "0.30.12"
 # out of the linked binary. Listed here rather than in `dev-dependencies` because a test target links
 # against both, and a second winapi entry with a different feature set would be a second copy of the
 # crate to keep in step.
-winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver"] }
+# `winreg` is `autostart.rs`: the `HKCU\…\Run` value that starts the app at sign-in, and the
+# `NotifyIconSettings` promotion that keeps the icon out of the overflow flyout. Both are per-user keys
+# needing no elevation, and this is the whole reason the crate is here rather than `windows-registry` —
+# winapi is already a dependency, so the registry costs no new crate at all.
+winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver", "winreg", "winerror"] }

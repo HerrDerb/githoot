@@ -72,6 +72,12 @@ Only `off`, `false`, `0` or `no` switch something off; anything else leaves the 
 silently disable a feature. Two keys are not toggles: `logLevel` takes `error` or `info`, falling back to
 `error`; `statusComponents` takes a comma-separated list.
 
+**Two things are deliberately not keys here:** whether GitHoot starts when you sign in, and whether its
+icon sits on the Windows taskbar or in the overflow flyout. Both are stored by the operating system
+already — a registry value, an autostart entry, a Launch Agent — so a copy in this file would be a
+second source of truth to keep in step with reality. The startup question is asked once, on a first run
+→ [Startup](startup.md).
+
 ## Which parts of GitHub count as an outage
 
 GitHub's page-wide verdict is one judgement over everything it runs, and most of that is nothing to do

@@ -73,6 +73,25 @@ pub fn default_status_components() -> Vec<String> {
 const RENAMED_KEYS: [(&str, &str); 2] =
     [("notifications", KEY_NOTIFICATION_INDICATION), ("update_check", KEY_UPDATE_CHECK)];
 
+/// Whether [`Config::load`] found no `config.txt` and successfully wrote one.
+///
+/// The app's one reliable "we have never met this user before" signal, and the whole reason `load`
+/// returns anything besides a `Config`. Used by `autostart` to decide whether to ask about starting at
+/// sign-in — a question that must be asked exactly once, on a genuinely fresh install.
+///
+/// A named enum rather than a `bool`, because a returned `(Config, bool)` reads as nothing at the call
+/// site and an inverted test would be invisible.
+///
+/// **`Yes` requires the write to have succeeded.** A home directory that cannot be written leaves no
+/// file, so the next start would look like a first run too, and the one thing worse than never asking a
+/// question is asking it on every single launch. Only a question whose answer can be remembered is
+/// worth asking.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum FirstRun {
+    Yes,
+    No,
+}
+
 /// Settings read from `config.txt`.
 pub struct Config {
     /// Whether the blue "unread notifications" tint is drawn at all. Off by default: notifications
@@ -121,14 +140,19 @@ impl Config {
     ///
     /// Never fails. A file that cannot be written is logged and ignored; a file that cannot be read
     /// leaves every setting at its default.
-    pub fn load(app_asset_path: &Path) -> Self {
+    ///
+    /// Also reports whether it had to create the file, which is this app's first-run signal — see
+    /// [`FirstRun`]. Returned from here rather than offered as a separate `is_first_run` helper on
+    /// purpose: `load` is what creates the file, so anything asking the question separately would have
+    /// to run *before* `load` and would silently answer `No` forever the day someone reordered startup.
+    pub fn load(app_asset_path: &Path) -> (Self, FirstRun) {
         let path = config_path(app_asset_path);
-        write_default_if_absent(&path);
+        let first_run = write_default_if_absent(&path);
 
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let values = parse(&content);
         warn_about_renamed_keys(&values);
-        Self::from_values(&values)
+        (Self::from_values(&values), first_run)
     }
 
     /// The key-to-setting mapping, with no I/O.
@@ -236,19 +260,28 @@ fn default_config() -> String {
     )
 }
 
-/// Writes the default file if there is none.
+/// Writes the default file if there is none, and reports whether it did.
 ///
 /// Guarded on existence, **not** on the parsed settings being empty: a file holding nothing but
 /// comments is a deliberate act, and overwriting it would throw away someone's notes.
-fn write_default_if_absent(path: &Path) {
+///
+/// A failed write is [`FirstRun::No`], not `Yes` — see [`FirstRun`] for why "we could not remember
+/// meeting you" must not be read as "we have just met you".
+fn write_default_if_absent(path: &Path) -> FirstRun {
     if path.exists() {
-        return;
+        return FirstRun::No;
     }
     match std::fs::write(path, default_config()) {
-        Ok(()) => infoln!("wrote a default {} — every setting at its default", CONFIG_FILE),
+        Ok(()) => {
+            infoln!("wrote a default {} — every setting at its default", CONFIG_FILE);
+            FirstRun::Yes
+        }
         // Not fatal, and not worth a dialog: the defaults still apply, so the app behaves exactly as
         // it would have. Same treatment `access_token` gives a failed `client_id.txt` write.
-        Err(e) => errorln!("could not write a default {CONFIG_FILE} ({e}) — using defaults"),
+        Err(e) => {
+            errorln!("could not write a default {CONFIG_FILE} ({e}) — using defaults");
+            FirstRun::No
+        }
     }
 }
 
@@ -311,6 +344,38 @@ fn is_on(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first-run signal, end to end through a real directory. Both halves matter: `Yes` exactly
+    /// once, and `No` on every start after it, because `autostart` asks a question that must never be
+    /// asked twice.
+    #[test]
+    fn load_reports_a_first_run_only_when_it_created_the_file() {
+        let dir = std::env::temp_dir().join(format!("githoot-config-first-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test temp dir");
+
+        let (_, first) = Config::load(&dir);
+        assert_eq!(first, FirstRun::Yes, "an absent config.txt is a first run");
+        assert!(config_path(&dir).exists(), "load must have written the default file");
+
+        let (_, second) = Config::load(&dir);
+        assert_eq!(second, FirstRun::No, "a config.txt that already exists is not a first run");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write that fails leaves nothing to remember an answer in, so it must not read as a first run
+    /// — otherwise every single launch would look like one and re-ask. Forced by pointing at a path
+    /// whose parent does not exist, which fails identically on all three platforms.
+    #[test]
+    fn a_config_that_could_not_be_written_is_not_a_first_run() {
+        let path = std::env::temp_dir()
+            .join(format!("githoot-config-unwritable-{}", std::process::id()))
+            .join("no-such-parent")
+            .join(CONFIG_FILE);
+        assert_eq!(write_default_if_absent(&path), FirstRun::No);
+        assert!(!path.exists(), "nothing should have been created");
+    }
 
     #[test]
     fn recognises_on_values_case_insensitively() {

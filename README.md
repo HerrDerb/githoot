@@ -61,6 +61,13 @@ org's repos, the GitHub App has to be [**installed** on that org](docs/pr-status
 
 `~/.githoot-tray/config.txt` is written on first run with every setting at its default.
 
+**A first run also asks once whether to start GitHoot when you sign in** — Windows `Run` value, XDG
+autostart entry or macOS Launch Agent, for your account only, removable with your OS's own startup
+tool. Declining writes nothing and nothing asks again; a prompt that cannot be shown counts as no. On
+Windows the icon is also asked to stay on the taskbar rather than in the **^** overflow flyout, which
+only ever fills in a blank and never overrides a choice you have made →
+[the whole thing](docs/startup.md).
+
 **macOS:** the bundle is ad-hoc signed, not notarized, so clear the quarantine flag once —
 `xattr -dr com.apple.quarantine githoot-tray.app`. The bare binary takes a Dock icon, so use
 `scripts/bundle-macos.sh` for a local build. **Windows:** Defender's ML models
@@ -126,6 +133,7 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | | |
 |---|---|
 | [Icons](docs/icons.md) | Every mark, why the geometry is what it is, what combines |
+| [Startup](docs/startup.md) | The one first-run question, what it writes on each platform, and how to undo it |
 | [Menu and settings](docs/menu-and-settings.md) | All menu entries and all config keys |
 | [PR status](docs/pr-status.md) | The three queries, the GraphQL rationale, the GitHub App |
 | [The hoot](docs/hoot.md) | Exactly which transitions make a sound, and which stay quiet |
