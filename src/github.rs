@@ -5,6 +5,7 @@
 //! failure. The previous version returned `Ok(0)` for any non-2xx response, which meant an
 //! expired token or a rate limit rendered as a confident "you have no notifications".
 
+use crate::infoln;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT};
 use reqwest::StatusCode;
@@ -41,6 +42,109 @@ const DEFAULT_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
 /// Cap on how much of an error body ends up in a log line or tooltip.
 const MAX_DETAIL_CHARS: usize = 200;
 
+/// One pull request, as the page shows it.
+///
+/// `url` is the only field the *count* depends on, and the only one that is not `Option`: a counted
+/// hit without a URL poisons the whole list (see `parse_reviewed`), because a click that opens fewer
+/// pages than the dot claims is the count and the click disagreeing. Everything else is lenient in
+/// both directions — GitHub answers with partial `data` for a node the token cannot fully see, and a
+/// hole here must cost a line of the page, never a number on the icon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrEntry {
+    pub url: String,
+    pub title: Option<String>,
+    /// `owner/name`, GitHub's `nameWithOwner`.
+    pub repo: Option<String>,
+    pub number: Option<u64>,
+    /// `None` for a pull request whose author has since been deleted.
+    pub author: Option<String>,
+    /// GitHub's ISO-8601, kept raw. Rendering it is the page's job, not the client's.
+    pub updated_at: Option<String>,
+    pub is_draft: bool,
+    pub checks: CheckRollup,
+    /// One verdict per reviewer, `COMMENTED` already dropped by GitHub's own
+    /// `latestOpinionatedReviews`.
+    pub verdicts: Vec<Verdict>,
+    /// Reviewers with a re-review outstanding.
+    pub pending: Vec<Reviewer>,
+}
+
+/// A bare entry carrying nothing but its URL.
+///
+/// Lives here rather than in each test module so `state`'s tests, which care only about *which* PRs a
+/// track holds, need not restate every display field to say so.
+#[cfg(test)]
+impl PrEntry {
+    pub fn stub(url: &str) -> Self {
+        PrEntry {
+            url: url.to_string(),
+            title: None,
+            repo: None,
+            number: None,
+            author: None,
+            updated_at: None,
+            is_draft: false,
+            checks: CheckRollup::Unknown,
+            verdicts: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+}
+
+/// The head commit's combined check state.
+///
+/// `Unknown` covers three genuinely indistinguishable cases: a repository with no checks configured
+/// (GitHub answers `null`), a payload hole, and a `FORBIDDEN` degraded away by `DEGRADABLE_FIELDS`.
+/// All three must render neutral. Painting them red would invent a failure, which is the same lie in
+/// the other direction as reporting a poll error as a zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckRollup {
+    Unknown,
+    Success,
+    Pending,
+    Failure,
+    Error,
+    Expected,
+}
+
+impl CheckRollup {
+    fn from_state(state: &str) -> Self {
+        match state {
+            "SUCCESS" => CheckRollup::Success,
+            "PENDING" => CheckRollup::Pending,
+            "FAILURE" => CheckRollup::Failure,
+            "ERROR" => CheckRollup::Error,
+            "EXPECTED" => CheckRollup::Expected,
+            // A state this version has never heard of is not evidence of anything.
+            _ => CheckRollup::Unknown,
+        }
+    }
+}
+
+/// One reviewer's standing verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    pub login: String,
+    pub state: ReviewState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+}
+
+/// Someone a review is pending from.
+///
+/// A team is named by its slug because it has no login — which is exactly why `still_on_you` cannot
+/// match one and treats a pending team request as "not handed back". The page can still say who is
+/// being waited on, which beats an empty row that looks like nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reviewer {
+    User(String),
+    Team(String),
+}
+
 /// What a success-body parser extracts from a 2xx body.
 ///
 /// The endpoints differ only here: everything about status codes and rate limits is shared,
@@ -50,12 +154,12 @@ struct Parsed {
     present: bool,
     /// Exact match count, when the endpoint provides one (search does; notifications does not).
     count: Option<u32>,
-    /// The URLs of the exact items `count` counted, when the endpoint reads its hits one by one.
-    /// Only the changes-requested GraphQL query does; for everything else the count is a server
-    /// total whose members were never fetched, so this is `None` — as it also is when any counted
-    /// hit came back without a URL, because a partial list would open fewer pages than the dot
-    /// claims. `None` means "send the user to the search page instead", never "no PRs".
-    urls: Option<Vec<String>>,
+    /// The exact items `count` counted, when the endpoint reads its hits one by one. Only the
+    /// GraphQL queries do; for a server total whose members were never fetched this is `None` — as
+    /// it also is when any counted hit came back without a URL, because a partial list would open
+    /// fewer pages than the dot claims. `None` means "fall back to the search page", never "no PRs";
+    /// `Some(vec![])` is the confirmed empty.
+    prs: Option<Vec<PrEntry>>,
 }
 
 type BodyParser = fn(&str) -> Result<Parsed, String>;
@@ -82,10 +186,10 @@ pub enum PollResult {
         /// Exact match count when the endpoint provides one (search does; notifications does
         /// not, because we request `per_page=1` and only ask about presence).
         count: Option<u32>,
-        /// URLs of the exact items `count` counted, when the endpoint reads its hits one by
-        /// one — see `Parsed::urls`. Carried so the changes-requested menu entry can open the
-        /// very pull requests its dot is counting, which no search URL can express.
-        urls: Option<Vec<String>>,
+        /// The exact items `count` counted, when the endpoint reads its hits one by one — see
+        /// `Parsed::prs`. Carried so the menu entry can show the very pull requests its dot is
+        /// counting, which no search URL can express.
+        prs: Option<Vec<PrEntry>>,
     },
     /// 304 — the notification list is unchanged, so whatever we already show is still right.
     NotModified,
@@ -183,13 +287,29 @@ pub fn poll_reviews(client: &Client, token: &str, query: &str) -> PollResponse {
 /// alone cannot tell "still on me" from "handed back". `reviewRequests` can, and Search has no qualifier
 /// for it at all. Hence GraphQL for both: the axis's Search query string handed to `search` verbatim, plus
 /// the lists needed to judge each hit client-side.
+///
+/// **The check rollup hangs off the pull request, never off `commits(last:1)`.** Resolving a
+/// `PullRequestCommit` needs the App's **Contents: read** — read access to every line of source in
+/// every installed repo, to power a tray icon — which this App deliberately does not request. That
+/// detour left the merge-ready axis dead from 1.7.0 to 1.10.0, failing every poll with
+/// `{"type":"FORBIDDEN","path":["search","nodes",0,"commits","nodes",0]}`. The rollup itself costs
+/// nothing: the App still holds Checks: read and Commit statuses: read. It is read for *display*
+/// only and never decides a count, which is why a refusal on it degrades one field instead of
+/// failing the poll — see `DEGRADABLE_FIELDS`.
+///
+/// `rateLimit` is free — GitHub does not charge a query for asking what it cost — and it is the only
+/// way to turn "three of these per cycle is probably fine" into a number. See `RateLimit`.
 const PR_REVIEWS_DOCUMENT: &str = "\
 query($q:String!,$hits:Int!,$reviews:Int!){\
+  rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
-      url \
+      url title number isDraft updatedAt \
+      repository{nameWithOwner}\
+      author{login}\
+      statusCheckRollup{state}\
       latestOpinionatedReviews(first:$reviews){nodes{state author{login}}}\
-      reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login}}}}\
+      reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login} ...on Team{slug}}}}\
     }}\
   }\
 }";
@@ -270,7 +390,7 @@ fn send(
 /// Success-body parser for `/notifications`: presence only, no count.
 fn parse_notifications(body: &str) -> Result<Parsed, String> {
     serde_json::from_str::<Vec<Notification>>(body)
-        .map(|list| Parsed { present: !list.is_empty(), count: None, urls: None })
+        .map(|list| Parsed { present: !list.is_empty(), count: None, prs: None })
         // Previously `.unwrap_or_default()`, which turned a garbled payload into "no unread".
         .map_err(|e| format!("unparseable notification payload: {e}"))
 }
@@ -278,7 +398,7 @@ fn parse_notifications(body: &str) -> Result<Parsed, String> {
 /// Success-body parser for `/search/issues`: exact count, so the tooltip can quote it.
 fn parse_search_total(body: &str) -> Result<Parsed, String> {
     serde_json::from_str::<SearchResult>(body)
-        .map(|r| Parsed { present: r.total_count > 0, count: Some(r.total_count), urls: None })
+        .map(|r| Parsed { present: r.total_count > 0, count: Some(r.total_count), prs: None })
         .map_err(|e| format!("unparseable search payload: {e}"))
 }
 
@@ -297,21 +417,66 @@ struct GraphQlResponse {
     errors: Vec<GraphQlError>,
 }
 
-/// Only the message is read.
+/// One GraphQL error, read for its `message` and its `path`.
 ///
-/// GitHub also sends a `type` (`FORBIDDEN`, `RATE_LIMITED`, …) and a `path` naming the response node
-/// the error applies to. The merge-ready axis needed both, to tell "this one hit is unjudgeable" from
-/// "the query broke" and drop the hit by index. That axis no longer reads its hits at all, and for the
-/// one axis left any error is fatal to the poll, so there is nothing left to sort them by. `serde`
-/// ignores unknown fields, so both simply go unread.
+/// `path` names the response node the error applies to, and it is what tells "this one hit lost one
+/// display field" from "the query broke". Segments mix field names and array indices, so it is a
+/// `serde_json::Value` list rather than a list of strings:
+/// `["search","nodes",3,"statusCheckRollup"]`.
+///
+/// GitHub also sends a `type` (`FORBIDDEN`, `RATE_LIMITED`, …). It is deliberately not read: the
+/// decision below is about *what was refused*, not about why, and a rate limit that happened to land
+/// on a degradable field is still a poll worth keeping. `serde` ignores unknown fields.
 #[derive(Debug, Deserialize)]
 struct GraphQlError {
     message: String,
+    #[serde(default)]
+    path: Option<Vec<serde_json::Value>>,
+}
+
+/// Fields a refusal may cost without costing the poll.
+///
+/// Every one of them is *display only*: nothing here decides whether a hit counts, so degrading it to
+/// unknown changes a line of the page and nothing on the icon. An allowlist rather than a heuristic,
+/// so no field the count depends on can drift into being silently non-fatal — the reason it is
+/// spelled out rather than derived is that the opposite mistake, a whole poll failing on one
+/// unreadable field, froze the merge-ready axis from 1.7.0 to 1.10.0.
+const DEGRADABLE_FIELDS: [&str; 4] = ["statusCheckRollup", "author", "title", "repository"];
+
+/// Whether `error` costs one hit one field rather than the whole poll.
+///
+/// True only when the path both descends into an individual search hit (`search`, `nodes`, an index)
+/// **and** ends at a named degradable field. A refusal at `search` or `search.nodes` is the whole page
+/// being denied, and an error with no path at all cannot be attributed to any hit — both stay fatal,
+/// because reporting a confident zero is the one thing this module refuses to do.
+fn is_degradable(error: &GraphQlError) -> bool {
+    let Some(path) = error.path.as_deref() else { return false };
+    let [first, second, third, rest @ ..] = path else { return false };
+    if first.as_str() != Some("search") || second.as_str() != Some("nodes") || !third.is_number() {
+        return false;
+    }
+    rest.last().and_then(|s| s.as_str()).is_some_and(|f| DEGRADABLE_FIELDS.contains(&f))
+}
+
+/// What the query cost and what is left, when GitHub answered the `rateLimit` field.
+///
+/// Logged rather than acted on. Three of these documents per cycle is an arithmetic guess until it is
+/// a measurement, and the guess is not trustworthy: the obvious reading of GitHub's scoring says the
+/// two-axis load already exceeded the ceiling, and it plainly did not. So the number is written to
+/// `log.txt` at info and read there.
+#[derive(Debug, Deserialize)]
+struct RateLimit {
+    limit: Option<u32>,
+    cost: Option<u32>,
+    remaining: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GraphQlData {
     search: SearchConnection,
+    #[serde(default)]
+    rate_limit: Option<RateLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,17 +484,39 @@ struct SearchConnection {
     nodes: Vec<Option<PullRequestNode>>,
 }
 
-/// A search hit. Both fields are `Option` because a node that is not a pull request matches the
+/// A search hit. Every field is `Option` because a node that is not a pull request matches the
 /// inline fragment with an empty object — `is:pr` should prevent that, but the type system is a
-/// cheaper guarantee than the query string.
+/// cheaper guarantee than the query string — and because a node the token cannot fully see comes back
+/// with fields missing rather than as a failure.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PullRequestNode {
     /// The PR's own web page. `Option` for the same lenience as everything else here: a hole
     /// in the payload must degrade the menu entry (fall back to the search page), not the count.
     url: Option<String>,
+    title: Option<String>,
+    number: Option<u64>,
+    /// Absent is not a draft. The opposite default would mark every hit with a payload hole as a
+    /// draft, which is a claim about the PR rather than an admission of ignorance.
+    #[serde(default)]
+    is_draft: bool,
+    updated_at: Option<String>,
+    repository: Option<Repository>,
+    author: Option<Author>,
+    status_check_rollup: Option<StatusCheckRollup>,
     latest_opinionated_reviews: Option<ReviewConnection>,
     review_requests: Option<RequestConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Repository {
+    name_with_owner: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusCheckRollup {
+    state: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +553,9 @@ struct RequestedReviewer {
     typename: String,
     /// Present for a `User`; absent for a `Team`, which is the whole reason `typename` is read.
     login: Option<String>,
+    /// A team's own handle. Read only so the page can name who is being waited on; `still_on_you`
+    /// still cannot match a team, because a slug is not a login.
+    slug: Option<String>,
 }
 
 /// Whether this pull request is still waiting on *you* rather than on a reviewer.
@@ -431,6 +621,57 @@ fn approved(pr: &PullRequestNode) -> bool {
     any_approved
 }
 
+/// Builds the page's view of one hit, or `None` when it has no URL.
+///
+/// `None` is the *only* rejection, and it is what makes `parse_reviewed`'s `collect()` poison the
+/// whole list on one hole. Every other field is allowed to be missing, because the page can say
+/// "unknown" and the icon cannot.
+fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
+    let verdicts = node
+        .latest_opinionated_reviews
+        .iter()
+        .flat_map(|c| c.nodes.iter().flatten())
+        .filter_map(|review| {
+            let state = match review.state.as_str() {
+                "APPROVED" => ReviewState::Approved,
+                "CHANGES_REQUESTED" => ReviewState::ChangesRequested,
+                // `latestOpinionatedReviews` drops `COMMENTED` already; anything else is a state
+                // this version has never heard of and has no row to put it in.
+                _ => return None,
+            };
+            Some(Verdict { login: review.author.as_ref()?.login.clone(), state })
+        })
+        .collect();
+
+    let pending = node
+        .review_requests
+        .iter()
+        .flat_map(|c| c.nodes.iter().flatten())
+        .filter_map(|request| request.requested_reviewer.as_ref())
+        .filter_map(|reviewer| match reviewer.typename.as_str() {
+            "User" => reviewer.login.clone().map(Reviewer::User),
+            "Team" => reviewer.slug.clone().map(Reviewer::Team),
+            _ => None,
+        })
+        .collect();
+
+    Some(PrEntry {
+        url: node.url.clone()?,
+        title: node.title.clone(),
+        repo: node.repository.as_ref().map(|r| r.name_with_owner.clone()),
+        number: node.number,
+        author: node.author.as_ref().map(|a| a.login.clone()),
+        updated_at: node.updated_at.clone(),
+        is_draft: node.is_draft,
+        checks: node
+            .status_check_rollup
+            .as_ref()
+            .map_or(CheckRollup::Unknown, |r| CheckRollup::from_state(&r.state)),
+        verdicts,
+        pending,
+    })
+}
+
 /// Success-body parser for the changes-requested GraphQL query: `still_on_you` decides each hit.
 fn parse_changes_requested(body: &str) -> Result<Parsed, String> {
     parse_reviewed(body, still_on_you)
@@ -451,23 +692,45 @@ fn parse_reviewed(body: &str, keep: fn(&PullRequestNode) -> bool) -> Result<Pars
     let response: GraphQlResponse =
         serde_json::from_str(body).map_err(|e| format!("unparseable PR review payload: {e}"))?;
 
-    if !response.errors.is_empty() {
-        let joined =
-            response.errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; ");
+    // Split before anything else. An error that cost one hit one display field leaves a perfectly
+    // good answer behind, and failing on it would freeze the bar at its last count forever — the
+    // failure that killed the merge-ready axis for four releases. Everything else is still fatal.
+    let (degradable, fatal): (Vec<_>, Vec<_>) =
+        response.errors.iter().partition(|e| is_degradable(e));
+    if !fatal.is_empty() {
+        let joined = fatal.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; ");
         return Err(format!("GraphQL reported an error: {joined}"));
     }
+    if !degradable.is_empty() {
+        // Once per poll, not once per hit: a token that cannot read the rollup cannot read it on any
+        // of a hundred hits, and a hundred identical lines would bury the log this exists to serve.
+        infoln!(
+            "{} pull request field(s) unreadable, shown as unknown: {}",
+            degradable.len(),
+            truncate(degradable[0].message.trim(), MAX_DETAIL_CHARS)
+        );
+    }
 
-    let search = response
+    let data = response
         .data
-        .ok_or_else(|| "GraphQL answered with neither data nor errors".to_string())?
-        .search;
+        .ok_or_else(|| "GraphQL answered with neither data nor errors".to_string())?;
 
-    let counted: Vec<&PullRequestNode> = search.nodes.iter().flatten().filter(|pr| keep(pr)).collect();
+    if let Some(limit) = &data.rate_limit {
+        infoln!(
+            "GraphQL rate limit: cost {}, {} of {} remaining",
+            limit.cost.map_or_else(|| "?".to_string(), |v| v.to_string()),
+            limit.remaining.map_or_else(|| "?".to_string(), |v| v.to_string()),
+            limit.limit.map_or_else(|| "?".to_string(), |v| v.to_string()),
+        );
+    }
+
+    let counted: Vec<&PullRequestNode> =
+        data.search.nodes.iter().flatten().filter(|pr| keep(pr)).collect();
     let count = counted.len() as u32;
     // All-or-nothing: a counted hit without a URL would make the menu entry open fewer pages
     // than the dot claims, so one hole sends the whole click to the search-page fallback.
-    let urls: Option<Vec<String>> = counted.iter().map(|pr| pr.url.clone()).collect();
-    Ok(Parsed { present: count > 0, count: Some(count), urls })
+    let prs: Option<Vec<PrEntry>> = counted.iter().map(|pr| entry_from(pr)).collect();
+    Ok(Parsed { present: count > 0, count: Some(count), prs })
 }
 
 /// Maps one HTTP response onto a `PollResult`.
@@ -517,7 +780,7 @@ fn classify_with(
         Ok(parsed) => PollResult::Fresh {
             present: parsed.present,
             count: parsed.count,
-            urls: parsed.urls,
+            prs: parsed.prs,
             etag: header_string(headers, ETAG.as_str()),
         },
         Err(why) => PollResult::Transient(why),
@@ -813,21 +1076,23 @@ mod tests {
     /// The click target follows the count: only the still-on-you hits' URLs are handed out, in
     /// the order GitHub returned them, so the menu entry opens exactly what the dot claims.
     #[test]
-    fn urls_are_collected_for_exactly_the_counted_hits() {
+    fn entries_are_collected_for_exactly_the_counted_hits() {
         let body = payload(&[
             hit_at("https://github.com/o/r/pull/1", &["alice"], &[("User", "alice")]), // handed back
             hit_at("https://github.com/o/r/pull/2", &["bob"], &[]),                    // on you
             hit_at("https://github.com/o/r/pull/3", &["carol"], &[("User", "dave")]),  // on you
         ]);
         match changes(StatusCode::OK, &headers(&[]), &body, 0) {
-            PollResult::Fresh { count, urls, .. } => {
+            PollResult::Fresh { count, prs, .. } => {
                 assert_eq!(count, Some(2));
+                let opened: Vec<String> =
+                    prs.expect("a confirmed list").iter().map(|e| e.url.clone()).collect();
                 assert_eq!(
-                    urls,
-                    Some(vec![
+                    opened,
+                    vec![
                         "https://github.com/o/r/pull/2".to_string(),
                         "https://github.com/o/r/pull/3".to_string(),
-                    ])
+                    ]
                 );
             }
             other => panic!("expected Fresh, got {:?}", other),
@@ -843,9 +1108,9 @@ mod tests {
             hit(&["carol"], &[]), // counted, but the payload hole ate its URL
         ]);
         match changes(StatusCode::OK, &headers(&[]), &body, 0) {
-            PollResult::Fresh { count, urls, .. } => {
+            PollResult::Fresh { count, prs, .. } => {
                 assert_eq!(count, Some(2));
-                assert_eq!(urls, None);
+                assert_eq!(prs, None);
             }
             other => panic!("expected Fresh, got {:?}", other),
         }
@@ -854,27 +1119,20 @@ mod tests {
     /// A confirmed-empty page is `Some(vec![])`, not `None` — the difference between "no PRs"
     /// and "could not read the list", which the menu fallback relies on.
     #[test]
-    fn no_hits_yields_a_confirmed_empty_url_list() {
+    fn no_hits_yields_a_confirmed_empty_list() {
         match changes(StatusCode::OK, &headers(&[]), &payload(&[]), 0) {
-            PollResult::Fresh { urls, .. } => assert_eq!(urls, Some(vec![])),
+            PollResult::Fresh { prs, .. } => assert_eq!(prs, Some(vec![])),
             other => panic!("expected Fresh, got {:?}", other),
         }
     }
 
     /// The two search-total endpoints have no per-hit view, so they must never claim one.
     #[test]
-    fn search_totals_carry_no_urls() {
+    fn search_totals_carry_no_entries() {
         match search(StatusCode::OK, &headers(&[]), r#"{"total_count":7,"items":[{}]}"#, 0) {
-            PollResult::Fresh { urls, .. } => assert_eq!(urls, None),
+            PollResult::Fresh { prs, .. } => assert_eq!(prs, None),
             other => panic!("expected Fresh, got {:?}", other),
         }
-    }
-
-    /// The document has to fetch the field the parser reads, or every hit loses its URL and the
-    /// menu entry silently degrades to the search page forever.
-    #[test]
-    fn the_query_document_fetches_the_url() {
-        assert!(PR_REVIEWS_DOCUMENT.contains("url"));
     }
 
     /// The document has to name every variable it uses, or GitHub rejects the whole query.
@@ -911,13 +1169,16 @@ mod tests {
     /// The case that motivated the axis: a real approval in a repository where `reviewDecision` is
     /// `null`, so `review:approved` never matched it. Read off the reviews, it counts.
     #[test]
-    fn an_approval_lights_the_bar_and_hands_out_its_url() {
+    fn an_approval_lights_the_bar_and_hands_out_its_entry() {
         let body = payload(&[reviewed("https://github.com/o/r/pull/2204", &["APPROVED"])]);
         match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
-            PollResult::Fresh { present, count, urls, .. } => {
+            PollResult::Fresh { present, count, prs, .. } => {
                 assert!(present);
                 assert_eq!(count, Some(1));
-                assert_eq!(urls, Some(vec!["https://github.com/o/r/pull/2204".to_string()]));
+                assert_eq!(
+                    prs.map(|l| l[0].url.clone()),
+                    Some("https://github.com/o/r/pull/2204".to_string())
+                );
             }
             other => panic!("expected Fresh, got {:?}", other),
         }
@@ -933,9 +1194,12 @@ mod tests {
             reviewed("https://github.com/o/r/pull/3", &["APPROVED", "APPROVED"]),
         ]);
         match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
-            PollResult::Fresh { count, urls, .. } => {
+            PollResult::Fresh { count, prs, .. } => {
                 assert_eq!(count, Some(1), "only the unanimously approved PR counts");
-                assert_eq!(urls, Some(vec!["https://github.com/o/r/pull/3".to_string()]));
+                assert_eq!(
+                    prs.map(|l| l[0].url.clone()),
+                    Some("https://github.com/o/r/pull/3".to_string())
+                );
             }
             other => panic!("expected Fresh, got {:?}", other),
         }
@@ -953,10 +1217,10 @@ mod tests {
             r#"{"url":"https://github.com/o/r/pull/4"}"#.to_string(),
         ]);
         match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
-            PollResult::Fresh { present, count, urls, .. } => {
+            PollResult::Fresh { present, count, prs, .. } => {
                 assert!(!present);
                 assert_eq!(count, Some(0));
-                assert_eq!(urls, Some(vec![]), "confirmed empty, not unreadable");
+                assert_eq!(prs, Some(vec![]), "confirmed empty, not unreadable");
             }
             other => panic!("expected Fresh, got {:?}", other),
         }
@@ -1124,4 +1388,243 @@ mod tests {
         assert_eq!(truncate("\u{fc}n\u{ef}c\u{f6}d\u{e9}", 3), "\u{fc}n\u{ef}\u{2026}");
         assert_eq!(truncate("short", 50), "short");
     }
+
+    // ── Rich entries ──────────────────────────────────────────────────────────
+
+    /// A hit carrying every display field the page shows, as the real payload sends it.
+    fn rich_hit(url: &str, number: u64, title: &str, repo: &str, author: &str, rollup: &str) -> String {
+        let fields = [
+            format!(r#""url":"{url}""#),
+            format!(r#""title":"{title}""#),
+            format!(r#""number":{number}"#),
+            r#""isDraft":false"#.to_string(),
+            r#""updatedAt":"2026-09-15T09:12:33Z""#.to_string(),
+            format!(r#""repository":{{"nameWithOwner":"{repo}"}}"#),
+            format!(r#""author":{{"login":"{author}"}}"#),
+            format!(r#""statusCheckRollup":{rollup}"#),
+            r#""latestOpinionatedReviews":{"nodes":[{"state":"APPROVED","author":{"login":"alice"}}]}"#
+                .to_string(),
+            r#""reviewRequests":{"nodes":[]}"#.to_string(),
+        ];
+        format!("{{{}}}", fields.join(","))
+    }
+
+    /// A hit built from an explicit review list and pending-request list, for the verdict tests.
+    fn verdict_hit(url: &str, reviews: &[(&str, &str)], pending: &[(&str, &str)]) -> String {
+        let reviews = reviews
+            .iter()
+            .map(|(state, login)| format!(r#"{{"state":"{state}","author":{{"login":"{login}"}}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let requests = pending
+            .iter()
+            .map(|(kind, name)| {
+                let key = if *kind == "Team" { "slug" } else { "login" };
+                format!(r#"{{"requestedReviewer":{{"__typename":"{kind}","{key}":"{name}"}}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"url":"{url}","latestOpinionatedReviews":{{"nodes":[{reviews}]}},"reviewRequests":{{"nodes":[{requests}]}}}}"#
+        )
+    }
+
+    /// A partial answer: real `data` alongside a per-node `errors` entry, which is exactly what
+    /// GitHub sends when one field of one hit is refused.
+    fn with_errors(hits: &[String], error: &str) -> String {
+        format!(
+            r#"{{"data":{{"search":{{"nodes":[{}]}}}},"errors":[{error}]}}"#,
+            hits.join(",")
+        )
+    }
+
+    fn only_entry(body: &str) -> PrEntry {
+        match approved_resp(StatusCode::OK, &headers(&[]), body, 0) {
+            PollResult::Fresh { prs: Some(list), .. } => {
+                assert_eq!(list.len(), 1, "expected exactly one entry");
+                list.into_iter().next().unwrap()
+            }
+            other => panic!("expected Fresh with a list, got {:?}", other),
+        }
+    }
+
+    /// Every display field survives the trip from payload to `PrEntry`. This is the whole point of
+    /// the change: the poll used to read these and throw them away.
+    #[test]
+    fn a_rich_hit_is_read_in_full() {
+        let body = payload(&[rich_hit(
+            "https://github.com/o/r/pull/7",
+            7,
+            "Fix the debounce",
+            "o/r",
+            "octocat",
+            r#"{"state":"SUCCESS"}"#,
+        )]);
+        let e = only_entry(&body);
+        assert_eq!(e.url, "https://github.com/o/r/pull/7");
+        assert_eq!(e.title.as_deref(), Some("Fix the debounce"));
+        assert_eq!(e.number, Some(7));
+        assert_eq!(e.repo.as_deref(), Some("o/r"));
+        assert_eq!(e.author.as_deref(), Some("octocat"));
+        assert_eq!(e.updated_at.as_deref(), Some("2026-09-15T09:12:33Z"));
+        assert!(!e.is_draft);
+        assert_eq!(e.checks, CheckRollup::Success);
+        assert_eq!(e.verdicts, vec![Verdict { login: "alice".into(), state: ReviewState::Approved }]);
+        assert!(e.pending.is_empty());
+    }
+
+    /// A repository with no checks configured answers `null`, and that is not a failure. Painting it
+    /// red would invent a problem; grey says what is actually known.
+    #[test]
+    fn a_null_status_rollup_reads_as_unknown_not_failing() {
+        let body = payload(&[rich_hit("https://github.com/o/r/pull/1", 1, "t", "o/r", "a", "null")]);
+        assert_eq!(only_entry(&body).checks, CheckRollup::Unknown);
+    }
+
+    /// Every display field is lenient: a hole degrades the entry, never the count. Only `url` is
+    /// load-bearing, and that rule is asserted separately.
+    #[test]
+    fn a_hit_missing_its_display_fields_still_lists() {
+        let body =
+            payload(&[verdict_hit("https://github.com/o/r/pull/1", &[("APPROVED", "a")], &[])]);
+        let e = only_entry(&body);
+        assert_eq!(e.title, None);
+        assert_eq!(e.number, None);
+        assert_eq!(e.repo, None);
+        assert_eq!(e.author, None);
+        assert_eq!(e.checks, CheckRollup::Unknown);
+        assert!(!e.is_draft, "a missing isDraft is not a draft");
+    }
+
+    /// The page names who said what, so "2 reviewers" never has to stand in for "bob objected".
+    #[test]
+    fn review_verdicts_name_who_said_what() {
+        let body = payload(&[verdict_hit(
+            "https://github.com/o/r/pull/1",
+            &[("APPROVED", "alice"), ("CHANGES_REQUESTED", "bob")],
+            &[("User", "carol")],
+        )]);
+        match changes(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { prs: Some(list), .. } => {
+                let e = &list[0];
+                assert_eq!(
+                    e.verdicts,
+                    vec![
+                        Verdict { login: "alice".into(), state: ReviewState::Approved },
+                        Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
+                    ]
+                );
+                assert_eq!(e.pending, vec![Reviewer::User("carol".into())]);
+            }
+            other => panic!("expected Fresh with a list, got {:?}", other),
+        }
+    }
+
+    /// A team has no login, which is why `still_on_you` cannot match it. The page can still name it,
+    /// so "waiting on someone" beats a silently empty row.
+    #[test]
+    fn a_team_reviewer_is_named_by_slug() {
+        let body = payload(&[verdict_hit(
+            "https://github.com/o/r/pull/1",
+            &[("CHANGES_REQUESTED", "bob")],
+            &[("Team", "backend")],
+        )]);
+        match changes(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { prs: Some(list), .. } => {
+                assert_eq!(list[0].pending, vec![Reviewer::Team("backend".into())]);
+            }
+            other => panic!("expected Fresh with a list, got {:?}", other),
+        }
+    }
+
+    // ── Degradable errors ─────────────────────────────────────────────────────
+
+    /// A token that cannot read the check rollup must cost that one field, not the whole poll.
+    ///
+    /// Under the old all-errors-are-fatal rule this answer became `Transient` on every cycle, and the
+    /// bar froze at its last count forever. That is the failure that killed the merge-ready axis from
+    /// 1.7.0 to 1.10.0, and the rollup is display-only now, so there is nothing to protect by failing.
+    #[test]
+    fn a_forbidden_on_status_check_rollup_degrades_the_field_and_keeps_the_count() {
+        let body = with_errors(
+            &[rich_hit("https://github.com/o/r/pull/1", 1, "t", "o/r", "a", "null")],
+            r#"{"type":"FORBIDDEN","path":["search","nodes",0,"statusCheckRollup"],"message":"Resource not accessible by integration"}"#,
+        );
+        match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { count, prs, .. } => {
+                assert_eq!(count, Some(1), "the hit still counts");
+                assert_eq!(prs.expect("still a confirmed list")[0].checks, CheckRollup::Unknown);
+            }
+            other => panic!("expected Fresh, got {:?}", other),
+        }
+    }
+
+    /// A refusal at the page level is the whole answer being denied. There is nothing to salvage, and
+    /// reporting a confident zero is the one thing this module refuses to do.
+    #[test]
+    fn a_forbidden_at_the_search_root_is_still_fatal() {
+        let body = r#"{"data":null,"errors":[{"type":"FORBIDDEN","path":["search"],"message":"nope"}]}"#;
+        assert!(matches!(
+            approved_resp(StatusCode::OK, &headers(&[]), body, 0),
+            PollResult::Transient(_)
+        ));
+    }
+
+    /// An error naming a field nobody allowed to degrade stays fatal, so the tolerance cannot quietly
+    /// grow to cover a field the count depends on.
+    #[test]
+    fn a_forbidden_on_a_field_outside_the_allowlist_is_still_fatal() {
+        let body = with_errors(
+            &[rich_hit("https://github.com/o/r/pull/1", 1, "t", "o/r", "a", "null")],
+            r#"{"type":"FORBIDDEN","path":["search","nodes",0,"latestOpinionatedReviews"],"message":"nope"}"#,
+        );
+        assert!(matches!(
+            approved_resp(StatusCode::OK, &headers(&[]), &body, 0),
+            PollResult::Transient(_)
+        ));
+    }
+
+    /// An error with no path at all cannot be attributed to one hit, so it is the query breaking.
+    #[test]
+    fn an_error_without_a_path_is_still_fatal() {
+        let body = r#"{"data":null,"errors":[{"message":"Parse error on \"foo\""}]}"#;
+        assert!(matches!(
+            approved_resp(StatusCode::OK, &headers(&[]), body, 0),
+            PollResult::Transient(_)
+        ));
+    }
+
+    // ── The document ──────────────────────────────────────────────────────────
+
+    /// The document has to fetch every field `entry_from` reads, or the page silently renders a row
+    /// of unknowns and nothing fails loudly enough to notice.
+    #[test]
+    fn the_query_document_fetches_every_field_the_entry_reads() {
+        for field in [
+            "url",
+            "title",
+            "number",
+            "isDraft",
+            "updatedAt",
+            "nameWithOwner",
+            "statusCheckRollup",
+            "rateLimit",
+        ] {
+            assert!(PR_REVIEWS_DOCUMENT.contains(field), "document is missing {field}");
+        }
+    }
+
+    /// Resolving a `PullRequestCommit` needs the App's **Contents: read**, which it deliberately does
+    /// not request. That detour left the merge-ready axis dead from 1.7.0 to 1.10.0, failing every poll
+    /// with `{"type":"FORBIDDEN","path":["search","nodes",0,"commits","nodes",0]}`.
+    /// `PullRequest.statusCheckRollup` is the same head-commit rollup at no permission cost. Never go
+    /// back.
+    #[test]
+    fn the_document_never_walks_through_commits() {
+        assert!(
+            !PR_REVIEWS_DOCUMENT.contains("commits"),
+            "a PullRequestCommit needs Contents: read; ask the PullRequest for its rollup instead"
+        );
+    }
+
 }

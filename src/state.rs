@@ -14,7 +14,7 @@
 //!
 //! Nothing here does I/O, so all of it is testable.
 
-use crate::github::{PollResponse, PollResult};
+use crate::github::{PollResponse, PollResult, PrEntry};
 use std::time::Duration;
 
 // ── Values GitHub never sends us, so they are ours to choose ──────────────────
@@ -331,11 +331,11 @@ struct Track {
     /// describes exists only between two `apply` calls. See `PollState::take_pr_arrivals` for which
     /// transitions count.
     arrived: bool,
-    /// URLs of the exact items `count` counted, for the axes whose poll reads its hits one by one
-    /// (see `github::PollResult::Fresh::urls`). Held through failures for the same reason `value`
+    /// The exact items `count` counted, for the axes whose poll reads its hits one by one
+    /// (see `github::PollResult::Fresh::prs`). Held through failures for the same reason `value`
     /// is: a blip must not turn a click that opened the right PRs into one that opens a search
     /// page showing different ones.
-    urls: Option<Vec<String>>,
+    prs: Option<Vec<PrEntry>>,
     /// Whether this track has ever had a confirmed answer, of either kind.
     ///
     /// Exists to tell the two `Unknown`s apart. `value == Unknown` covers both "we have not asked yet"
@@ -382,7 +382,7 @@ impl Track {
             failures: 0,
             detail: Some("starting up".to_string()),
             count: None,
-            urls: None,
+            prs: None,
             needs_reauth: false,
             arrived: false,
             ever_confirmed: false,
@@ -391,13 +391,13 @@ impl Track {
 
     fn apply(&mut self, result: PollResult) -> Option<Duration> {
         match result {
-            PollResult::Fresh { present, etag, count, urls } => {
+            PollResult::Fresh { present, etag, count, prs } => {
                 self.etag = etag;
                 // Read before the write: the new rule is a comparison, so the old number has to be
                 // taken here or it is gone.
                 let previous_count = self.count;
                 self.count = count;
-                self.urls = urls;
+                self.prs = prs;
                 self.failures = 0;
                 self.detail = None;
                 // The presence edge, still computed because it is `rose`'s fallback when there is
@@ -437,7 +437,7 @@ impl Track {
                 self.failures = self.failures.saturating_add(1);
                 self.detail = Some("GitHub rejected the credential".to_string());
                 self.value = Presence::Unknown;
-                self.urls = None;
+                self.prs = None;
                 self.needs_reauth = true;
                 None
             }
@@ -770,17 +770,20 @@ impl PollState {
         self.pr[axis.index()].as_ref().map_or(Presence::No, |t| t.value)
     }
 
-    /// URLs of the exact pull requests `axis`'s dot is counting, or `None` when the caller should
-    /// fall back to the search page: axis off, never answered, a poll that never names its hits
-    /// (`ReviewRequested`), an answer the poll could not fully read (see `github::Parsed::urls`), or
-    /// a track that has given up (`Unknown`) — a click must not open a list of PRs the dot no
-    /// longer stands behind.
-    pub fn pr_urls(&self, axis: PrAxis) -> Option<Vec<String>> {
+    /// The exact pull requests `axis`'s dot is counting, or `None` when the caller should fall back
+    /// to the search page: axis off, never answered, an answer the poll could not fully read (see
+    /// `github::Parsed::prs`), or a track that has given up (`Unknown`) — a click must not open a
+    /// list of PRs the dot no longer stands behind.
+    ///
+    /// `Some(vec![])` is a confirmed empty and is *not* the same answer. Only that distinction lets a
+    /// caller tell "nothing here" from "we do not know", which is the same refusal `pr_menu_label`
+    /// makes about showing a stale count.
+    pub fn pr_entries(&self, axis: PrAxis) -> Option<Vec<PrEntry>> {
         let track = self.pr[axis.index()].as_ref()?;
         if track.value == Presence::Unknown {
             return None;
         }
-        track.urls.clone()
+        track.prs.clone()
     }
 
     /// Text for the tray menu item that opens `axis`'s list, carrying the exact count.
@@ -958,12 +961,12 @@ mod tests {
             present,
             etag: Some("\"tag\"".to_string()),
             count: None,
-            urls: None,
+            prs: None,
         })
     }
 
     fn fresh_count(n: u32) -> PollResponse {
-        respond(PollResult::Fresh { present: n > 0, etag: None, count: Some(n), urls: None })
+        respond(PollResult::Fresh { present: n > 0, etag: None, count: Some(n), prs: None })
     }
 
     /// A confirmed changes-requested answer carrying the counted PRs' URLs.
@@ -972,7 +975,7 @@ mod tests {
             present: !urls.is_empty(),
             etag: None,
             count: Some(urls.len() as u32),
-            urls: Some(urls.iter().map(|u| u.to_string()).collect()),
+            prs: Some(urls.iter().map(|u| PrEntry::stub(u)).collect()),
         })
     }
 
@@ -1141,7 +1144,7 @@ mod tests {
         let mut state = new_state(true, false);
         state.begin_cycle();
         state.apply_notifications(PollResponse {
-            result: PollResult::Fresh { present: false, etag: None, count: None, urls: None },
+            result: PollResult::Fresh { present: false, etag: None, count: None, prs: None },
             poll_interval: Some(Duration::from_secs(120)),
         });
         assert_eq!(state.next_delay(), Duration::from_secs(120));
@@ -1152,7 +1155,7 @@ mod tests {
         let mut state = new_state(true, false);
         state.begin_cycle();
         state.apply_notifications(PollResponse {
-            result: PollResult::Fresh { present: false, etag: None, count: None, urls: None },
+            result: PollResult::Fresh { present: false, etag: None, count: None, prs: None },
             poll_interval: Some(Duration::from_secs(5)),
         });
         assert_eq!(state.next_delay(), MIN_POLL_INTERVAL);
@@ -1562,35 +1565,35 @@ mod tests {
     /// replace it, a blip holds it, and a track that has given up stops handing it out. Both
     /// GraphQL axes, and each keeps its own list.
     #[test]
-    fn pr_urls_are_held_through_a_blip_and_dropped_with_the_value() {
+    fn pr_entries_are_held_through_a_blip_and_dropped_with_the_value() {
         for axis in [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] {
             let mut state = PollState::new(false, [true, true, true]);
-            assert_eq!(state.pr_urls(axis), None, "no answer yet, so no list to stand behind");
+            assert_eq!(state.pr_entries(axis), None, "no answer yet, so no list to stand behind");
 
             state.apply_pr(axis, fresh_urls(&["https://github.com/o/r/pull/9"]));
-            assert_eq!(state.pr_urls(axis), Some(vec!["https://github.com/o/r/pull/9".to_string()]));
+            assert_eq!(state.pr_entries(axis), Some(vec![PrEntry::stub("https://github.com/o/r/pull/9")]));
             for other in PrAxis::ALL.iter().filter(|a| **a != axis) {
-                assert_eq!(state.pr_urls(*other), None, "{other:?} must not borrow {axis:?}'s list");
+                assert_eq!(state.pr_entries(*other), None, "{other:?} must not borrow {axis:?}'s list");
             }
 
             // A blip holds the list exactly as it holds the count.
             state.apply_pr(axis, transient());
-            assert_eq!(state.pr_urls(axis), Some(vec!["https://github.com/o/r/pull/9".to_string()]));
+            assert_eq!(state.pr_entries(axis), Some(vec![PrEntry::stub("https://github.com/o/r/pull/9")]));
 
             // ...but a track that admits ignorance must not keep vouching for the PRs it lost.
             for _ in 0..FAILURES_BEFORE_UNKNOWN {
                 state.apply_pr(axis, transient());
             }
-            assert_eq!(state.pr_urls(axis), None);
+            assert_eq!(state.pr_entries(axis), None);
         }
     }
 
     /// An axis the user switched off has no track, and must answer like one that never spoke.
     #[test]
-    fn pr_urls_is_none_when_the_axis_is_off() {
+    fn pr_entries_is_none_when_the_axis_is_off() {
         let state = PollState::new(false, [true, false, false]);
-        assert_eq!(state.pr_urls(PrAxis::ReadyToMerge), None);
-        assert_eq!(state.pr_urls(PrAxis::ChangesRequested), None);
+        assert_eq!(state.pr_entries(PrAxis::ReadyToMerge), None);
+        assert_eq!(state.pr_entries(PrAxis::ChangesRequested), None);
     }
 
     /// A silenced axis must not be revivable by a stray response. `apply_pr` is documented as a

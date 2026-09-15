@@ -167,7 +167,7 @@ pub fn pr_list_url(axis: PrAxis) -> String {
 /// is no value to thread through. `None` means "no confirmed list" — never "no PRs", which is
 /// `Some(vec![])`. `ReviewRequested`'s slot stays `None` for life: a `total_count` read has no hits
 /// to name, and its search page is exact anyway.
-static PR_URLS: std::sync::Mutex<[Option<Vec<String>>; 3]> =
+static PR_URLS: std::sync::Mutex<[Option<Vec<github::PrEntry>>; 3]> =
     std::sync::Mutex::new([None, None, None]);
 
 /// What clicking `axis`'s menu entry should open.
@@ -184,9 +184,9 @@ pub fn pr_targets(axis: PrAxis) -> Vec<String> {
 }
 
 /// The decision itself, split from the `static` so it can be tested without shared state.
-fn targets_from(axis: PrAxis, known: Option<&[String]>) -> Vec<String> {
+fn targets_from(axis: PrAxis, known: Option<&[github::PrEntry]>) -> Vec<String> {
     match known {
-        Some(urls) if !urls.is_empty() => urls.to_vec(),
+        Some(entries) if !entries.is_empty() => entries.iter().map(|e| e.url.clone()).collect(),
         _ => vec![pr_list_url(axis)],
     }
 }
@@ -460,7 +460,7 @@ fn run_poll_loop(
         // Published before `emit` for the same reason the outage check is: the menu entries the URLs
         // belong to are about to be relabeled with this cycle's counts, and a click between the two
         // writes must open what the new label claims, not what the old one did.
-        *PR_URLS.lock().expect("PR-URLs lock poisoned") = PrAxis::ALL.map(|axis| state.pr_urls(axis));
+        *PR_URLS.lock().expect("PR-URLs lock poisoned") = PrAxis::ALL.map(|axis| state.pr_entries(axis));
 
         // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
         // this cycle's responses, and taking them next to the code that produced them is what keeps a
@@ -1207,9 +1207,10 @@ mod tests {
     /// opens nothing reads as a dead menu entry.
     #[test]
     fn click_targets_are_the_confirmed_urls_or_the_search_page() {
+        let entries = vec![github::PrEntry::stub("https://github.com/o/r/pull/1")];
         let urls = vec!["https://github.com/o/r/pull/1".to_string()];
         for axis in [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] {
-            assert_eq!(targets_from(axis, Some(&urls)), urls);
+            assert_eq!(targets_from(axis, Some(&entries)), urls);
 
             let fallback = vec![pr_list_url(axis)];
             assert_eq!(targets_from(axis, None), fallback);
