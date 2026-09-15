@@ -22,8 +22,9 @@
   stale; a bar here is true right now, and clears itself the moment you act.
 - **In view.** Always on screen, no tab to open and no inbox to sweep. One glance says whether a
   teammate is waiting on you.
-- **It hoots.** A count going up makes a sound, so you react in minutes instead of at the next
-  sweep.
+- **It hoots.** A pull request you have not been told about makes a sound, so you react in minutes
+  instead of at the next sweep. It knows the difference between a new one and GitHub's search index
+  handing the same one back → [the hoot](docs/hoot.md).
 
 Three things it watches:
 

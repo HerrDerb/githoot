@@ -14,6 +14,7 @@
 //!
 //! Nothing here does I/O, so all of it is testable.
 
+use crate::infoln;
 use crate::github::{PollResponse, PollResult, PrEntry};
 use std::time::Duration;
 
@@ -343,6 +344,30 @@ impl PrAxis {
 }
 
 /// Per-signal state: last known value, conditional-request tag, and failure streak.
+/// How many pull requests an axis remembers having told the user about.
+///
+/// Twice `github::SEARCH_HITS_CAP`, and the factor is the whole argument: an axis can show at most a
+/// cap's worth at once, so a key must sit absent while a *further* hundred distinct pull requests
+/// churn past before it is dropped. That is far more real activity than the eventual-consistency blip
+/// this ledger exists to absorb.
+///
+/// Bounded by size rather than by age on purpose. Eviction is pure housekeeping here — a returning
+/// pull request is judged by its `activity`, however long it has been gone — and it is the only thing
+/// that can bring the false hoot back, since a key forgotten while the index was hiding it would
+/// sound on its return. So the bound is set where it cannot plausibly be reached by a blip, and
+/// entries are dropped least-recently-present first.
+const LEDGER_CAP: usize = 200;
+
+/// What the ledger remembers about one pull request.
+#[derive(Clone, Debug)]
+struct Seen {
+    /// `PrEntry::activity` as of the last time this pull request was counted.
+    activity: Option<String>,
+    conflicting: bool,
+    /// Which poll last saw it, for eviction order.
+    last_seen: u64,
+}
+
 struct Track {
     value: Presence,
     etag: Option<String>,
@@ -356,6 +381,17 @@ struct Track {
     /// describes exists only between two `apply` calls. See `PollState::take_pr_arrivals` for which
     /// transitions count.
     arrived: bool,
+    /// Pull requests this axis has already hooted for, keyed by `PrEntry::key`.
+    ///
+    /// The hoot used to be "the count went up", which is only a proxy for the thing it means. GitHub's
+    /// search index is eventually consistent and will drop a pull request from one answer and return
+    /// it in the next, so `3 -> 2 -> 3` sounded for a pull request the user had already been told
+    /// about. Identity answers the real question, and it closes a gap in the other direction too: one
+    /// pull request leaving and another arriving in the same cycle left the count flat and said
+    /// nothing at all.
+    seen: std::collections::HashMap<String, Seen>,
+    /// Counts successful answers, only to order `seen` for eviction.
+    polls: u64,
     /// The exact items `count` counted, for the axes whose poll reads its hits one by one
     /// (see `github::PollResult::Fresh::prs`). Held through failures for the same reason `value`
     /// is: a blip must not turn a click that opened the right PRs into one that opens a search
@@ -370,10 +406,71 @@ struct Track {
     ever_confirmed: bool,
 }
 
-/// Whether this answer is *more* than the last one, and so worth a hoot.
+impl Track {
+    /// Files this poll's pull requests and answers whether any of them is news.
+    ///
+    /// News is a key the ledger has never seen, an `activity` strictly newer than the one recorded,
+    /// or a conflict that was not there before.
+    ///
+    /// **Strictly newer, not merely different.** The index that hides a pull request can also serve a
+    /// stale copy of it, and `!=` would read that older timestamp as a change and sound — the bug
+    /// this exists to fix, back by another door. A timestamp only moves forward, so the test does too.
+    ///
+    /// `conflicting` is carried beside it because a conflict arriving from somebody else's merge
+    /// touches nothing on the pull request, so no timestamp anywhere moves. It is still work landing.
+    fn note(&mut self, prs: &[PrEntry]) -> bool {
+        self.polls = self.polls.saturating_add(1);
+        let mut news = false;
+        for pr in prs {
+            let entry = Seen {
+                activity: pr.activity.clone(),
+                conflicting: pr.conflicting,
+                last_seen: self.polls,
+            };
+            match self.seen.get(pr.key()) {
+                None => news = true,
+                Some(before) => {
+                    if pr.activity > before.activity || (pr.conflicting && !before.conflicting) {
+                        news = true;
+                    } else if before.last_seen < self.polls - 1 {
+                        // The blip, caught in the act. Logged because "GitHub sometimes omits a PR"
+                        // was an observation before it was a fix, and this is the line that says how
+                        // often it really happens — and whether it is the index or our own 100-hit
+                        // cap churning, which has a better answer than tolerating it.
+                        infoln!(
+                            "search dropped {} for {} poll(s) and returned it unchanged; no hoot",
+                            pr.key(),
+                            self.polls - before.last_seen - 1
+                        );
+                    }
+                }
+            }
+            self.seen.insert(pr.key().to_string(), entry);
+        }
+        self.evict();
+        news
+    }
+
+    /// Drops the least recently present keys once the ledger is over `LEDGER_CAP`.
+    fn evict(&mut self) {
+        if self.seen.len() <= LEDGER_CAP {
+            return;
+        }
+        let mut ages: Vec<u64> = self.seen.values().map(|s| s.last_seen).collect();
+        // The cut is the `len - CAP`-th oldest stamp; everything at or below it goes.
+        ages.sort_unstable();
+        let cut = ages[self.seen.len() - LEDGER_CAP - 1];
+        self.seen.retain(|_, s| s.last_seen > cut);
+    }
+}
+
+/// Whether this answer is *more* than the last one.
 ///
-/// Split out of `Track::apply` because it is the whole feature, and because the fallback deserves to
-/// be stated once rather than inlined into a condition nobody can read.
+/// **No longer the hoot rule**, only its stand-in. `Track::note` decides by identity now, because a
+/// rising count was only ever a proxy: GitHub's search index drops a pull request from one answer and
+/// returns it in the next, which reads as `3 -> 2 -> 3` and sounded for something the user had already
+/// been told about. This is reached only when an answer carries no list to compare identities against
+/// — a payload GitHub only partly sent — where the count really is the best evidence left.
 ///
 /// - Both counts known: strictly greater. `2 -> 5` is three new pull requests and hoots; `5 -> 2` and
 ///   `2 -> 2` do not. This is what makes a busy axis able to speak again — under the old rule an axis
@@ -408,6 +505,8 @@ impl Track {
             detail: Some("starting up".to_string()),
             count: None,
             prs: None,
+            seen: std::collections::HashMap::new(),
+            polls: 0,
             needs_reauth: false,
             arrived: false,
             ever_confirmed: false,
@@ -435,8 +534,24 @@ impl Track {
                 let is_first_answer = !self.ever_confirmed;
                 self.ever_confirmed = true;
                 self.value = if present { Presence::Yes } else { Presence::No };
-                if present && rose(previous_count, count, was_confirmed_absent || is_first_answer) {
-                    self.arrived = true;
+
+                // Identity when the answer names its hits, which every axis now does. `rose` is left
+                // for the case where it cannot: a payload hole costs the whole list (see
+                // `github::Parsed::prs`), and there is then nothing to compare — so the ledger is
+                // held untouched and nothing sounds, which errs quiet, the right way to be wrong
+                // about a noise.
+                match self.prs.clone() {
+                    Some(prs) => {
+                        if self.note(&prs) {
+                            self.arrived = true;
+                        }
+                    }
+                    None => {
+                        if present && rose(previous_count, count, was_confirmed_absent || is_first_answer)
+                        {
+                            self.arrived = true;
+                        }
+                    }
                 }
                 None
             }
@@ -713,28 +828,27 @@ impl PollState {
     ///
     /// ## Which transitions count
     ///
-    /// **Any rise in the count**, which is the rule — see `rose`. `0 -> 3` hoots, and so does `2 -> 5`:
-    /// three pull requests turning up on an axis that was already busy is three pieces of news, and
-    /// hearing nothing because the dot was lit already was the reason this was changed.
+    /// **A pull request the axis has not already told you about** — see `Track::note`. A key it has
+    /// never seen, one whose `activity` is strictly newer than the one on file, or one that has grown
+    /// a merge conflict. Three landing at once is three pieces of news and one sound.
     ///
-    /// The other direction is silent. `5 -> 2` is work leaving, `2 -> 2` is no work at all, and
-    /// `NotModified` cannot be either by construction: it means nothing changed.
+    /// The other direction is silent: a pull request leaving is work leaving, and `NotModified`
+    /// cannot be news by construction.
     ///
-    /// Two cases have no number to compare against, and there `rose` falls back to the old presence
-    /// edge:
+    /// Everything the old count rule got right falls out of the ledger for free:
     ///
-    /// - The **first** confirmed answer of the process, when it is `Yes`. What it replaced was
-    ///   `Unknown`, not a known zero — but starting the app and finding PRs already waiting is exactly
-    ///   when the user wants telling, and staying silent there would mean the hoot only ever worked
-    ///   for people who left the app running.
-    /// - The same thing after `clear_pr_auth`, which hands out fresh `Track`s on purpose.
+    /// - The **first** confirmed answer of the process hoots if anything is waiting, because an empty
+    ///   ledger makes every pull request unseen. Starting the app and finding work already there is
+    ///   exactly when the user wants telling. Same after `clear_pr_auth`, which hands out fresh
+    ///   `Track`s on purpose.
+    /// - A failure streak recovering on the **same** pull requests is silent, because they are the
+    ///   same pull requests. The ledger is untouched by failures, so this needs no `ever_confirmed`
+    ///   reasoning of its own. Anything that turned up while the poll was down is unseen, and hoots.
     ///
-    /// What deliberately does **not** count is a failure streak recovering at the count it left. It
-    /// looks identical in `value` to the launch case, which is why `Track::ever_confirmed` exists to
-    /// tell them apart — without it, every network blip would re-announce a number the user has
-    /// already seen. Recovering at a *higher* count does hoot, and should: the count is held through
-    /// failures (see `Track::apply`), so the comparison still has a real number on both sides and the
-    /// rise it finds is real work that turned up while the poll was down.
+    /// And it closes a gap the count rule had: one pull request leaving and another arriving in the
+    /// same cycle left the number flat and said nothing at all.
+    ///
+    /// Only an answer carrying no list at all falls back to `rose`.
     ///
     /// ## Why taking, rather than asking
     ///
@@ -809,6 +923,12 @@ impl PollState {
             return None;
         }
         track.prs.clone()
+    }
+
+    /// How many pull requests `axis` remembers. Test-only: the bound is the point, not the contents.
+    #[cfg(test)]
+    pub fn ledger_len(&self, axis: PrAxis) -> usize {
+        self.pr[axis.index()].as_ref().map_or(0, |t| t.seen.len())
     }
 
     /// Text for the tray menu item that opens `axis`'s list, carrying the exact count.
@@ -2025,6 +2145,214 @@ mod tests {
 
         state.apply_notifications(fresh(false));
         assert!(!state.icon().shows_exclamation(), "a recovered poll must take the mark down");
+    }
+
+    // ─── The hoot ledger ──────────────────────────────────────────────────────
+
+    /// One pull request, with the two things the ledger compares.
+    fn pr(key: &str, activity: &str, conflicting: bool) -> PrEntry {
+        let mut e = PrEntry::stub(&format!("https://github.com/o/r/pull/{key}"));
+        e.id = Some(key.to_string());
+        e.activity = Some(activity.to_string());
+        e.conflicting = conflicting;
+        e
+    }
+
+    fn fresh_prs(prs: &[PrEntry]) -> PollResponse {
+        respond(PollResult::Fresh {
+            present: !prs.is_empty(),
+            etag: None,
+            count: Some(prs.len() as u32),
+            prs: Some(prs.to_vec()),
+        })
+    }
+
+    fn hooted(state: &mut PollState) -> bool {
+        state.take_pr_arrivals()[PrAxis::ReviewRequested.index()]
+    }
+
+    fn ledger_state() -> PollState {
+        PollState::new(false, [true; 3])
+    }
+
+    /// **The bug this ledger exists for.** GitHub's search index is eventually consistent and drops a
+    /// pull request from one answer only to return it in the next. Counting rises, that reads as
+    /// `3 -> 2 -> 3` and hoots for a pull request the user was already told about.
+    #[test]
+    fn a_pr_that_vanishes_and_returns_unchanged_does_not_hoot() {
+        let (a, b, c) = (
+            pr("a", "2026-09-01T00:00:00Z", false),
+            pr("b", "2026-09-01T00:00:00Z", false),
+            pr("c", "2026-09-01T00:00:00Z", false),
+        );
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a.clone(), b.clone(), c.clone()]));
+        assert!(hooted(&mut state), "the first answer is news");
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a.clone(), b.clone()]));
+        assert!(!hooted(&mut state), "losing one is never news");
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a, b, c]));
+        assert!(!hooted(&mut state), "the same PR in the same state is not new");
+    }
+
+    /// The thing the ledger must not break.
+    #[test]
+    fn a_genuinely_new_pr_still_hoots() {
+        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
+        assert!(hooted(&mut state));
+
+        state.apply_pr(
+            PrAxis::ReviewRequested,
+            fresh_prs(&[a, pr("b", "2026-09-02T00:00:00Z", false)]),
+        );
+        assert!(hooted(&mut state), "a key never seen before is news");
+    }
+
+    /// A pull request coming back *changed* is news. Reviewed, pushed over, re-requested: something
+    /// happened, and `activity` is the later of the PR's own stamp and its newest review's.
+    #[test]
+    fn a_returning_pr_with_newer_activity_hoots() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", false)]));
+        assert!(hooted(&mut state));
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[]));
+        assert!(!hooted(&mut state));
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-04T00:00:00Z", false)]));
+        assert!(hooted(&mut state), "it came back with something new on it");
+    }
+
+    /// **Strictly newer, not merely different.** The index that drops a pull request can also serve a
+    /// stale copy of it, and an equality test would read that older stamp as a change and hoot — the
+    /// very bug, back again. A timestamp only goes forward, so the comparison should too.
+    #[test]
+    fn a_stale_older_timestamp_does_not_hoot() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-08T00:00:00Z", false)]));
+        assert!(hooted(&mut state));
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-02T00:00:00Z", false)]));
+        assert!(!hooted(&mut state), "the index went backwards; that is not news");
+    }
+
+    /// A conflict arriving because somebody else merged to main touches nothing on your pull request,
+    /// so no timestamp anywhere moves. It is still work landing on you.
+    #[test]
+    fn a_conflict_appearing_hoots_even_though_no_timestamp_moved() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", false)]));
+        let _ = state.take_pr_arrivals();
+
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", true)]));
+        assert!(
+            state.take_pr_arrivals()[PrAxis::ChangesRequested.index()],
+            "the conflict is new even though nothing was done to the PR"
+        );
+    }
+
+    /// And the other way is not news: a conflict you resolved is work leaving.
+    #[test]
+    fn a_conflict_clearing_is_not_news() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", true)]));
+        let _ = state.take_pr_arrivals();
+
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", false)]));
+        assert!(!state.take_pr_arrivals()[PrAxis::ChangesRequested.index()]);
+    }
+
+    /// Unchanged behaviour: a run of failed polls holds the list, and recovering on the same pull
+    /// requests is not news. This used to rest on the count being held; it now rests on the ledger,
+    /// which never saw the failures at all.
+    #[test]
+    fn recovering_from_failures_on_the_same_prs_is_silent() {
+        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
+        assert!(hooted(&mut state));
+
+        for _ in 0..4 {
+            state.apply_pr(PrAxis::ReviewRequested, transient());
+        }
+        assert!(!hooted(&mut state));
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a]));
+        assert!(!hooted(&mut state), "the same PR after a blip is not a new one");
+    }
+
+    /// An answer the parser could not fully read carries no list (see `github::Parsed::prs`), so
+    /// there is nothing to compare identities against and the count rule stands in.
+    ///
+    /// That is not a hole in the fix: the blip this ledger exists for returns a perfectly *readable*
+    /// list both times, so it never reaches this path. Only a genuinely broken payload does, and
+    /// there the count is the best evidence there is.
+    ///
+    /// The ledger itself is left untouched, so it still recognises the pull request afterwards.
+    #[test]
+    fn an_unreadable_list_falls_back_to_the_count_and_keeps_the_ledger() {
+        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
+        assert!(hooted(&mut state));
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(9));
+        assert!(hooted(&mut state), "no list to judge, so a rise is the only evidence left");
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a]));
+        assert!(!hooted(&mut state), "and the ledger still remembers it");
+    }
+
+    /// Launching into a queue that already has pull requests in it hoots once, which is what the
+    /// empty ledger gives for free.
+    #[test]
+    fn a_first_answer_on_a_busy_queue_hoots_once() {
+        let mut state = ledger_state();
+        let prs = [pr("a", "2026-09-01T00:00:00Z", false), pr("b", "2026-09-01T00:00:00Z", false)];
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&prs));
+        assert!(hooted(&mut state));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&prs));
+        assert!(!hooted(&mut state), "and not again");
+    }
+
+    /// Eviction is housekeeping, and it is the only thing that can bring the false hoot back: a pull
+    /// request forgotten while the index was hiding it would sound on its return. So the bound is
+    /// generous and by *size* rather than age — a key must sit absent while a whole cap's worth of
+    /// other pull requests churn past before it is dropped.
+    #[test]
+    fn a_key_survives_far_more_absence_than_any_index_blip() {
+        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
+        assert!(hooted(&mut state));
+
+        for i in 0..20 {
+            state.apply_pr(
+                PrAxis::ReviewRequested,
+                fresh_prs(&[pr(&format!("x{i}"), "2026-09-01T00:00:00Z", false)]),
+            );
+            let _ = state.take_pr_arrivals();
+        }
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a]));
+        assert!(!hooted(&mut state), "twenty polls away is still an index blip, not news");
+    }
+
+    /// But it is bounded, or a long-running tray accumulates every pull request it has ever seen.
+    #[test]
+    fn the_ledger_is_bounded() {
+        let mut state = ledger_state();
+        for i in 0..(LEDGER_CAP * 2) {
+            state.apply_pr(
+                PrAxis::ReviewRequested,
+                fresh_prs(&[pr(&format!("x{i}"), "2026-09-01T00:00:00Z", false)]),
+            );
+            let _ = state.take_pr_arrivals();
+        }
+        assert!(state.ledger_len(PrAxis::ReviewRequested) <= LEDGER_CAP);
     }
 
     // ─── Rising counts (the hoot) ─────────────────────────────────────────────

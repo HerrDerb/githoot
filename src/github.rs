@@ -50,6 +50,10 @@ const MAX_DETAIL_CHARS: usize = 200;
 /// hole here must cost a line of the page, never a number on the icon.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrEntry {
+    /// GitHub's immutable node id, when it sent one. The hoot ledger keys on this rather than the
+    /// URL because a repo rename changes a URL, and a pull request that merely moved would read as a
+    /// brand-new one and hoot for nothing. `Option` like every other payload field — `key` falls back.
+    pub id: Option<String>,
     pub url: String,
     pub title: Option<String>,
     /// `owner/name`, GitHub's `nameWithOwner`.
@@ -59,6 +63,17 @@ pub struct PrEntry {
     pub author: Option<String>,
     /// GitHub's ISO-8601, kept raw. Rendering it is the page's job, not the client's.
     pub updated_at: Option<String>,
+    /// The newest thing that has happened to this pull request: the later of `updatedAt` and the
+    /// newest review's `submittedAt`.
+    ///
+    /// The hoot ledger compares this to decide whether a pull request that reappeared actually
+    /// *changed*, and taking the max is what makes that safe without knowing which events GitHub
+    /// chooses to bump `updatedAt` for — which it does not document, and which a review object
+    /// cannot answer for itself since it carries only `submittedAt` and no update stamp. If a
+    /// submitted review does not move `updatedAt`, its own timestamp still moves this.
+    ///
+    /// Fixed-width UTC ISO-8601, so a plain string comparison is chronological.
+    pub activity: Option<String>,
     pub is_draft: bool,
     /// The head branch conflicts with the base. Only ever `true` for a definite `CONFLICTING`; an
     /// uncomputed `UNKNOWN` is absence of evidence, not evidence of a clean merge.
@@ -79,18 +94,27 @@ pub struct PrEntry {
 impl PrEntry {
     pub fn stub(url: &str) -> Self {
         PrEntry {
+            id: None,
             url: url.to_string(),
             title: None,
             repo: None,
             number: None,
             author: None,
             updated_at: None,
+            activity: None,
             is_draft: false,
             conflicting: false,
             checks: CheckRollup::Unknown,
             verdicts: Vec::new(),
             pending: Vec::new(),
         }
+    }
+}
+
+impl PrEntry {
+    /// What the hoot ledger files this pull request under.
+    pub fn key(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.url)
     }
 }
 
@@ -282,11 +306,11 @@ query($q:String!,$hits:Int!,$reviews:Int!){\
   rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
-      url title number isDraft updatedAt mergeable \
+      id url title number isDraft updatedAt mergeable \
       repository{nameWithOwner}\
       author{login}\
       statusCheckRollup{state}\
-      latestOpinionatedReviews(first:$reviews){nodes{state author{login}}}\
+      latestOpinionatedReviews(first:$reviews){nodes{state submittedAt author{login}}}\
       reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login} ...on Team{slug}}}}\
     }}\
   }\
@@ -476,6 +500,7 @@ struct SearchConnection {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PullRequestNode {
+    id: Option<String>,
     /// The PR's own web page. `Option` for the same lenience as everything else here: a hole
     /// in the payload must degrade the menu entry (fall back to the search page), not the count.
     url: Option<String>,
@@ -515,8 +540,12 @@ struct ReviewConnection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Review {
     state: String,
+    /// When the review was submitted. A review object has no update stamp of its own, so this is the
+    /// only timestamp it can contribute to `PrEntry::activity`.
+    submitted_at: Option<String>,
     /// `None` for a review whose author has since been deleted.
     author: Option<Author>,
 }
@@ -702,13 +731,26 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
         })
         .collect();
 
+    // The latest of everything dated on this hit. `max` over `Option<&str>` would treat `None` as
+    // smaller than any string, which is exactly the wanted behaviour, but spelling it out with
+    // `flatten` keeps "no timestamps at all" as `None` rather than as an empty string.
+    let newest_review = node
+        .latest_opinionated_reviews
+        .iter()
+        .flat_map(|c| c.nodes.iter().flatten())
+        .filter_map(|review| review.submitted_at.as_deref())
+        .max();
+    let activity = [node.updated_at.as_deref(), newest_review].into_iter().flatten().max();
+
     Some(PrEntry {
+        id: node.id.clone(),
         url: node.url.clone()?,
         title: node.title.clone(),
         repo: node.repository.as_ref().map(|r| r.name_with_owner.clone()),
         number: node.number,
         author: node.author.as_ref().map(|a| a.login.clone()),
         updated_at: node.updated_at.clone(),
+        activity: activity.map(str::to_string),
         is_draft: node.is_draft,
         conflicting: is_conflicting(node),
         checks: node
@@ -1470,6 +1512,105 @@ mod tests {
         assert_eq!(truncate("short", 50), "short");
     }
 
+    // ── Activity, for the hoot ledger ─────────────────────────────────────────
+
+    /// A hit with an explicit `updatedAt` and review timestamps.
+    fn dated(url: &str, updated: &str, reviews: &[(&str, &str, &str)]) -> String {
+        let nodes = reviews
+            .iter()
+            .map(|(state, login, at)| {
+                format!(
+                    r#"{{"state":"{state}","author":{{"login":"{login}"}},"submittedAt":"{at}"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"url":"{url}","updatedAt":"{updated}","latestOpinionatedReviews":{{"nodes":[{nodes}]}},"reviewRequests":{{"nodes":[]}}}}"#
+        )
+    }
+
+    /// Read through the review-requested parser, which keeps every hit — these tests are about what
+    /// an entry *carries*, not about which predicate counts it.
+    fn only_changes_entry(body: &str) -> PrEntry {
+        match search(StatusCode::OK, &headers(&[]), body, 0) {
+            PollResult::Fresh { prs: Some(list), .. } => {
+                assert_eq!(list.len(), 1);
+                list.into_iter().next().unwrap()
+            }
+            other => panic!("expected Fresh with a list, got {:?}", other),
+        }
+    }
+
+    /// `activity` is the newest thing that happened, wherever it is recorded.
+    ///
+    /// GitHub does not document which events bump a pull request's `updatedAt`, and a review object
+    /// carries only `submittedAt` with no update timestamp of its own. Taking the max settles it by
+    /// construction: if a submitted review does not move `updatedAt`, its own stamp still moves this.
+    #[test]
+    fn activity_is_the_latest_of_the_pr_and_its_reviews() {
+        let review_newer = dated(
+            "https://github.com/o/r/pull/1",
+            "2026-09-01T00:00:00Z",
+            &[("APPROVED", "alice", "2026-09-05T12:00:00Z")],
+        );
+        assert_eq!(
+            only_changes_entry(&payload(&[review_newer])).activity.as_deref(),
+            Some("2026-09-05T12:00:00Z")
+        );
+
+        let pr_newer = dated(
+            "https://github.com/o/r/pull/2",
+            "2026-09-09T00:00:00Z",
+            &[("APPROVED", "alice", "2026-09-05T12:00:00Z")],
+        );
+        assert_eq!(
+            only_changes_entry(&payload(&[pr_newer])).activity.as_deref(),
+            Some("2026-09-09T00:00:00Z")
+        );
+    }
+
+    /// The newest of *all* the reviews, not the last one listed.
+    #[test]
+    fn activity_takes_the_newest_review_whatever_the_order() {
+        let body = dated(
+            "https://github.com/o/r/pull/1",
+            "2026-09-01T00:00:00Z",
+            &[
+                ("APPROVED", "alice", "2026-09-07T00:00:00Z"),
+                ("CHANGES_REQUESTED", "bob", "2026-09-03T00:00:00Z"),
+            ],
+        );
+        assert_eq!(
+            only_changes_entry(&payload(&[body])).activity.as_deref(),
+            Some("2026-09-07T00:00:00Z")
+        );
+    }
+
+    /// A payload with no timestamps at all leaves `activity` unknown rather than inventing one.
+    #[test]
+    fn activity_is_none_when_nothing_is_dated() {
+        let bare = verdict_hit("https://github.com/o/r/pull/1", &[], &[]);
+        assert_eq!(only_changes_entry(&payload(&[bare])).activity, None);
+    }
+
+    /// The node id is the ledger's key when GitHub sends one: unlike a URL it survives a repo rename,
+    /// which would otherwise read as a brand-new pull request and hoot once for nothing.
+    #[test]
+    fn the_node_id_is_read_when_present() {
+        let body = r#"{"id":"PR_kwDO","url":"https://github.com/o/r/pull/1","latestOpinionatedReviews":{"nodes":[]},"reviewRequests":{"nodes":[]}}"#.to_string();
+        let e = only_changes_entry(&payload(&[body]));
+        assert_eq!(e.id.as_deref(), Some("PR_kwDO"));
+        assert_eq!(e.key(), "PR_kwDO");
+    }
+
+    /// And the URL stands in when it is not, so the ledger always has something to key on.
+    #[test]
+    fn the_url_is_the_key_when_there_is_no_node_id() {
+        let e = only_changes_entry(&payload(&[verdict_hit("https://github.com/o/r/pull/1", &[], &[])]));
+        assert_eq!(e.key(), "https://github.com/o/r/pull/1");
+    }
+
     // ── Merge conflicts as work ───────────────────────────────────────────────
 
     /// A hit with an explicit `mergeable`, plus whoever is attached to it.
@@ -1814,6 +1955,7 @@ mod tests {
             "nameWithOwner",
             "statusCheckRollup",
             "mergeable",
+            "submittedAt",
             "rateLimit",
         ] {
             assert!(PR_REVIEWS_DOCUMENT.contains(field), "document is missing {field}");

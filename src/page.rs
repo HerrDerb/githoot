@@ -379,12 +379,14 @@ mod tests {
 
     fn entry(url: &str) -> PrEntry {
         PrEntry {
+            id: None,
             url: url.to_string(),
             title: Some("Fix the bed-exit debounce".to_string()),
             repo: Some("qumea/care-api".to_string()),
             number: Some(2204),
             author: Some("octocat".to_string()),
             updated_at: Some("2026-09-15T09:12:33Z".to_string()),
+            activity: None,
             is_draft: false,
             conflicting: false,
             checks: CheckRollup::Success,
