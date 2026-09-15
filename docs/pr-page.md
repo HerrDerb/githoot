@@ -14,7 +14,7 @@ reviewer's standing verdict.
 
 | | |
 |---|---|
-| Address | `http://githoot.localhost:<port>/<token>/<bar>` |
+| Address | `http://githoot.localhost:<port>/<token>/<bar>`, and `/settings` |
 | Bound | On the first click, never at startup |
 | Port and token | New on every run |
 | Contents | Title, repo, number, author, age, draft, checks, merge conflict, open Copilot comments, per-reviewer verdicts |
@@ -74,6 +74,9 @@ page, and each one stops something the others do not.
   there is no record for anyone to flip. Bare `localhost` is rejected with the rest — nothing GitHoot
   hands the browser uses it, and it *is* a name a resolver can be talked out of.
 - **No CORS header, ever**, so a cross-origin page cannot read the body even if it reached the path.
+- **An `Origin` check on writes.** Only the settings page accepts a `POST`, and only when the browser
+  says this page submitted it. That is a different question from the `Host` allowlist, which a
+  cross-site form passes for free → [the settings page](menu-and-settings.md#the-settings-page).
 
 Two more things about what leaves the page:
 
@@ -84,8 +87,9 @@ Two more things about what leaves the page:
   titles come from whoever opened them, so they are escaped as hostile text; the CSP is the backstop
   behind that, not the control.
 
-Only `GET` and `HEAD` are answered, there is no keep-alive, and the request head is capped at 8 KiB
-with a five-second timeout, so a client that connects and says nothing cannot wedge the listener.
+Only `GET`, `HEAD` and — on the settings route alone — `POST` are answered. There is no keep-alive, the
+request head is capped at 8 KiB and a form body at 64 KiB, and both have a five-second timeout, so a
+client that connects and says nothing cannot wedge the listener.
 
 ## When it cannot start
 

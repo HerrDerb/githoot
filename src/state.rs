@@ -223,6 +223,9 @@ pub const SETTINGS_FILE_MENU_LABEL: &str = "Open settings file";
 /// `github_status::STATUS_PAGE_URL`.
 pub const REPOSITORY_MENU_LABEL: &str = "Open GitHoot on GitHub";
 
+/// Text of the Settings entry that opens the configuration page.
+pub const SETTINGS_PAGE_MENU_LABEL: &str = "Open settings page";
+
 /// Text of the Settings checkbox for counting Copilot's unresolved comments as work.
 pub const COPILOT_MENU_LABEL: &str = "Count Copilot comments as work";
 

@@ -225,6 +225,86 @@ pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
     set_flag(&config_path(app_asset_path), KEY_SOUND, on)
 }
 
+/// Every key a user can change, paired with whether it takes effect without a restart.
+///
+/// Public because the settings page renders from it: one list, so a key cannot appear in the form
+/// without the page knowing whether to warn about it, and cannot be added to the file without
+/// appearing in the form.
+pub const WRITABLE_KEYS: [(&str, bool); 9] = [
+    (KEY_REVIEW_REQUESTED, false),
+    (KEY_READY_TO_MERGE, false),
+    (KEY_CHANGES_REQUESTED, false),
+    (KEY_COPILOT_REVIEWS, true),
+    (KEY_SOUND, true),
+    (KEY_NOTIFICATION_INDICATION, false),
+    (KEY_UPDATE_CHECK, false),
+    (KEY_LOG_LEVEL, false),
+    (KEY_STATUS_COMPONENTS, false),
+];
+
+/// Every component GitHub publishes, for the settings page's checkboxes.
+pub fn all_components() -> &'static [&'static str] {
+    &KNOWN_STATUS_COMPONENTS
+}
+
+/// The value each key currently holds in `wanted`, as it would be written.
+fn value_of(wanted: &Config, key: &str) -> String {
+    let flag = |on: bool| if on { "on".to_string() } else { "off".to_string() };
+    match key {
+        KEY_REVIEW_REQUESTED => flag(wanted.pr_enabled[0]),
+        KEY_READY_TO_MERGE => flag(wanted.pr_enabled[1]),
+        KEY_CHANGES_REQUESTED => flag(wanted.pr_enabled[2]),
+        KEY_COPILOT_REVIEWS => flag(wanted.copilot_reviews),
+        KEY_SOUND => flag(wanted.sound),
+        KEY_NOTIFICATION_INDICATION => flag(wanted.notification_indication),
+        KEY_UPDATE_CHECK => flag(wanted.update_check),
+        KEY_LOG_LEVEL => match wanted.log_level {
+            Level::Info => "info".to_string(),
+            Level::Error => "error".to_string(),
+        },
+        KEY_STATUS_COMPONENTS => wanted.status_components.join(", "),
+        other => unreachable!("{other} is not a writable key"),
+    }
+}
+
+/// Writes `wanted` to `config.txt`, touching only the keys whose value actually changes.
+///
+/// Returns the keys it wrote. The settings page uses that to say which of them need a restart, and
+/// to keep quiet when a save changed nothing.
+///
+/// **Only keys in `WRITABLE_KEYS` can be written**, and the value for each is produced here from a
+/// typed `Config` rather than passed through from the request. A settings form that could name its
+/// own keys would be a way to write arbitrary lines into the file.
+///
+/// Each key goes through the same single-line edit `set_sound` makes, so comments, blank lines,
+/// spacing and keys this version has never heard of survive byte for byte. A key the file does not
+/// have yet is appended rather than the file regenerated.
+pub fn save(app_asset_path: &Path, wanted: &Config) -> Result<Vec<&'static str>, String> {
+    let path = config_path(app_asset_path);
+    let (current, _) = Config::load(app_asset_path);
+    let changed: Vec<&'static str> = WRITABLE_KEYS
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| value_of(wanted, key) != value_of(&current, key))
+        .collect();
+
+    if changed.is_empty() {
+        return Ok(changed);
+    }
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+    for key in &changed {
+        content = with_value_set(&content, key, &value_of(wanted, key));
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| format!("could not write {} ({e})", path.display()))?;
+    Ok(changed)
+}
+
+/// Whether `key` takes effect without a restart.
+pub fn is_live(key: &str) -> bool {
+    WRITABLE_KEYS.iter().any(|(k, live)| *k == key && *live)
+}
+
 /// Writes the `copilotReviews` value, the same surgical single-line edit `set_sound` makes.
 pub fn set_copilot_reviews(app_asset_path: &Path, on: bool) -> Result<(), String> {
     set_flag(&config_path(app_asset_path), KEY_COPILOT_REVIEWS, on)
@@ -331,6 +411,35 @@ impl Config {
     /// Split out purely so it can be tested: the whole risk in this file is a key being wired to the
     /// wrong setting, and `load` cannot be exercised without a filesystem. `parse` plus this is the
     /// entire behaviour of `load` bar reading the file.
+    /// Reads a submitted settings form, falling back to `current` for anything it does not mention.
+    ///
+    /// Takes `crate::serve::Form` rather than a map because a group of checkboxes posts its name once
+    /// per ticked box, and an **unticked** box posts nothing at all — which is how a form says "off",
+    /// and why absence is read as `false` here rather than as "leave it alone".
+    ///
+    /// `current` covers the one field a form cannot express: a `logLevel` the page did not offer.
+    pub fn from_form(form: &crate::serve::Form, current: &Self) -> Self {
+        Config {
+            update_check: form.ticked(KEY_UPDATE_CHECK),
+            notification_indication: form.ticked(KEY_NOTIFICATION_INDICATION),
+            pr_enabled: PrAxis::ALL.map(|axis| form.ticked(pr_key(axis))),
+            sound: form.ticked(KEY_SOUND),
+            copilot_reviews: form.ticked(KEY_COPILOT_REVIEWS),
+            log_level: form
+                .get(KEY_LOG_LEVEL)
+                .and_then(|v| Level::parse(v))
+                .unwrap_or(current.log_level),
+            // Only names GitHub actually publishes, so a hand-crafted post cannot write a component
+            // that would never match and would only ever show up as one line in the log.
+            status_components: form
+                .all(KEY_STATUS_COMPONENTS)
+                .into_iter()
+                .filter(|name| KNOWN_STATUS_COMPONENTS.contains(name))
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
     fn from_values(values: &std::collections::HashMap<&str, &str>) -> Self {
         Config {
             notification_indication: values
@@ -378,7 +487,7 @@ impl Config {
 }
 
 /// The config key for `axis`. The one place the mapping lives.
-fn pr_key(axis: PrAxis) -> &'static str {
+pub fn pr_key(axis: PrAxis) -> &'static str {
     match axis {
         PrAxis::ReviewRequested => KEY_REVIEW_REQUESTED,
         PrAxis::ReadyToMerge => KEY_READY_TO_MERGE,
@@ -535,6 +644,93 @@ fn is_on(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Saving from the settings page ─────────────────────────────────────────
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("githoot-cfg-{}-{name}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// Only the keys that actually changed are written, so saving a form you did not touch leaves the
+    /// file alone and the page can say so.
+    #[test]
+    fn saving_writes_only_what_changed() {
+        let dir = temp_dir("only-changed");
+        let (mut cfg, _) = Config::load(&dir);
+        assert_eq!(save(&dir, &cfg).expect("save"), Vec::<&str>::new(), "nothing touched");
+
+        cfg.sound = !cfg.sound;
+        assert_eq!(save(&dir, &cfg).expect("save"), vec![KEY_SOUND]);
+
+        let (after, _) = Config::load(&dir);
+        assert_eq!(after.sound, cfg.sound);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The surgical edit `set_sound` makes, kept: a save must not cost the user their comments.
+    #[test]
+    fn saving_preserves_comments_and_unknown_keys() {
+        let dir = temp_dir("preserve");
+        let path = config_path(&dir);
+        std::fs::write(&path, "# my note\nsound=on\nsomeFutureKey=42\n").expect("seed");
+
+        let (mut cfg, _) = Config::load(&dir);
+        cfg.sound = false;
+        save(&dir, &cfg).expect("save");
+
+        let after = std::fs::read_to_string(&path).expect("read");
+        assert!(after.contains("# my note"), "got {after:?}");
+        assert!(after.contains("someFutureKey=42"), "got {after:?}");
+        assert!(after.contains("sound=off"), "got {after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The component list survives a round trip, which is the key the settings page exists for.
+    #[test]
+    fn saving_round_trips_the_component_list() {
+        let dir = temp_dir("components");
+        let (mut cfg, _) = Config::load(&dir);
+        cfg.status_components = vec!["Issues".to_string(), "Actions".to_string()];
+        save(&dir, &cfg).expect("save");
+
+        let (after, _) = Config::load(&dir);
+        assert_eq!(after.status_components, ["Issues", "Actions"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_level_round_trips() {
+        let dir = temp_dir("loglevel");
+        let (mut cfg, _) = Config::load(&dir);
+        cfg.log_level = Level::Info;
+        save(&dir, &cfg).expect("save");
+        let (after, _) = Config::load(&dir);
+        assert!(matches!(after.log_level, Level::Info));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every key the page can write must be one `load` reads, and every key `load` reads must be one
+    /// the page can write — or a setting exists that the page silently cannot reach.
+    #[test]
+    fn the_writable_keys_are_exactly_the_keys_that_are_read() {
+        let mut writable: Vec<&str> = WRITABLE_KEYS.iter().map(|(k, _)| *k).collect();
+        let text = default_config();
+        let mut generated: Vec<&str> = parse(&text).keys().copied().collect();
+        writable.sort_unstable();
+        generated.sort_unstable();
+        assert_eq!(writable, generated);
+    }
+
+    /// The two settings with a checkbox on the tray are the two that need no restart.
+    #[test]
+    fn only_the_menu_checkboxes_are_live() {
+        let live: Vec<&str> =
+            WRITABLE_KEYS.iter().filter(|(_, live)| *live).map(|(k, _)| *k).collect();
+        assert_eq!(live, [KEY_COPILOT_REVIEWS, KEY_SOUND]);
+        assert!(is_live(KEY_SOUND) && !is_live(KEY_LOG_LEVEL));
+    }
 
     // ── The live switch ───────────────────────────────────────────────────────
     /// The whole point of the type: the menu holds one handle and the poll loop another, and a click

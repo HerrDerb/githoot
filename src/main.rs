@@ -457,6 +457,17 @@ fn main() {
 
     // Opens the file and hands off to the poll thread, which arms the watcher that offers a restart once
     // the edits settle. The open happens here because it is instant; the fifteen-minute watch does not.
+    // The page first, the raw file second: the page validates, the file is the escape hatch.
+    let settings_page_item = MenuItem::with_label(state::SETTINGS_PAGE_MENU_LABEL);
+    let settings_page_path = app_asset_path.clone();
+    settings_page_item.connect_activate(move |_| {
+        if !serve::open_settings_page() {
+            // No listener, so fall back to the file — losing the only way into the configuration
+            // because a socket would not bind would be the worse failure.
+            settings_watch::open_for_editing(&config::config_path(&settings_page_path));
+        }
+    });
+
     let settings_file_item = MenuItem::with_label(state::SETTINGS_FILE_MENU_LABEL);
     let settings_path = config::config_path(&app_asset_path);
     let settings_wake_tx = wake_tx.clone();
@@ -485,6 +496,7 @@ fn main() {
     settings_menu.append(&autostart_item);
     // The rule separates what a click changes from what a click opens.
     settings_menu.append(&gtk::SeparatorMenuItem::new());
+    settings_menu.append(&settings_page_item);
     settings_menu.append(&settings_file_item);
     settings_menu.append(&repository_item);
     // `show_all` on the parent menu does **not** reach in here: a `GtkMenuItem` does not iterate its
@@ -542,6 +554,13 @@ fn main() {
     let menu_wake_tx = wake_tx.clone();
     menu.connect_show(move |_| {
         let _ = menu_wake_tx.send(scheduler::Wake::PollNow);
+    });
+
+    serve::install(serve::Settings {
+        app_asset_path: app_asset_path.clone(),
+        sound: sound.clone(),
+        copilot: copilot.clone(),
+        wake: std::sync::Mutex::new(wake_tx.clone()),
     });
 
     indicator.set_menu(&mut menu);
@@ -783,6 +802,7 @@ fn main() {
         /// Only the id is kept, unlike every entry above. Submenu children are never taken out and put
         /// back — `rebuild_menu` re-appends the submenu, which still holds them — and nothing here
         /// rewrites this one's label, so the handle would be a field nobody reads.
+        settings_page_item_id: tray_icon::menu::MenuId,
         settings_file_item_id: tray_icon::menu::MenuId,
         /// The Settings entry that opens this app's own repository. Id only, for the same reason as
         /// the entry above it: a submenu child whose label never changes needs no handle.
@@ -875,6 +895,8 @@ fn main() {
         let autostart_item =
             CheckMenuItem::new(state::AUTOSTART_MENU_LABEL, true, autostart::is_enabled(), None);
         let autostart_item_id = autostart_item.id().clone();
+        let settings_page_item = MenuItem::new(state::SETTINGS_PAGE_MENU_LABEL, true, None);
+        let settings_page_item_id = settings_page_item.id().clone();
         let settings_file_item = MenuItem::new(state::SETTINGS_FILE_MENU_LABEL, true, None);
         let settings_file_item_id = settings_file_item.id().clone();
         let repository_item = MenuItem::new(state::REPOSITORY_MENU_LABEL, true, None);
@@ -888,6 +910,7 @@ fn main() {
                 &autostart_item,
                 // The rule separates what a click changes from what a click opens.
                 &tray_icon::menu::PredefinedMenuItem::separator(),
+                &settings_page_item,
                 &settings_file_item,
                 &repository_item,
             ],
@@ -955,6 +978,7 @@ fn main() {
             copilot_item_id,
             autostart_item,
             autostart_item_id,
+            settings_page_item_id,
             settings_file_item_id,
             repository_item_id,
             status_item,
@@ -1145,6 +1169,12 @@ fn main() {
                 self.set_copilot(tray.copilot_item.is_checked(), &tray.copilot_item);
             } else if *id == tray.autostart_item_id {
                 self.set_autostart(tray.autostart_item.is_checked(), &tray.autostart_item);
+            } else if *id == tray.settings_page_item_id {
+                if !serve::open_settings_page()
+                    && settings_watch::open_for_editing(&config::config_path(&self.app_asset_path))
+                {
+                    let _ = self.wake_tx.send(scheduler::Wake::SettingsOpened);
+                }
             } else if *id == tray.settings_file_item_id {
                 // Opening is instant; the watch that follows is not, which is why only the open happens
                 // here and the fifteen-minute watch is armed on the poll thread.
@@ -1607,6 +1637,13 @@ fn main() {
             }
         }
     }
+
+    serve::install(serve::Settings {
+        app_asset_path: app_asset_path.clone(),
+        sound: sound.clone(),
+        copilot: copilot.clone(),
+        wake: std::sync::Mutex::new(wake_tx.clone()),
+    });
 
     let mut app = App {
         tray,

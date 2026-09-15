@@ -172,7 +172,14 @@ vertical-align:baseline}\
 .empty{background:var(--card);border:1px dashed var(--line);border-radius:8px;padding:1.5rem;\
 text-align:center;color:var(--dim)}\
 footer{margin-top:2rem;color:var(--dim);font-size:.78rem;text-align:center}\
-footer a,.empty a{color:var(--dim)}";
+footer a,.empty a{color:var(--dim)}\
+h2{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
+margin:1.5rem 0 .5rem;font-weight:600}\
+.row{display:flex;align-items:center;gap:.6rem;padding:.35rem 0;cursor:pointer}\
+.row input{width:1rem;height:1rem;accent-color:var(--accent);flex:none}\
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
+font:inherit;font-weight:600;cursor:pointer}\
+code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}";
 
 /// One axis's whole page.
 ///
@@ -277,6 +284,122 @@ fn newest_first(list: &[PrEntry]) -> Vec<&PrEntry> {
         }
     });
     sorted
+}
+
+/// The settings form.
+///
+/// A plain HTML form and nothing else — no script, so the page's CSP stays `default-src 'none'` and
+/// only `form-action` has to open up. Every control posts its own key name, so what the browser sends
+/// and what lands in `config.txt` are the same words, and `Config::from_form` is the only thing that
+/// turns one into the other.
+///
+/// `saved` is how many keys the last submission actually changed, for the banner. `None` means the
+/// page was opened rather than submitted.
+pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]) -> String {
+    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token);
+
+    if !restarts.is_empty() {
+        h.push_str(&format!(
+            "<div class=\"empty\"><strong>Saved.</strong> {} need{} a restart to take effect: {}.</div>\n",
+            if restarts.len() == 1 { "One setting" } else { "Some settings" },
+            if restarts.len() == 1 { "s" } else { "" },
+            esc(&restarts.join(", "))
+        ));
+    }
+
+    h.push_str(&format!("<form method=\"post\" action=\"/{}/settings\">\n", esc(token)));
+
+    h.push_str("<h2>Pull request signals</h2><div class=\"card\">");
+    for (axis, what) in [
+        (PrAxis::ReviewRequested, "Somebody wants your review"),
+        (PrAxis::ReadyToMerge, "Your pull request was approved"),
+        (PrAxis::ChangesRequested, "Your pull request needs work"),
+    ] {
+        h.push_str(&checkbox(crate::config::pr_key(axis), what, cfg.pr_enabled(axis)));
+    }
+    h.push_str("</div>\n");
+
+    h.push_str("<h2>Behaviour</h2><div class=\"card\">");
+    h.push_str(&checkbox("copilotReviews", "Count Copilot's unresolved comments as work", cfg.copilot_reviews));
+    h.push_str(&checkbox("sound", "Hoot when a pull request needs you", cfg.sound));
+    h.push_str(&checkbox("notificationIndication", "Tint the icon blue on unread notifications", cfg.notification_indication));
+    h.push_str(&checkbox("updateCheck", "Check for a newer release", cfg.update_check));
+    h.push_str("</div>\n");
+
+    h.push_str("<h2>Log detail</h2><div class=\"card\">");
+    for (value, what) in [
+        ("error", "Failures only"),
+        ("info", "Add lifecycle detail, for diagnosing"),
+    ] {
+        let on = matches!(cfg.log_level, crate::log::Level::Info) == (value == "info");
+        h.push_str(&format!(
+            "<label class=\"row\"><input type=\"radio\" name=\"logLevel\" value=\"{value}\"{}> {what}</label>",
+            if on { " checked" } else { "" }
+        ));
+    }
+    h.push_str("</div>\n");
+
+    h.push_str(
+        "<h2>Which parts of GitHub count as an outage</h2>\n\
+         <p class=\"sub\">GitHub's page-wide verdict says \"degraded\" whenever any single component \
+         is, including the ones a pull-request tray never touches. Tick nothing to watch the whole \
+         page.</p><div class=\"card\">",
+    );
+    for name in crate::config::all_components() {
+        let on = cfg.status_components.iter().any(|c| c == name);
+        h.push_str(&format!(
+            "<label class=\"row\"><input type=\"checkbox\" name=\"statusComponents\" value=\"{}\"{}> {}</label>",
+            esc(name),
+            if on { " checked" } else { "" },
+            esc(name)
+        ));
+    }
+    h.push_str("</div>\n");
+
+    h.push_str("<p><button type=\"submit\">Save</button></p>\n</form>\n");
+    h.push_str(
+        "<footer>Written to <code>config.txt</code>, one line per changed setting — your comments \
+         and any keys this version has never heard of are left alone.</footer>\n</main>\n</body>\n</html>\n",
+    );
+    h
+}
+
+/// What the settings route says when `serve::install` was never called.
+pub fn settings_unavailable(token: &str) -> String {
+    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::REVIEW_DOT_COLOR), token);
+    h.push_str(
+        "<div class=\"empty\">Settings are not available in this run.</div>\n</main>\n</body>\n</html>\n",
+    );
+    h
+}
+
+fn checkbox(name: &str, label: &str, on: bool) -> String {
+    format!(
+        "<label class=\"row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{}> {}</label>",
+        esc(name),
+        if on { " checked" } else { "" },
+        esc(label)
+    )
+}
+
+/// Everything both kinds of page share: head, stylesheet, owl and heading.
+fn shell(title: &str, accent: String, token: &str) -> String {
+    let mut h = String::with_capacity(4096);
+    h.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
+    h.push_str("<meta charset=\"utf-8\">\n");
+    h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n");
+    h.push_str("<meta name=\"referrer\" content=\"no-referrer\">\n");
+    h.push_str(&format!("<title>{} — GitHoot</title>\n", esc(title)));
+    h.push_str(&format!("<link rel=\"icon\" href=\"/{}/owl.png\">\n", esc(token)));
+    h.push_str(&format!("<style>{STYLESHEET}\n:root{{--accent:{accent}}}</style>\n"));
+    h.push_str("</head>\n<body>\n<main>\n");
+    h.push_str(&format!(
+        "<header><img src=\"/{}/owl.png\" alt=\"\" width=\"36\" height=\"36\"><h1>{}</h1></header>\n",
+        esc(token),
+        esc(title)
+    ));
+    h.push_str("<div class=\"rule\"></div>\n");
+    h
 }
 
 /// A `Duration` as the same short form `age` produces, for the "as of" line.
@@ -676,6 +799,74 @@ mod tests {
         assert!(page(Some(&[])).contains(r#"src="/deadbeef/owl.png""#));
     }
 
+    // ── The settings page ─────────────────────────────────────────────────────
+
+    fn settings(cfg: &crate::config::Config) -> String {
+        settings_page(cfg, "tok", &[])
+    }
+
+    fn default_cfg() -> crate::config::Config {
+        let dir = std::env::temp_dir().join(format!("githoot-page-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (cfg, _) = crate::config::Config::load(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        cfg
+    }
+
+    /// Every writable key needs a control, or a setting exists the page silently cannot reach.
+    #[test]
+    fn every_writable_key_has_a_control() {
+        let html = settings(&default_cfg());
+        for (key, _) in crate::config::WRITABLE_KEYS {
+            assert!(html.contains(&format!("name=\"{key}\"")), "no control for {key}");
+        }
+    }
+
+    /// The form has to post back to us, or the CSP's `form-action 'self'` blocks it and nothing saves.
+    #[test]
+    fn the_form_posts_back_to_our_own_settings_route() {
+        assert!(settings(&default_cfg()).contains(r#"<form method="post" action="/tok/settings">"#));
+    }
+
+    /// A checkbox that does not reflect what is on disk is worse than no page: it invites you to save
+    /// a state you never chose.
+    #[test]
+    fn the_controls_show_what_is_actually_configured() {
+        let mut cfg = default_cfg();
+        cfg.sound = false;
+        cfg.update_check = true;
+        cfg.status_components = vec!["Issues".to_string()];
+        let html = settings(&cfg);
+        assert!(html.contains(r#"name="sound" value="on">"#), "an off box is not checked");
+        assert!(html.contains(r#"name="updateCheck" value="on" checked>"#));
+        assert!(html.contains(r#"value="Issues" checked>"#));
+        assert!(html.contains(r#"value="Pages">"#), "an unlisted component is not checked");
+    }
+
+    /// Every component GitHub publishes is offered, not just the ones currently watched — the whole
+    /// point is that adding one back is a tick rather than a trip to the status page.
+    #[test]
+    fn every_component_is_offered() {
+        let html = settings(&default_cfg());
+        for name in crate::config::all_components() {
+            assert!(html.contains(&format!(r#"value="{name}""#)), "{name} is not offered");
+        }
+    }
+
+    #[test]
+    fn the_settings_page_runs_no_script_either() {
+        assert!(!settings(&default_cfg()).contains("<script"));
+        assert!(!settings_unavailable("tok").contains("<script"));
+    }
+
+    #[test]
+    fn the_restart_banner_only_shows_after_a_save() {
+        assert!(!settings(&default_cfg()).contains("Saved."));
+        let banner = settings_page(&default_cfg(), "tok", &["logLevel"]);
+        assert!(banner.contains("Saved."));
+        assert!(banner.contains("logLevel"));
+    }
+
     // ── Age ───────────────────────────────────────────────────────────────────
 
     #[test]
@@ -706,4 +897,5 @@ mod tests {
         assert_eq!(age("2026-09-15T09:12:33Z", 1_789_463_553 - 500), "just now");
     }
 }
+
 

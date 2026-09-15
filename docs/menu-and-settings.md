@@ -50,6 +50,7 @@ listener cannot start at all, the entries fall back to that search page directly
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
 | ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
+| **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
 | **Open GitHoot on GitHub** | Opens this app's own repository: releases, issues, and these docs | — |
 
@@ -83,6 +84,32 @@ running, which is the repair for a stale path.
 
 A failure is never silent: if the setting cannot be written, or the startup entry cannot be changed, the
 tick goes back to what it was and a dialog says why.
+
+---
+
+## The settings page
+
+**Open settings page** serves every setting as a plain HTML form on the same loopback listener the PR
+pages use, behind the same token and `Host` checks. It is the easier way in for two reasons: the
+component list becomes tick boxes instead of an exact comma-separated line, and nothing depends on
+having an editor or a desktop association — the file route needs `$EDITOR` or a file handler, and does
+nothing at all with no display server.
+
+Saving writes **one line per changed setting**, through the same surgical edit the tray checkboxes
+make: your comments, blank lines, spacing and any keys this version has never heard of survive byte for
+byte. A form you did not touch writes nothing. The page then names which of the settings you changed
+need a restart — the hoot and the Copilot rule take effect at once, everything else on the next start.
+
+If the local listener cannot start, the entry falls back to opening `config.txt` in an editor, since
+losing the only way into the configuration because a socket would not bind is the worse failure.
+
+**Writing needs more than reading did**, so the page carries one guard the PR pages do not: a save is a
+`POST` and is refused unless the browser says the request came from this page itself. A form on another
+site can make your browser post here, and the `Host` header cannot see that — it is filled in with
+*our* host either way. `Origin` is the header that names who asked, and a cross-site form always sends
+one, so a missing or foreign `Origin` is refused. The form also posts key *names* only; the values
+written are produced from a typed configuration, so a hand-crafted post cannot write an arbitrary line
+into the file, and a component name GitHub does not publish is dropped rather than saved.
 
 ---
 

@@ -37,11 +37,29 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// exists so a client that never terminates its head cannot grow this thread's memory.
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 
-/// What a parsed request line and its `Host` amount to.
+/// How big a form body may be. A settings form is a few hundred bytes; the cap is what stops a
+/// client claiming a gigabyte and making this thread allocate it.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Method {
+    Get,
+    Head,
+    Post,
+}
+
+/// What a parsed request line and its headers amount to.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
+    pub method: Method,
     pub path: String,
     pub host: Option<String>,
+    /// Who the browser says asked. Only writes consult it — see `origin_is_ours`.
+    pub origin: Option<String>,
+    /// Everything after `?`, which only the settings page reads — see `restart_names`.
+    pub query: Option<String>,
+    /// How many body bytes still have to be read. `None` for a request with no body.
+    pub content_length: Option<usize>,
     /// `HEAD` wants the headers and no body.
     pub body_wanted: bool,
 }
@@ -50,7 +68,13 @@ pub struct Request {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
     Page(PrAxis),
+    /// The settings form.
+    Settings,
+    /// Applying a submitted settings form.
+    SaveSettings,
     Owl,
+    /// The path exists but not for this method.
+    MethodNotAllowed,
     /// The path did not resolve. Also what a wrong token gets, so the answer does not confirm that
     /// the rest of the path was right.
     NotFound,
@@ -72,22 +96,141 @@ pub fn parse_request(head: &str) -> Result<Request, u16> {
     let mut parts = request_line.split(' ');
     let (method, target) = (parts.next().ok_or(400u16)?, parts.next().ok_or(400u16)?);
 
-    let body_wanted = match method {
-        "GET" => true,
-        "HEAD" => false,
+    let method = match method {
+        "GET" => Method::Get,
+        "HEAD" => Method::Head,
+        "POST" => Method::Post,
         _ => return Err(405),
     };
+    let body_wanted = method != Method::Head;
     if !target.starts_with('/') {
         return Err(400);
     }
 
     let path = target.split(['?', '#']).next().unwrap_or(target).to_string();
-    let host = lines
-        .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-        .map(|(_, value)| value.trim().to_string());
+    let query = target
+        .split_once('?')
+        .map(|(_, rest)| rest.split('#').next().unwrap_or(rest).to_string());
 
-    Ok(Request { path, host, body_wanted })
+    let headers: Vec<(&str, &str)> =
+        lines.filter_map(|line| line.split_once(':')).map(|(n, v)| (n, v.trim())).collect();
+    let header = |want: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(want))
+            .map(|(_, value)| value.to_string())
+    };
+
+    let content_length = match header("content-length") {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n <= MAX_BODY_BYTES => Some(n),
+            Ok(_) => return Err(413),
+            Err(_) => return Err(400),
+        },
+        None => None,
+    };
+
+    Ok(Request {
+        method,
+        path,
+        query,
+        host: header("host"),
+        origin: header("origin"),
+        content_length,
+        body_wanted,
+    })
+}
+
+/// Whether the browser says *this* page submitted the form.
+///
+/// The CSRF guard, and it is a different question from the `Host` allowlist. A form on another site
+/// can make the browser `POST` here, and the browser fills `Host` in with *our* host, so that check
+/// sees nothing wrong. `Origin` is the header that names who asked, and a cross-site form always
+/// carries one. Absent counts as not ours: a same-origin form always sends it on a `POST`, so
+/// nothing legitimate is refused by requiring it.
+///
+/// Reads only, which is every route but the save, need none — a cross-origin page cannot see the
+/// response anyway, and demanding one would break opening the page from the tray.
+fn origin_is_ours(origin: Option<&str>, port: u16) -> bool {
+    let allowed =
+        [format!("http://{PAGE_HOST}:{port}"), format!("http://127.0.0.1:{port}")];
+    origin.is_some_and(|o| allowed.iter().any(|a| a == o))
+}
+
+/// One decoded `application/x-www-form-urlencoded` body.
+///
+/// Keeps every value for a name rather than the last, because a group of checkboxes posts its name
+/// once per ticked box — which is exactly how the component list is rendered.
+#[derive(Debug, Default)]
+pub struct Form(Vec<(String, String)>);
+
+impl Form {
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    pub fn all(&self, name: &str) -> Vec<&str> {
+        self.0.iter().filter(|(n, _)| n == name).map(|(_, v)| v.as_str()).collect()
+    }
+
+    /// Whether a checkbox was ticked. An unticked box posts nothing at all, which is how a form says
+    /// "off" — so absence is the answer, not an empty value.
+    pub fn ticked(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+}
+
+pub fn parse_form(body: &str) -> Form {
+    Form(
+        body.split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+                (percent_decode(name), percent_decode(value))
+            })
+            .collect(),
+    )
+}
+
+/// Decodes one form field: `+` is a space, `%XX` is a byte.
+///
+/// **This is the only percent-decoding in the module, and it is deliberately confined to bodies.**
+/// Request *paths* are still compared raw, because the token is hex and the slugs are lowercase
+/// ASCII, so decoding there would buy nothing and open a normalization-bug class. A form field is
+/// different: it carries component names with spaces and commas in them, which have to survive.
+///
+/// An invalid or truncated escape is left as written rather than dropped. Losing a byte silently is
+/// how a component name turns into one GitHub does not publish, which shows up only as one line in
+/// the log.
+pub fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The one accepted hostname. `.localhost` is reserved by RFC 6761 and browsers resolve every
@@ -102,7 +245,14 @@ const PAGE_HOST: &str = "githoot.localhost";
 /// is not for us should not have its path examined at all. Then the token, in constant time, and a
 /// mismatch answers `NotFound` rather than `Forbidden` so the reply does not confirm that everything
 /// after the token was right.
-pub fn route(path: &str, host: Option<&str>, token: &str, port: u16) -> Route {
+/// What to answer a request for `path` with, given which method asked.
+pub fn route_for(
+    path: &str,
+    host: Option<&str>,
+    token: &str,
+    port: u16,
+    method: Method,
+) -> Route {
     let allowed = [format!("{PAGE_HOST}:{port}"), format!("127.0.0.1:{port}")];
     match host {
         Some(h) if allowed.iter().any(|a| a == h) => {}
@@ -123,10 +273,19 @@ pub fn route(path: &str, host: Option<&str>, token: &str, port: u16) -> Route {
         return Route::NotFound;
     }
 
-    if leaf == "owl.png" {
-        return Route::Owl;
+    match (leaf, method) {
+        ("owl.png", Method::Post) => Route::MethodNotAllowed,
+        ("owl.png", _) => Route::Owl,
+        ("settings", Method::Post) => Route::SaveSettings,
+        ("settings", _) => Route::Settings,
+        // Everything else is a read, so a write to it is the wrong method rather than a miss — the
+        // path is right and saying otherwise would be a lie in the status line.
+        (slug, method) => match (PrAxis::from_slug(slug), method) {
+            (Some(_), Method::Post) => Route::MethodNotAllowed,
+            (Some(axis), _) => Route::Page(axis),
+            (None, _) => Route::NotFound,
+        },
     }
-    PrAxis::from_slug(leaf).map_or(Route::NotFound, Route::Page)
 }
 
 /// Compares two strings without an early exit on the first differing byte.
@@ -167,7 +326,7 @@ pub fn response_head(status: u16, content_type: &str, len: usize) -> String {
          X-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: no-referrer\r\n\
          Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
-         form-action 'none'; base-uri 'none'\r\n\
+         form-action 'self'; base-uri 'none'\r\n\
          \r\n"
     )
 }
@@ -218,6 +377,28 @@ fn random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
     }
 }
 
+/// What the settings page needs to read and change the configuration.
+///
+/// Installed once from `main`, which is where the switches and the wake channel are built. The
+/// `Mutex` is around the `Sender` alone: an `mpsc::Sender` is `Send` but not `Sync`, and both
+/// listener threads may want to pull a poll forward after a save.
+pub struct Settings {
+    pub app_asset_path: std::path::PathBuf,
+    pub sound: crate::config::Switch,
+    pub copilot: crate::config::Switch,
+    pub wake: std::sync::Mutex<std::sync::mpsc::Sender<scheduler::Wake>>,
+}
+
+static SETTINGS: OnceLock<Settings> = OnceLock::new();
+
+/// Hands the server what it needs to serve and save settings. Called once, from `main`.
+///
+/// Separate from `start` because the listener binds lazily on a menu click, while these exist from
+/// boot — and because a settings page that silently could not save would be worse than none.
+pub fn install(settings: Settings) {
+    let _ = SETTINGS.set(settings);
+}
+
 /// A bound listener: the port the OS gave us and the token that guards it.
 struct Server {
     port: u16,
@@ -233,7 +414,24 @@ static SERVER: OnceLock<Option<Server>> = OnceLock::new();
 /// Windows and macOS — and a behaviour that lives in both copies is a behaviour that will differ in
 /// them eventually.
 pub fn open_axis_page(axis: PrAxis) {
-    let url = url_for(axis).unwrap_or_else(|| scheduler::pr_list_url(axis));
+    open_url(url_for(axis).unwrap_or_else(|| scheduler::pr_list_url(axis)));
+}
+
+/// Opens the settings page, or falls back to the settings *file* when there is no listener.
+///
+/// The fallback is the old behaviour rather than nothing: a browser page that cannot be served is no
+/// reason to lose the only way into the configuration.
+pub fn open_settings_page() -> bool {
+    match SERVER.get_or_init(start).as_ref() {
+        Some(server) => {
+            open_url(format!("http://{PAGE_HOST}:{}/{}/settings", server.port, server.token));
+            true
+        }
+        None => false,
+    }
+}
+
+fn open_url(url: String) {
     if let Err(e) = open::that(&url) {
         errorln!("failed to open browser: {e}");
     }
@@ -320,7 +518,21 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
         Err(status) => return respond(&mut stream, status, "text/plain; charset=utf-8", b"", true),
     };
 
-    match route(&request.path, request.host.as_deref(), token, port) {
+    match route_for(&request.path, request.host.as_deref(), token, port, request.method) {
+        Route::Settings => {
+            let html = match SETTINGS.get() {
+                Some(_) => {
+                    let (cfg, _) = crate::config::Config::load(&settings_path());
+                    page::settings_page(&cfg, token, &restart_names(request.query.as_deref()))
+                }
+                None => page::settings_unavailable(token),
+            };
+            respond(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted)
+        }
+        Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
+        Route::MethodNotAllowed => {
+            respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
+        }
         Route::Owl => {
             respond(&mut stream, 200, "image/png", icons::TRAY_ICON, request.body_wanted)
         }
@@ -370,6 +582,25 @@ fn read_head(stream: &mut TcpStream) -> Result<String, u16> {
 }
 
 /// Writes one response and closes. A `HEAD` gets the head, `Content-Length` included, and no body.
+/// A `303 See Other` back to the settings page.
+///
+/// Post/redirect/get, so reloading after a save does not offer to submit the form again — which on
+/// this page would silently rewrite settings the user has since changed in the tray.
+fn redirect(stream: &mut TcpStream, location: &str) {
+    let head = format!(
+        "HTTP/1.1 303 See Other\r\n\
+         Location: {location}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\
+         Cache-Control: no-store\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         \r\n"
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8], with_body: bool) {
     let head = response_head(status, content_type, body.len());
     let _ = stream.write_all(head.as_bytes());
@@ -378,6 +609,98 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8],
     }
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+/// The keys a just-finished save needs a restart for, read back off the redirect.
+///
+/// **Filtered against the real key list**, so the banner can only ever name settings that exist. It
+/// is text the request supplies and the page echoes, and while `esc` already makes it inert, a page
+/// that will print whatever it is handed is a thing to fix rather than to escape.
+fn restart_names(query: Option<&str>) -> Vec<&'static str> {
+    let Some(query) = query else { return Vec::new() };
+    let Some((_, list)) = query.split('&').filter_map(|p| p.split_once('=')).find(|(k, _)| *k == "restart")
+    else {
+        return Vec::new();
+    };
+    percent_decode(list)
+        .split(',')
+        .filter_map(|name| {
+            crate::config::WRITABLE_KEYS
+                .iter()
+                .find(|(key, live)| *key == name && !*live)
+                .map(|(key, _)| *key)
+        })
+        .collect()
+}
+
+/// Where `config.txt` lives, for the settings page.
+fn settings_path() -> std::path::PathBuf {
+    SETTINGS.get().map(|s| s.app_asset_path.clone()).unwrap_or_default()
+}
+
+/// Applies a submitted settings form.
+///
+/// The order is the same one the tray checkboxes use and for the same reason: the live switches are
+/// set first so the next poll obeys the new answer whatever the disk does, and the file is written
+/// second because it only decides what the *next* start believes.
+fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+    if !origin_is_ours(request.origin.as_deref(), port) {
+        return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
+    }
+    let Some(settings) = SETTINGS.get() else {
+        return respond(stream, 503, "text/plain; charset=utf-8", b"Settings unavailable", true);
+    };
+
+    // The head read stops at the blank line, so whatever followed it is the start of the body.
+    let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
+    let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
+        Ok(body) => body,
+        Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
+    };
+
+    let (current, _) = crate::config::Config::load(&settings.app_asset_path);
+    let wanted = crate::config::Config::from_form(&parse_form(&body), &current);
+
+    settings.sound.set(wanted.sound);
+    settings.copilot.set(wanted.copilot_reviews);
+
+    match crate::config::save(&settings.app_asset_path, &wanted) {
+        Ok(changed) => {
+            if !changed.is_empty() {
+                infoln!("settings page wrote: {}", changed.join(", "));
+                // A changed rule with a stale count on screen reads as the save not having worked.
+                if let Ok(wake) = settings.wake.lock() {
+                    let _ = wake.send(scheduler::Wake::Refresh);
+                }
+            }
+            let restarts: Vec<&str> =
+                changed.iter().copied().filter(|key| !crate::config::is_live(key)).collect();
+            redirect(stream, &format!("/{token}/settings?restart={}", restarts.join(",")));
+        }
+        Err(e) => {
+            errorln!("settings page could not save: {e}");
+            respond(stream, 500, "text/plain; charset=utf-8", b"Could not write config.txt", true)
+        }
+    }
+}
+
+/// Reads the rest of the form body, given whatever arrived alongside the head.
+fn read_body(stream: &mut TcpStream, already: &str, length: usize) -> Result<String, u16> {
+    if length > MAX_BODY_BYTES {
+        return Err(413);
+    }
+    let mut body = already.as_bytes().to_vec();
+    body.truncate(length.min(body.len()));
+    let mut chunk = [0u8; 512];
+    while body.len() < length {
+        let read = stream.read(&mut chunk).map_err(|_| 400u16)?;
+        if read == 0 {
+            return Err(400);
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(length);
+    String::from_utf8(body).map_err(|_| 400u16)
 }
 
 fn unix_now() -> u64 {
@@ -399,7 +722,134 @@ mod tests {
         format!("githoot.localhost:{PORT}")
     }
 
+    /// `route_for` as a plain GET, which is what almost every test here means.
+    fn route_get(path: &str, host: Option<&str>, token: &str, port: u16) -> Route {
+        route_for(path, host, token, port, Method::Get)
+    }
+
+    fn route_write(path: &str, method: Method) -> Route {
+        route_for(path, Some(&ok_host()), TOKEN, PORT, method)
+    }
+
     // ── Request parsing ───────────────────────────────────────────────────────
+
+    // ── Writes: POST, bodies and the Origin guard ─────────────────────────────
+
+    #[test]
+    fn a_post_to_the_settings_route_is_parsed() {
+        let raw = format!(
+            "POST /{TOKEN}/settings HTTP/1.1\r\nHost: {}\r\nContent-Length: 7\r\n\r\nsound=on",
+            ok_host()
+        );
+        let r = parse_request(&raw).expect("should parse");
+        assert_eq!(r.method, Method::Post);
+        assert_eq!(r.content_length, Some(7));
+    }
+
+    /// Only the settings route accepts one. Everything else is a read.
+    #[test]
+    fn a_post_anywhere_else_is_rejected() {
+        assert_eq!(
+            route_write(&format!("/{TOKEN}/approved"), Method::Post),
+            Route::MethodNotAllowed
+        );
+    }
+
+    /// The CSRF guard. A form on another site can make the browser send a cross-origin `POST` — the
+    /// `Host` allowlist cannot see that, because the browser puts *our* host in it. `Origin` is what
+    /// names who asked.
+    #[test]
+    fn a_post_from_another_origin_is_forbidden() {
+        for origin in [
+            Some("https://evil.com"),
+            Some("http://githoot.localhost"),
+            Some(&format!("http://githoot.localhost:{}", PORT + 1)[..]),
+            None,
+        ] {
+            assert!(
+                !origin_is_ours(origin, PORT),
+                "{origin:?} must not be able to write settings"
+            );
+        }
+        assert!(origin_is_ours(Some(&format!("http://githoot.localhost:{PORT}")), PORT));
+        assert!(origin_is_ours(Some(&format!("http://127.0.0.1:{PORT}")), PORT));
+    }
+
+    /// A read needs no `Origin`: a cross-origin page cannot see the response anyway, and requiring
+    /// one would break opening the page from the tray, where the browser sends none.
+    #[test]
+    fn a_get_needs_no_origin() {
+        assert_eq!(route_get(&format!("/{TOKEN}/approved"), Some(&ok_host()), TOKEN, PORT), Route::Page(PrAxis::ReadyToMerge));
+    }
+
+    /// The banner names settings, and only settings that exist. It is text the request hands us and
+    /// the page prints back.
+    #[test]
+    fn the_restart_banner_only_ever_names_real_settings() {
+        assert_eq!(restart_names(Some("restart=logLevel,statusComponents")), ["logLevel", "statusComponents"]);
+        assert!(restart_names(Some("restart=<script>alert(1)</script>")).is_empty());
+        assert!(restart_names(Some("restart=nonsense,logLevel")).len() == 1);
+        // The two live settings need no restart, so they are never named as needing one.
+        assert!(restart_names(Some("restart=sound,copilotReviews")).is_empty());
+        assert!(restart_names(Some("")).is_empty());
+        assert!(restart_names(None).is_empty());
+    }
+
+    #[test]
+    fn a_query_string_is_kept_for_the_settings_page() {
+        let raw = format!("GET /{TOKEN}/settings?restart=logLevel HTTP/1.1\r\nHost: h\r\n\r\n");
+        let r = parse_request(&raw).expect("parses");
+        assert_eq!(r.path, format!("/{TOKEN}/settings"));
+        assert_eq!(r.query.as_deref(), Some("restart=logLevel"));
+    }
+
+    #[test]
+    fn form_pairs_are_decoded() {
+        let form = parse_form("sound=on&logLevel=info&statusComponents=Git+Operations%2C+Issues");
+        assert_eq!(form.get("sound").map(String::as_str), Some("on"));
+        assert_eq!(form.get("logLevel").map(String::as_str), Some("info"));
+        assert_eq!(
+            form.get("statusComponents").map(String::as_str),
+            Some("Git Operations, Issues")
+        );
+    }
+
+    /// Checkboxes post one name repeatedly, once per ticked box.
+    #[test]
+    fn repeated_names_are_all_kept() {
+        let form = parse_form("component=Issues&component=Actions&sound=on");
+        assert_eq!(form.all("component"), vec!["Issues", "Actions"]);
+        assert!(form.all("missing").is_empty());
+    }
+
+    /// An unticked checkbox posts nothing at all, which is how a form says "off".
+    #[test]
+    fn a_name_that_was_not_posted_is_absent_not_empty() {
+        let form = parse_form("sound=on");
+        assert_eq!(form.get("updateCheck"), None);
+    }
+
+    #[test]
+    fn percent_decoding_survives_the_awkward_cases() {
+        assert_eq!(percent_decode("a%2Bb"), "a+b");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("100%25"), "100%");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        // A truncated or invalid escape is left alone rather than dropping the byte.
+        assert_eq!(percent_decode("a%"), "a%");
+        assert_eq!(percent_decode("a%zz"), "a%zz");
+    }
+
+    /// The body is capped like the head is, so a client cannot grow this thread's memory.
+    #[test]
+    fn an_oversized_body_is_refused() {
+        let raw = format!(
+            "POST /{TOKEN}/settings HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n\r\n",
+            ok_host(),
+            MAX_BODY_BYTES + 1
+        );
+        assert_eq!(parse_request(&raw), Err(413));
+    }
 
     #[test]
     fn a_plain_get_is_parsed() {
@@ -414,9 +864,11 @@ mod tests {
         assert!(!parse_request(&head("HEAD", "/a", "h")).expect("should parse").body_wanted);
     }
 
+    /// GET, HEAD and POST are the whole vocabulary. POST joined when the settings form did, and
+    /// `route_for` is what keeps it to the one path that accepts a write.
     #[test]
-    fn anything_but_get_or_head_is_rejected() {
-        for method in ["POST", "PUT", "DELETE", "OPTIONS", "TRACE"] {
+    fn anything_but_get_head_or_post_is_rejected() {
+        for method in ["PUT", "DELETE", "OPTIONS", "TRACE", "PATCH"] {
             assert_eq!(parse_request(&head(method, "/a", "h")), Err(405), "{method}");
         }
     }
@@ -452,7 +904,7 @@ mod tests {
     fn the_right_token_and_host_reach_every_axis_page() {
         for axis in PrAxis::ALL {
             let path = format!("/{TOKEN}/{}", axis.slug());
-            assert_eq!(route(&path, Some(&ok_host()), TOKEN, PORT), Route::Page(axis));
+            assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::Page(axis));
         }
     }
 
@@ -460,21 +912,21 @@ mod tests {
     fn the_numeric_host_is_accepted_too() {
         let host = format!("127.0.0.1:{PORT}");
         let path = format!("/{TOKEN}/approved");
-        assert_eq!(route(&path, Some(&host), TOKEN, PORT), Route::Page(PrAxis::ReadyToMerge));
+        assert_eq!(route_get(&path, Some(&host), TOKEN, PORT), Route::Page(PrAxis::ReadyToMerge));
     }
 
     /// A wrong token answers 404, not 403, so the response does not confirm the path shape was right.
     #[test]
     fn a_wrong_token_is_not_found_rather_than_forbidden() {
         let path = format!("/{}/approved", "f".repeat(32));
-        assert_eq!(route(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound);
+        assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound);
     }
 
     #[test]
     fn a_token_of_the_right_length_with_one_wrong_byte_is_rejected() {
         let mut wrong = TOKEN.to_string();
         wrong.replace_range(31..32, "0");
-        assert_eq!(route(&format!("/{wrong}/approved"), Some(&ok_host()), TOKEN, PORT), Route::NotFound);
+        assert_eq!(route_get(&format!("/{wrong}/approved"), Some(&ok_host()), TOKEN, PORT), Route::NotFound);
     }
 
     /// The DNS-rebinding defence. A rebinding request arrives with the attacker's own name in `Host`.
@@ -494,13 +946,13 @@ mod tests {
             &format!("127.0.0.1:{}", PORT + 1),
             "127.0.0.1",
         ] {
-            assert_eq!(route(&path, Some(host), TOKEN, PORT), Route::Forbidden, "{host}");
+            assert_eq!(route_get(&path, Some(host), TOKEN, PORT), Route::Forbidden, "{host}");
         }
     }
 
     #[test]
     fn a_request_with_no_host_is_forbidden() {
-        assert_eq!(route(&format!("/{TOKEN}/approved"), None, TOKEN, PORT), Route::Forbidden);
+        assert_eq!(route_get(&format!("/{TOKEN}/approved"), None, TOKEN, PORT), Route::Forbidden);
     }
 
     #[test]
@@ -513,14 +965,14 @@ mod tests {
             "/".to_string(),
             String::new(),
         ] {
-            assert_eq!(route(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound, "{path}");
+            assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound, "{path}");
         }
     }
 
     #[test]
     fn the_logo_needs_the_token_too() {
-        assert_eq!(route(&format!("/{TOKEN}/owl.png"), Some(&ok_host()), TOKEN, PORT), Route::Owl);
-        assert_eq!(route("/owl.png", Some(&ok_host()), TOKEN, PORT), Route::NotFound);
+        assert_eq!(route_get(&format!("/{TOKEN}/owl.png"), Some(&ok_host()), TOKEN, PORT), Route::Owl);
+        assert_eq!(route_get("/owl.png", Some(&ok_host()), TOKEN, PORT), Route::NotFound);
     }
 
     #[test]
@@ -562,6 +1014,9 @@ mod tests {
         let h = response_head(200, "text/html", 0);
         assert!(h.contains("default-src 'none'"));
         assert!(h.contains("img-src 'self'"));
+        // Opened for the settings form, and no wider: `'self'` is this origin, so a form on the page
+        // can post back here and nowhere else.
+        assert!(h.contains("form-action 'self'"));
         assert!(!h.contains("script-src"), "nothing to allow: default-src none covers it");
         assert!(h.contains("Referrer-Policy: no-referrer"));
         assert!(h.contains("X-Content-Type-Options: nosniff"));
@@ -684,4 +1139,5 @@ mod tests {
         assert_eq!(PrAxis::from_slug("nope"), None);
     }
 }
+
 
