@@ -308,7 +308,35 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 /// `style-src 'unsafe-inline'` is acceptable **only** because `page::STYLESHEET` is a `&'static str`
 /// with zero interpolation — nothing user-controlled can reach it. If that ever stops being true,
 /// this directive has to go with it.
-pub fn response_head(status: u16, content_type: &str, len: usize) -> String {
+/// Which referrer policy a response carries, and it is not a free choice.
+///
+/// `no-referrer` does more than suppress `Referer`: per the Fetch standard, a non-CORS request whose
+/// method is neither `GET` nor `HEAD` has its **`Origin` serialized as `null`** under that policy. So
+/// a page served with `no-referrer` cannot tell us it submitted its own form, and `origin_is_ours`
+/// refuses every write from it. That cost every save a `403` until it was noticed.
+///
+/// `SameOrigin` still sends nothing to another site — so the token is exactly as protected — while
+/// keeping a real `Origin` on a request back to us. It is safe by construction rather than by luck:
+/// if an outbound link is ever added to the settings page, the policy still withholds the referrer
+/// from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Referrer {
+    /// Nothing, ever. For pages that link out to github.com.
+    None,
+    /// Only to ourselves. For pages that submit a form back to us.
+    SameOrigin,
+}
+
+impl Referrer {
+    pub fn header_value(self) -> &'static str {
+        match self {
+            Referrer::None => "no-referrer",
+            Referrer::SameOrigin => "same-origin",
+        }
+    }
+}
+
+pub fn response_head(status: u16, content_type: &str, len: usize, referrer: Referrer) -> String {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -324,10 +352,11 @@ pub fn response_head(status: u16, content_type: &str, len: usize) -> String {
          Connection: close\r\n\
          Cache-Control: no-store\r\n\
          X-Content-Type-Options: nosniff\r\n\
-         Referrer-Policy: no-referrer\r\n\
+         Referrer-Policy: {}\r\n\
          Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
          form-action 'self'; base-uri 'none'\r\n\
-         \r\n"
+         \r\n",
+        referrer.header_value()
     )
 }
 
@@ -527,7 +556,14 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 }
                 None => page::settings_unavailable(token),
             };
-            respond(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted)
+            respond_as(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                html.as_bytes(),
+                request.body_wanted,
+                Referrer::SameOrigin,
+            )
         }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
         Route::MethodNotAllowed => {
@@ -593,7 +629,7 @@ fn redirect(stream: &mut TcpStream, location: &str) {
          Content-Length: 0\r\n\
          Connection: close\r\n\
          Cache-Control: no-store\r\n\
-         Referrer-Policy: no-referrer\r\n\
+         Referrer-Policy: same-origin\r\n\
          \r\n"
     );
     let _ = stream.write_all(head.as_bytes());
@@ -602,7 +638,18 @@ fn redirect(stream: &mut TcpStream, location: &str) {
 }
 
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8], with_body: bool) {
-    let head = response_head(status, content_type, body.len());
+    respond_as(stream, status, content_type, body, with_body, Referrer::None)
+}
+
+fn respond_as(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    with_body: bool,
+    referrer: Referrer,
+) {
+    let head = response_head(status, content_type, body.len(), referrer);
     let _ = stream.write_all(head.as_bytes());
     if with_body {
         let _ = stream.write_all(body);
@@ -725,6 +772,14 @@ mod tests {
     /// `route_for` as a plain GET, which is what almost every test here means.
     fn route_get(path: &str, host: Option<&str>, token: &str, port: u16) -> Route {
         route_for(path, host, token, port, Method::Get)
+    }
+
+    fn test_config() -> crate::config::Config {
+        let dir = std::env::temp_dir().join(format!("githoot-serve-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (cfg, _) = crate::config::Config::load(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        cfg
     }
 
     fn route_write(path: &str, method: Method) -> Route {
@@ -990,7 +1045,7 @@ mod tests {
     #[test]
     fn every_response_closes_the_connection_and_forbids_caching() {
         for status in [200, 403, 404, 405, 431] {
-            let h = response_head(status, "text/html; charset=utf-8", 3);
+            let h = response_head(status, "text/html; charset=utf-8", 3, Referrer::None);
             assert!(h.starts_with(&format!("HTTP/1.1 {status} ")), "{h}");
             assert!(h.contains("Connection: close"), "{h}");
             assert!(h.contains("Cache-Control: no-store"), "{h}");
@@ -1004,14 +1059,44 @@ mod tests {
     #[test]
     fn no_cors_header_is_ever_sent() {
         for status in [200, 403, 404, 405, 431] {
-            let h = response_head(status, "text/html", 0).to_lowercase();
+            let h = response_head(status, "text/html", 0, Referrer::None).to_lowercase();
             assert!(!h.contains("access-control-"), "{h}");
         }
     }
 
+    /// **The bug that made every save return 403.**
+    ///
+    /// Per the Fetch standard, a non-CORS request whose method is not `GET` or `HEAD` has its `Origin`
+    /// serialized as **`null`** when the referrer policy is `no-referrer`. So the header added to stop
+    /// the token reaching github.com in a `Referer` was also stopping the browser from telling us who
+    /// submitted the form — and `origin_is_ours` refused every save.
+    ///
+    /// The settings routes use `same-origin` instead, which still sends nothing cross-origin (so the
+    /// token is as protected as before) but keeps a real `Origin` on our own form. The PR pages, which
+    /// really do link out to github.com, keep `no-referrer`.
+    #[test]
+    fn the_settings_page_keeps_an_origin_the_browser_will_send() {
+        let settings = response_head(200, "text/html", 0, Referrer::SameOrigin);
+        assert!(settings.contains("Referrer-Policy: same-origin"), "{settings}");
+        assert!(!settings.contains("no-referrer"), "no-referrer nulls the Origin on a POST");
+
+        let pr_page = response_head(200, "text/html", 0, Referrer::None);
+        assert!(pr_page.contains("Referrer-Policy: no-referrer"), "{pr_page}");
+    }
+
+    /// And the same for the document-level policy, which is what actually governs the form the page
+    /// carries — a `<meta name="referrer" content="no-referrer">` nulls the `Origin` exactly as the
+    /// header does.
+    #[test]
+    fn the_settings_document_declares_the_same_policy_as_its_response() {
+        let html = page::settings_page(&test_config(), "tok", &[]);
+        assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#), "got {html}");
+        assert!(!html.contains("no-referrer"));
+    }
+
     #[test]
     fn the_csp_forbids_script_and_allows_only_our_own_images() {
-        let h = response_head(200, "text/html", 0);
+        let h = response_head(200, "text/html", 0, Referrer::None);
         assert!(h.contains("default-src 'none'"));
         assert!(h.contains("img-src 'self'"));
         // Opened for the settings form, and no wider: `'self'` is this origin, so a form on the page
@@ -1139,5 +1224,6 @@ mod tests {
         assert_eq!(PrAxis::from_slug("nope"), None);
     }
 }
+
 
 

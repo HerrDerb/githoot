@@ -80,9 +80,15 @@ page, and each one stops something the others do not.
 
 Two more things about what leaves the page:
 
-- **`Referrer-Policy: no-referrer`**, plus the same in a `<meta>` and `rel="noreferrer"` on every
-  link. Without it the first click through to a pull request would hand GitHub this page's URL,
-  token and all, in the `Referer` header.
+- **`Referrer-Policy: no-referrer`** on the PR pages, plus the same in a `<meta>` and `rel="noreferrer"`
+  on every link. Without it the first click through to a pull request would hand GitHub this page's
+  URL, token and all, in the `Referer` header.
+
+  **The settings page uses `same-origin` instead, and must.** `no-referrer` does more than suppress
+  `Referer`: per the Fetch standard a non-`GET`/`HEAD` request under that policy has its `Origin`
+  serialized as `null`, so the page could not tell us it had submitted its own form and every save was
+  refused. `same-origin` still sends nothing to another site — the token is exactly as protected —
+  while keeping a real `Origin` on a request back to us.
 - **`Content-Security-Policy: default-src 'none'`**. The page runs no script at all. Pull request
   titles come from whoever opened them, so they are escaped as hostile text; the CSP is the backstop
   behind that, not the control.

@@ -388,7 +388,9 @@ fn shell(title: &str, accent: String, token: &str) -> String {
     h.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
     h.push_str("<meta charset=\"utf-8\">\n");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n");
-    h.push_str("<meta name=\"referrer\" content=\"no-referrer\">\n");
+    // `same-origin`, not `no-referrer`: the latter also nulls the `Origin` header on this page's own
+    // form POST, which is the CSRF check's only evidence. See `serve::Referrer`.
+    h.push_str("<meta name=\"referrer\" content=\"same-origin\">\n");
     h.push_str(&format!("<title>{} — GitHoot</title>\n", esc(title)));
     h.push_str(&format!("<link rel=\"icon\" href=\"/{}/owl.png\">\n", esc(token)));
     h.push_str(&format!("<style>{STYLESHEET}\n:root{{--accent:{accent}}}</style>\n"));
