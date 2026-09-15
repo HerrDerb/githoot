@@ -21,7 +21,10 @@ use crate::errorln;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
-const TRAY_ICON: &[u8] = include_bytes!("../assets/tray.png");
+/// The owl itself. `pub(crate)` because `serve` hands these exact bytes to the browser for the PR
+/// page's logo — the same file, not a second copy, so the page and the tray cannot show two
+/// different owls.
+pub(crate) const TRAY_ICON: &[u8] = include_bytes!("../assets/tray.png");
 const TRAY_BLUE_ICON: &[u8] = include_bytes!("../assets/tray_blue.png");
 
 // ── Indicator geometry ──────────────────────────────────────────────────────
@@ -73,13 +76,20 @@ const BAR_RIGHT_MARGIN_RATIO: f32 = 0.041;
 const BAR_BORDER_PX: f32 = 10.0;
 
 /// Bright red, chosen to hold contrast on both light and dark taskbars.
-const REVIEW_DOT_COLOR: [u8; 4] = [0xF0, 0x3E, 0x3E, 0xFF];
+pub(crate) const REVIEW_DOT_COLOR: [u8; 4] = [0xF0, 0x3E, 0x3E, 0xFF];
 /// A clear, saturated green — picked to read distinctly from the review red at a glance, not just
 /// on close inspection.
-const MERGE_DOT_COLOR: [u8; 4] = [0x1A, 0xC9, 0x4A, 0xFF];
+pub(crate) const MERGE_DOT_COLOR: [u8; 4] = [0x1A, 0xC9, 0x4A, 0xFF];
 /// An amber/orange, chosen to sit clearly between the review red and the merge green in hue so
 /// three bars on screen at once stay distinguishable.
-const CHANGES_DOT_COLOR: [u8; 4] = [0xE0, 0x8A, 0x00, 0xFF];
+pub(crate) const CHANGES_DOT_COLOR: [u8; 4] = [0xE0, 0x8A, 0x00, 0xFF];
+
+/// An icon colour as a CSS hex triple, so the PR page's accent is the same value the tray paints
+/// rather than a second one written out by hand. The same argument `scheduler::pr_list_url` makes
+/// about never hand-writing a URL that can drift from its query.
+pub(crate) fn css_hex(color: [u8; 4]) -> String {
+    format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2])
+}
 
 /// The indicator colours, in slot order. Indexed by `state::PrAxis::index`, so slot 1 is
 /// review-requested, slot 2 ready-to-merge, slot 3 changes-requested. Slot 4 has no colour because

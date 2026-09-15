@@ -13,7 +13,9 @@ mod github_app;
 mod github_status;
 mod icons;
 mod log;
+mod page;
 mod scheduler;
+mod serve;
 mod settings_watch;
 mod sound;
 mod state;
@@ -283,12 +285,13 @@ fn main() {
         let _ = open_wake_tx.send(scheduler::Wake::Refresh);
     });
 
+    // All three open one tab: GitHoot's own page for what that bar counts, served locally. It used
+    // to be one browser tab *per pull request* for two of them, plus a GitHub search page that could
+    // not express what either bar counted. See `serve` and `page`.
     let reviews_item = MenuItem::with_label(state::REVIEWS_MENU_LABEL);
     let reviews_wake_tx = wake_tx.clone();
     reviews_item.connect_activate(move |_| {
-        if let Err(e) = open::that(scheduler::pr_list_url(state::PrAxis::ReviewRequested)) {
-            errorln!("failed to open browser: {e}");
-        }
+        serve::open_axis_page(state::PrAxis::ReviewRequested);
         // Reviewing is what clears the dot, so pull the next poll forward the same way the
         // notifications item does.
         let _ = reviews_wake_tx.send(scheduler::Wake::Refresh);
@@ -297,25 +300,14 @@ fn main() {
     let ready_to_merge_item = MenuItem::with_label(state::PrAxis::ReadyToMerge.menu_label());
     let ready_to_merge_wake_tx = wake_tx.clone();
     ready_to_merge_item.connect_activate(move |_| {
-        // The exact PRs the dot counts when the poll has them, the search page otherwise — see
-        // `scheduler::pr_targets` for why the page alone cannot match the dot.
-        for url in scheduler::pr_targets(state::PrAxis::ReadyToMerge) {
-            if let Err(e) = open::that(url) {
-                errorln!("failed to open browser: {e}");
-            }
-        }
+        serve::open_axis_page(state::PrAxis::ReadyToMerge);
         let _ = ready_to_merge_wake_tx.send(scheduler::Wake::Refresh);
     });
 
     let changes_requested_item = MenuItem::with_label(state::PrAxis::ChangesRequested.menu_label());
     let changes_requested_wake_tx = wake_tx.clone();
     changes_requested_item.connect_activate(move |_| {
-        // Same as the approved entry above: exact PRs first, search page as the fallback.
-        for url in scheduler::pr_targets(state::PrAxis::ChangesRequested) {
-            if let Err(e) = open::that(url) {
-                errorln!("failed to open browser: {e}");
-            }
-        }
+        serve::open_axis_page(state::PrAxis::ChangesRequested);
         let _ = changes_requested_wake_tx.send(scheduler::Wake::Refresh);
     });
 
@@ -1068,27 +1060,16 @@ fn main() {
                 // than leaving a stale "unread" icon up for a whole interval.
                 let _ = self.wake_tx.send(scheduler::Wake::Refresh);
             } else if *id == tray.reviews_item_id {
-                if let Err(e) = open::that(scheduler::pr_list_url(state::PrAxis::ReviewRequested)) {
-                    errorln!("failed to open browser: {e}");
-                }
+                // All three open GitHoot's own page for what that bar counts — one tab, served
+                // locally. See `serve` and `page`.
+                serve::open_axis_page(state::PrAxis::ReviewRequested);
                 // Reviewing is what clears the dot, so pull the next poll forward.
                 let _ = self.wake_tx.send(scheduler::Wake::Refresh);
             } else if *id == tray.ready_to_merge_item_id {
-                // The exact PRs the dot counts when the poll has them, the search page otherwise —
-                // see `scheduler::pr_targets`.
-                for url in scheduler::pr_targets(state::PrAxis::ReadyToMerge) {
-                    if let Err(e) = open::that(url) {
-                        errorln!("failed to open browser: {e}");
-                    }
-                }
+                serve::open_axis_page(state::PrAxis::ReadyToMerge);
                 let _ = self.wake_tx.send(scheduler::Wake::Refresh);
             } else if *id == tray.changes_requested_item_id {
-                // Same as the approved entry above: exact PRs first, search page as the fallback.
-                for url in scheduler::pr_targets(state::PrAxis::ChangesRequested) {
-                    if let Err(e) = open::that(url) {
-                        errorln!("failed to open browser: {e}");
-                    }
-                }
+                serve::open_axis_page(state::PrAxis::ChangesRequested);
                 let _ = self.wake_tx.send(scheduler::Wake::Refresh);
             } else if *id == tray.pr_inbox_item_id {
                 // No `Wake::Refresh` afterwards, unlike the three entries above it. Those open a list

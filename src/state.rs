@@ -276,6 +276,24 @@ impl PrAxis {
         }
     }
 
+    /// This axis's path segment on GitHoot's own PR page.
+    ///
+    /// Lives beside `index()` and `menu_label()` so the route and the axis have one mapping with one
+    /// test, the same treatment `scheduler::pr_query` and `pr_judge` get. Lowercase ASCII and hyphens
+    /// only, which is what lets `serve` compare the raw request path without percent-decoding it.
+    pub fn slug(self) -> &'static str {
+        match self {
+            PrAxis::ReviewRequested => "requested-reviews",
+            PrAxis::ReadyToMerge => "approved",
+            PrAxis::ChangesRequested => "changes-requested",
+        }
+    }
+
+    /// The axis a path segment names, or `None` for anything else — which `serve` answers with a 404.
+    pub fn from_slug(slug: &str) -> Option<PrAxis> {
+        PrAxis::ALL.into_iter().find(|axis| axis.slug() == slug)
+    }
+
     /// Base text for this axis's tray menu item, before any count is appended.
     pub fn menu_label(self) -> &'static str {
         match self {

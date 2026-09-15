@@ -174,28 +174,27 @@ pub fn pr_list_url(axis: PrAxis) -> String {
 /// is no value to thread through. `None` means "no confirmed list" — never "no PRs", which is
 /// `Some(vec![])`. All three axes fill their slot now; before 1.17.0 `ReviewRequested`'s stayed empty
 /// for life, because a `total_count` read has no hits to name.
-static PR_URLS: std::sync::Mutex<[Option<Vec<github::PrEntry>>; 3]> =
-    std::sync::Mutex::new([None, None, None]);
+static PR_URLS: std::sync::Mutex<PrSnapshot> =
+    std::sync::Mutex::new(PrSnapshot { axes: [None, None, None], polled_at: None });
 
-/// What clicking `axis`'s menu entry should open.
+/// What the poll thread last published, plus when.
 ///
-/// The exact PRs the dot is counting when the poll has a confirmed list, because no search URL can
-/// express what two of the three bars count: `review:approved` misses every approval in a repository
-/// that requires none, and `review:changes_requested` keeps matching a PR after the author re-requests
-/// review. The search page remains the fallback for every state where the list cannot be trusted:
-/// before the first answer, after the track gives up, when the payload had holes — and when the list
-/// is confirmed *empty*, where the page at least shows the superset instead of a click doing nothing.
-pub fn pr_targets(axis: PrAxis) -> Vec<String> {
-    let known = PR_URLS.lock().expect("PR-URLs lock poisoned");
-    targets_from(axis, known[axis.index()].as_deref())
+/// `Instant` rather than `SystemTime`: the only consumer is the PR page's "as of 47 s ago" line,
+/// which is a duration and not a date, so this needs no calendar, no timezone and no crate. It is
+/// also monotonic, so a clock adjustment cannot make the page claim the data is from the future.
+struct PrSnapshot {
+    axes: [Option<Vec<github::PrEntry>>; 3],
+    polled_at: Option<std::time::Instant>,
 }
 
-/// The decision itself, split from the `static` so it can be tested without shared state.
-fn targets_from(axis: PrAxis, known: Option<&[github::PrEntry]>) -> Vec<String> {
-    match known {
-        Some(entries) if !entries.is_empty() => entries.iter().map(|e| e.url.clone()).collect(),
-        _ => vec![pr_list_url(axis)],
-    }
+/// The pull requests `axis` last confirmed, and how long ago that was.
+///
+/// `serve`'s listener thread is the caller, which is why this exists rather than the server reaching
+/// into `PollState`: that stays owned by the poll thread alone. This static was already the channel
+/// out of it, and the server is simply a third reader of one that already had two.
+pub fn pr_snapshot(axis: PrAxis) -> (Option<Vec<github::PrEntry>>, Option<std::time::Duration>) {
+    let snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+    (snapshot.axes[axis.index()].clone(), snapshot.polled_at.map(|at| at.elapsed()))
 }
 
 /// Percent-encodes a query for use in a URL.
@@ -471,7 +470,10 @@ fn run_poll_loop(
         // Published before `emit` for the same reason the outage check is: the menu entries the URLs
         // belong to are about to be relabeled with this cycle's counts, and a click between the two
         // writes must open what the new label claims, not what the old one did.
-        *PR_URLS.lock().expect("PR-URLs lock poisoned") = PrAxis::ALL.map(|axis| state.pr_entries(axis));
+        *PR_URLS.lock().expect("PR-URLs lock poisoned") = PrSnapshot {
+            axes: PrAxis::ALL.map(|axis| state.pr_entries(axis)),
+            polled_at: Some(std::time::Instant::now()),
+        };
 
         // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
         // this cycle's responses, and taking them next to the code that produced them is what keeps a
@@ -1227,22 +1229,6 @@ mod tests {
         assert!(!url.contains("review%3A"), "got {url}");
     }
 
-    /// The click opens the dot's own list when there is one, and only then. `None` (never
-    /// confirmed, or the track gave up) and a confirmed-empty list both fall back to the search
-    /// page — the first because there is nothing to stand behind, the second because a click that
-    /// opens nothing reads as a dead menu entry.
-    #[test]
-    fn click_targets_are_the_confirmed_urls_or_the_search_page() {
-        let entries = vec![github::PrEntry::stub("https://github.com/o/r/pull/1")];
-        let urls = vec!["https://github.com/o/r/pull/1".to_string()];
-        for axis in [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] {
-            assert_eq!(targets_from(axis, Some(&entries)), urls);
-
-            let fallback = vec![pr_list_url(axis)];
-            assert_eq!(targets_from(axis, None), fallback);
-            assert_eq!(targets_from(axis, Some(&[])), fallback);
-        }
-    }
 
     #[test]
     fn changes_url_carries_the_same_filters_as_the_api_query() {

@@ -68,4 +68,7 @@ winit = "0.30.12"
 # `NotifyIconSettings` promotion that keeps the icon out of the overflow flyout. Both are per-user keys
 # needing no elevation, and this is the whole reason the crate is here rather than `windows-registry` —
 # winapi is already a dependency, so the registry costs no new crate at all.
-winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver", "winreg", "winerror"] }
+# `bcrypt` is `serve.rs`: `BCryptGenRandom` for the PR page's path token. Same argument as `winreg` —
+# the token needs a real CSPRNG rather than a hash seed, and this is one already-present crate's
+# feature flag rather than a new dependency. `/dev/urandom` covers Linux and macOS from std alone.
+winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver", "winreg", "winerror", "bcrypt"] }
