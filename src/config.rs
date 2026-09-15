@@ -34,6 +34,7 @@ const KEY_CHANGES_REQUESTED: &str = "changesRequested";
 const KEY_LOG_LEVEL: &str = "logLevel";
 const KEY_SOUND: &str = "sound";
 const KEY_STATUS_COMPONENTS: &str = "statusComponents";
+const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 
 /// Every component GitHub publishes on its status page, in the order the page lists them.
 ///
@@ -164,6 +165,12 @@ pub struct Config {
     /// Kept as the user typed it, not folded or canonicalised: it is what the log quotes back when a
     /// name matches nothing. Folding happens at match time, in `github_status`.
     pub status_components: Vec<String>,
+    /// Whether unresolved comments from GitHub's automatic reviewer count as work.
+    ///
+    /// Copilot reviews by commenting and never by a verdict, so without this its feedback is
+    /// invisible to the amber bar. On by default; some teams treat its comments as suggestions rather
+    /// than work, and for them this is noise.
+    pub copilot_reviews: bool,
 }
 
 /// Where the settings file lives.
@@ -310,6 +317,10 @@ impl Config {
                 .get(KEY_STATUS_COMPONENTS)
                 .map(|v| split_list(v))
                 .unwrap_or_default(),
+            // Default **on**: Copilot's comments are feedback on your pull request whoever wrote
+            // them, and an amber bar that cannot see them is the state this key was added to fix.
+            // `is_off` rather than `!is_on`, so a typo leaves the default standing.
+            copilot_reviews: !values.get(KEY_COPILOT_REVIEWS).is_some_and(|v| is_off(v)),
         }
     }
 
@@ -382,6 +393,11 @@ fn default_config() -> String {
          # How much the log file records. \"error\" (the default) logs only failures; \"info\" adds\n\
          # the normal lifecycle detail (startup, sign-in, updates, each poll) for diagnosing.\n\
          {KEY_LOG_LEVEL}=error\n\
+         \n\
+         # Whether unresolved comments from GitHub's automatic reviewer count as work on the amber\n\
+         # bar. Copilot reviews by commenting and never by approving or requesting changes, so\n\
+         # without this its feedback is invisible here. Resolved and outdated threads never count.\n\
+         {KEY_COPILOT_REVIEWS}=on\n\
          \n\
          # Which parts of GitHub may put the exclamation on the icon, comma separated, one line.\n\
          # Delete the ones you do not care about and they stop raising the mark; add any of the\n\
@@ -591,7 +607,7 @@ mod tests {
         // `the_template_is_explicit_where_an_absent_key_is_not`.
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // And nothing else, so a key added to the template without being read is caught.
-        assert_eq!(values.len(), 8, "unexpected keys in the template: {values:?}");
+        assert_eq!(values.len(), 9, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -646,6 +662,7 @@ mod tests {
             KEY_LOG_LEVEL,
             KEY_SOUND,
             KEY_STATUS_COMPONENTS,
+            KEY_COPILOT_REVIEWS,
         ];
         let text = default_config();
         for key in parse(&text).keys() {

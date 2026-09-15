@@ -11,7 +11,7 @@
 | **Open GitHub Notifications** | Notifications on and something unread | Opens them, then re-checks a few seconds later |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
 | **Open Approved PRs (N)** | One of yours has been approved | Opens GitHoot's own page for exactly what the green bar counts |
-| **Open Work Required (N)** | A reviewer's objection stands, or a conflict is blocking one | Opens GitHoot's own page for exactly what the amber bar counts |
+| **Open Work Required (N)** | An objection stands, a conflict is blocking one, or Copilot has open comments | Opens GitHoot's own page for exactly what the amber bar counts |
 | **Open PR inbox** | None of the three entries above is shown | Opens [GitHub's own PR inbox](https://github.com/pulls/inbox) |
 | *— separator —* | Always | |
 | **Settings ▸** | Always | A submenu: two checkboxes, the settings file, and the repository (see below) |
@@ -105,6 +105,7 @@ appended rather than the file regenerated.
 | `reviewRequested` | `on` | The red bar |
 | `readyToMerge` | `on` | The green bar (approved PRs; the key keeps its old name so existing `config.txt` files still work) |
 | `changesRequested` | `on` | The amber bar (work required; the key keeps its old name so existing `config.txt` files still work) |
+| `copilotReviews` | `on` | Count unresolved comments from GitHub's automatic reviewer as work — see [PR status](pr-status.md) |
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |

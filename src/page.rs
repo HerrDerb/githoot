@@ -335,10 +335,18 @@ fn card(e: &PrEntry, now_unix: u64) -> String {
     if e.is_draft {
         meta.push_str("<span class=\"pill draft\">Draft</span>");
     }
-    // Load-bearing, not decoration: a conflict is one of the two reasons a pull request is on the
-    // work-required page at all, so without it half that list has no visible explanation.
+    // Load-bearing, not decoration: a conflict and Copilot's comments are two of the three reasons a
+    // pull request is on the work-required page at all, and neither leaves a review verdict behind.
+    // Without these the list shows rows it cannot explain.
     if e.conflicting {
         meta.push_str("<span class=\"pill checks-failure\">Merge conflict</span>");
+    }
+    if e.copilot_unresolved > 0 {
+        let plural = if e.copilot_unresolved == 1 { "" } else { "s" };
+        meta.push_str(&format!(
+            "<span class=\"pill checks-pending\">{} unresolved Copilot comment{plural}</span>",
+            e.copilot_unresolved
+        ));
     }
     let (class, words) = checks_pill(e.checks);
     meta.push_str(&format!("<span class=\"pill {class}\">{words}</span>"));
@@ -389,6 +397,7 @@ mod tests {
             activity: None,
             is_draft: false,
             conflicting: false,
+            copilot_unresolved: 0,
             checks: CheckRollup::Success,
             verdicts: vec![],
             pending: vec![],
@@ -554,6 +563,30 @@ mod tests {
         assert!(html.contains("#2204"));
         assert!(html.contains("octocat"));
         assert!(html.contains("Fix the bed-exit debounce"));
+    }
+
+    /// Copilot never approves and never requests changes, so a pull request can be on the
+    /// work-required page for a reason with no verdict behind it. Saying so is what keeps the page
+    /// from listing a PR it cannot explain.
+    #[test]
+    fn unresolved_copilot_comments_are_named_on_the_card() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.copilot_unresolved = 3;
+        let html = page(Some(&[e]));
+        assert!(html.contains("3 unresolved Copilot comments"), "got: {html}");
+    }
+
+    /// Singular, because "1 unresolved Copilot comments" is the kind of thing people notice.
+    #[test]
+    fn one_copilot_comment_reads_as_one() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.copilot_unresolved = 1;
+        assert!(page(Some(&[e])).contains("1 unresolved Copilot comment<"));
+    }
+
+    #[test]
+    fn no_copilot_comments_says_nothing() {
+        assert!(!page(Some(&[entry("https://github.com/o/r/pull/1")])).contains("Copilot"));
     }
 
     #[test]

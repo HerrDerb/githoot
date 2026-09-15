@@ -6,7 +6,7 @@ Three independent signals, each a GitHub Search query against your own pull requ
 |---|---|---|
 | 🔴 | `is:pr review-requested:@me state:open draft:false archived:false -label:dependencies -author:app/dependabot -author:app/renovate` | counted as is |
 | 🟢 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when its latest reviews hold an `APPROVED` and no `CHANGES_REQUESTED` |
-| 🟠 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when a reviewer's objection still stands, **or** it has a merge conflict and someone is waiting on it |
+| 🟠 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when a reviewer's objection still stands, when it has a merge conflict and someone is waiting on it, **or** when Copilot has unresolved comments on it |
 
 **The green bar reads the reviews, not `review:approved`.** That qualifier looks like "somebody approved
 this", and it is not. It is a projection of `reviewDecision`, GitHub's verdict on whether the base branch's
@@ -51,13 +51,30 @@ a reviewer attached — either a pending request or a standing review. A conflic
 surely as their own objection does, and it is yours to fix. A conflict on a pull request **nobody is
 attached to** blocks nobody and does not count.
 
+*Unresolved Copilot comments.* **Copilot never approves and never requests changes — it only
+comments**, so `latestOpinionatedReviews` drops its review entirely and the objection rule above cannot
+see it at all. Its verdict is the review threads it leaves open, so an open thread started by
+`copilot-pull-request-reviewer` counts as work.
+
+Resolved threads do not count, and neither do **outdated** ones — a thread pointing at a line you have
+since changed, which GitHub's own UI hides. The cost is that pushing something unrelated can outdate a
+comment you never read and the bar goes quiet on it; erring quiet is the direction taken everywhere
+else here. Only the thread's *first* comment is read, so a human replying to Copilot does not make the
+thread theirs. Capped at the first 20 threads per pull request, undercounting like every other cap.
+
+Switch it off with `copilotReviews=off` if your team reads Copilot as suggestions rather than work. That
+also stops the two axes asking GitHub for review threads at all, which is the most expensive part of the
+query — the other axis never asks, since Copilot's comments are the PR author's problem, not its
+reviewer's.
+
 **Only a definite `CONFLICTING` counts.** GitHub computes `mergeable` lazily and answers `UNKNOWN` until
 something asks; asking is what starts the computation, so a cold poll sees `UNKNOWN` and the next cycle
 sees the answer. Treating `UNKNOWN` as a conflict would light the bar on every freshly pushed pull request
 and clear it a minute later. Undercounting for one cycle is the cheaper error.
 
-**A conflict takes the pull request off the green bar.** The two never light for the same one: a conflict
-is work before it is news, and the approval is still there to be told about the moment you rebase.
+**Anything that makes it work takes the pull request off the green bar.** The two never light for the
+same one: a conflict or an open Copilot thread is work before it is news, and the approval is still there
+to be told about the moment you deal with it.
 
 **The query stopped filtering.** It was `is:pr author:@me review:changes_requested …`, which would now
 hide every conflicted pull request that carries no objection, and `mergeable` is not a search qualifier.

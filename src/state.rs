@@ -364,6 +364,10 @@ struct Seen {
     /// `PrEntry::activity` as of the last time this pull request was counted.
     activity: Option<String>,
     conflicting: bool,
+    /// Carried for the same reason `conflicting` is: Copilot's review is a `COMMENTED` one, which
+    /// `latestOpinionatedReviews` drops, so a fresh batch of its comments may move no timestamp this
+    /// ledger can see.
+    copilot_unresolved: u32,
     /// Which poll last saw it, for eviction order.
     last_seen: u64,
 }
@@ -416,8 +420,10 @@ impl Track {
     /// stale copy of it, and `!=` would read that older timestamp as a change and sound — the bug
     /// this exists to fix, back by another door. A timestamp only moves forward, so the test does too.
     ///
-    /// `conflicting` is carried beside it because a conflict arriving from somebody else's merge
-    /// touches nothing on the pull request, so no timestamp anywhere moves. It is still work landing.
+    /// `conflicting` and `copilot_unresolved` are carried beside it because both can change without
+    /// moving any timestamp this can see: a conflict arriving from somebody else's merge touches
+    /// nothing on the pull request, and Copilot's review is a `COMMENTED` one, which
+    /// `latestOpinionatedReviews` drops before `activity` ever sees it. Both are work landing.
     fn note(&mut self, prs: &[PrEntry]) -> bool {
         self.polls = self.polls.saturating_add(1);
         let mut news = false;
@@ -425,12 +431,16 @@ impl Track {
             let entry = Seen {
                 activity: pr.activity.clone(),
                 conflicting: pr.conflicting,
+                copilot_unresolved: pr.copilot_unresolved,
                 last_seen: self.polls,
             };
             match self.seen.get(pr.key()) {
                 None => news = true,
                 Some(before) => {
-                    if pr.activity > before.activity || (pr.conflicting && !before.conflicting) {
+                    if pr.activity > before.activity
+                        || (pr.conflicting && !before.conflicting)
+                        || pr.copilot_unresolved > before.copilot_unresolved
+                    {
                         news = true;
                     } else if before.last_seen < self.polls - 1 {
                         // The blip, caught in the act. Logged because "GitHub sometimes omits a PR"

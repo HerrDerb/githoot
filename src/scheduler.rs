@@ -153,12 +153,17 @@ fn pr_judge(axis: PrAxis) -> PrJudge {
 /// One endpoint, one document, three query strings and three rules. The three `github::poll_*`
 /// functions stay separate rather than collapsing into one call taking the rule, because each carries
 /// the argument for why its rule exists — and on this axis that argument is the asset, not the code.
-fn poll_pr(client: &reqwest::blocking::Client, token: &str, axis: PrAxis) -> github::PollResponse {
+fn poll_pr(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    axis: PrAxis,
+    copilot: bool,
+) -> github::PollResponse {
     let query = pr_query(axis);
     match pr_judge(axis) {
         PrJudge::EveryHit => github::poll_review_requested(client, token, query),
-        PrJudge::Approved => github::poll_approved(client, token, query),
-        PrJudge::StillOnYou => github::poll_changes_requested(client, token, query),
+        PrJudge::Approved => github::poll_approved(client, token, query, copilot),
+        PrJudge::StillOnYou => github::poll_changes_requested(client, token, query, copilot),
     }
 }
 
@@ -303,6 +308,11 @@ pub struct PollInputs {
     /// Which parts of GitHub may raise the outage mark. Empty means the whole page — see
     /// `config::Config::status_components`.
     pub status_components: Vec<String>,
+    /// Whether Copilot's unresolved comments count as work. See `config::Config::copilot_reviews`.
+    ///
+    /// Read at startup like everything but the hoot, and threaded down to the two axes whose rules
+    /// consult it — which is also what decides whether they pay for the review-thread connection.
+    pub copilot_reviews: bool,
 }
 
 // ─── Shared polling core ──────────────────────────────────────────────────────
@@ -343,6 +353,7 @@ fn run_poll_loop(
         pr_enabled,
         sound: sound_enabled,
         status_components,
+        copilot_reviews,
     } = inputs;
     let client = match github::build_client() {
         Ok(client) => client,
@@ -433,7 +444,7 @@ fn run_poll_loop(
                 if !state.pr_in_play(axis) {
                     continue;
                 }
-                let response = poll_pr(&client, store.token(), axis);
+                let response = poll_pr(&client, store.token(), axis, copilot_reviews);
                 // Only a failed axis speaks up, and it says what actually failed — this is the line
                 // that would have shown the merge-ready `statusCheckRollup` FORBIDDEN outright.
                 if let Some(detail) = response.result.problem() {

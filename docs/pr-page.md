@@ -17,7 +17,7 @@ reviewer's standing verdict.
 | Address | `http://githoot.localhost:<port>/<token>/<bar>` |
 | Bound | On the first click, never at startup |
 | Port and token | New on every run |
-| Contents | Title, repo, number, author, age, draft, checks, per-reviewer verdicts |
+| Contents | Title, repo, number, author, age, draft, checks, merge conflict, open Copilot comments, per-reviewer verdicts |
 
 **Newest first.** GitHub's search answers in *best match* relevance order whenever the query names no
 sort, and none of the three does, so what comes back is effectively arbitrary and can differ between

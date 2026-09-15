@@ -30,6 +30,26 @@ const SEARCH_HITS_CAP: u32 = 100;
 /// unreachable by this app's inbox.
 const CHANGES_REVIEWS_CAP: u32 = 20;
 
+/// How many review threads a hit is inspected for unresolved Copilot comments.
+///
+/// Same undercount-not-overcount trade as the caps above: a pull request whose 21st thread is the
+/// only open Copilot one is judged on a partial list and stays dark.
+///
+/// Passed as `0` by the axes with no use for it, which is not a saving to sniff at — this connection
+/// multiplies with `SEARCH_HITS_CAP`, so it is the most expensive thing in the document.
+const REVIEW_THREADS_CAP: u32 = 20;
+
+/// The login GitHub's automatic reviewer posts under.
+///
+/// Copilot reviews by **commenting**: it never approves and never requests changes, so
+/// `latestOpinionatedReviews` drops it entirely and `still_on_you` cannot see it at all. An unresolved
+/// review thread is the only verdict it leaves behind.
+///
+/// Matched on the stem, with any `[bot]` suffix trimmed first. REST spells it
+/// `copilot-pull-request-reviewer[bot]`; GraphQL's `Bot.login` is not documented to agree, and picking
+/// one spelling would be a coin toss that fails silently.
+const COPILOT_REVIEWER: &str = "copilot-pull-request-reviewer";
+
 /// Kept well under the 60s poll floor so a stalled request cannot delay the next one.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -78,6 +98,9 @@ pub struct PrEntry {
     /// The head branch conflicts with the base. Only ever `true` for a definite `CONFLICTING`; an
     /// uncomputed `UNKNOWN` is absence of evidence, not evidence of a clean merge.
     pub conflicting: bool,
+    /// Open review threads started by GitHub's automatic reviewer, ignoring resolved and outdated
+    /// ones. Zero whenever the axis did not ask for threads — see `COPILOT_REVIEWER`.
+    pub copilot_unresolved: u32,
     pub checks: CheckRollup,
     /// One verdict per reviewer, `COMMENTED` already dropped by GitHub's own
     /// `latestOpinionatedReviews`.
@@ -104,6 +127,7 @@ impl PrEntry {
             activity: None,
             is_draft: false,
             conflicting: false,
+            copilot_unresolved: 0,
             checks: CheckRollup::Unknown,
             verdicts: Vec::new(),
             pending: Vec::new(),
@@ -189,7 +213,9 @@ struct Parsed {
     prs: Option<Vec<PrEntry>>,
 }
 
-type BodyParser = fn(&str) -> Result<Parsed, String>;
+/// A success-body parser. A trait object rather than a `fn` pointer because two of them now close
+/// over the `copilotReviews` setting.
+type BodyParser<'a> = &'a dyn Fn(&str) -> Result<Parsed, String>;
 
 /// We only ever ask whether the unread list is non-empty, so no fields are needed.
 #[derive(Debug, Deserialize)]
@@ -270,7 +296,7 @@ pub fn poll_notifications(client: &Client, token: &str, etag: Option<&str>) -> P
         .get(NOTIFICATIONS_URL)
         .query(&[("all", "false"), ("per_page", "1")]);
 
-    send(request, token, etag, parse_notifications)
+    send(request, token, etag, &parse_notifications)
 }
 
 /// The GraphQL document behind both axes that judge pull requests by their reviews.
@@ -302,7 +328,7 @@ pub fn poll_notifications(client: &Client, token: &str, etag: Option<&str>) -> P
 /// `rateLimit` is free — GitHub does not charge a query for asking what it cost — and it is the only
 /// way to turn "three of these per cycle is probably fine" into a number. See `RateLimit`.
 const PR_REVIEWS_DOCUMENT: &str = "\
-query($q:String!,$hits:Int!,$reviews:Int!){\
+query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!){\
   rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
@@ -312,6 +338,7 @@ query($q:String!,$hits:Int!,$reviews:Int!){\
       statusCheckRollup{state}\
       latestOpinionatedReviews(first:$reviews){nodes{state submittedAt author{login}}}\
       reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login} ...on Team{slug}}}}\
+      reviewThreads(first:$threads){nodes{isResolved isOutdated comments(first:1){nodes{author{login}}}}}\
     }}\
   }\
 }";
@@ -322,8 +349,14 @@ query($q:String!,$hits:Int!,$reviews:Int!){\
 /// the server-side filter is unchanged and only the client-side intersection is new.
 ///
 /// No `If-None-Match`: GraphQL is a POST and does not answer `304`.
-pub fn poll_changes_requested(client: &Client, token: &str, query: &str) -> PollResponse {
-    poll_reviewed(client, token, query, parse_changes_requested)
+pub fn poll_changes_requested(client: &Client, token: &str, query: &str, copilot: bool) -> PollResponse {
+    poll_reviewed(
+        client,
+        token,
+        query,
+        &|body| parse_reviewed(body, |pr| work_required(pr, copilot)),
+        copilot,
+    )
 }
 
 /// Polls the pull requests waiting on the user's review.
@@ -337,7 +370,8 @@ pub fn poll_changes_requested(client: &Client, token: &str, query: &str) -> Poll
 /// two axes' cap: past `SEARCH_HITS_CAP` matches the extras are not seen. That undercounts rather
 /// than overcounts, and is unreachable by the inbox this app exists for.
 pub fn poll_review_requested(client: &Client, token: &str, query: &str) -> PollResponse {
-    poll_reviewed(client, token, query, parse_review_requested)
+    // No threads: Copilot's comments on a pull request are its author's work, never its reviewer's.
+    poll_reviewed(client, token, query, &|body| parse_reviewed(body, |_| true), false)
 }
 
 /// Polls the user's own open pull requests and counts the ones a reviewer approved.
@@ -345,16 +379,35 @@ pub fn poll_review_requested(client: &Client, token: &str, query: &str) -> PollR
 /// `query` must *not* carry `review:approved`: that qualifier is the `reviewDecision` projection this
 /// axis exists to get away from (see `PR_REVIEWS_DOCUMENT`). The server narrows to the user's open,
 /// non-draft pull requests; `approved` judges each hit by its reviews.
-pub fn poll_approved(client: &Client, token: &str, query: &str) -> PollResponse {
-    poll_reviewed(client, token, query, parse_approved)
+pub fn poll_approved(client: &Client, token: &str, query: &str, copilot: bool) -> PollResponse {
+    poll_reviewed(
+        client,
+        token,
+        query,
+        &|body| parse_reviewed(body, |pr| approved(pr, copilot)),
+        copilot,
+    )
 }
 
 /// The shared GraphQL request behind `poll_changes_requested` and `poll_approved`: same document, same
 /// variables, one parser apiece.
-fn poll_reviewed(client: &Client, token: &str, query: &str, parse_ok: BodyParser) -> PollResponse {
+fn poll_reviewed(
+    client: &Client,
+    token: &str,
+    query: &str,
+    parse_ok: BodyParser,
+    threads: bool,
+) -> PollResponse {
     let body = serde_json::json!({
         "query": PR_REVIEWS_DOCUMENT,
-        "variables": { "q": query, "hits": SEARCH_HITS_CAP, "reviews": CHANGES_REVIEWS_CAP },
+        "variables": {
+            "q": query,
+            "hits": SEARCH_HITS_CAP,
+            "reviews": CHANGES_REVIEWS_CAP,
+            // `0` where the axis has no use for them, keeping the document's most expensive
+            // connection off the queries that would only pay for it.
+            "threads": if threads { REVIEW_THREADS_CAP } else { 0 },
+        },
     });
     let request = client.post(GRAPHQL_URL).json(&body);
 
@@ -521,6 +574,33 @@ struct PullRequestNode {
     status_check_rollup: Option<StatusCheckRollup>,
     latest_opinionated_reviews: Option<ReviewConnection>,
     review_requests: Option<RequestConnection>,
+    /// `None` for the axes that ask for `first: 0`, which is the same as "no open threads".
+    review_threads: Option<ThreadConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThreadConnection {
+    nodes: Vec<Option<ReviewThread>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThread {
+    is_resolved: Option<bool>,
+    /// The thread points at a line that has since changed. GitHub's own UI hides these.
+    is_outdated: Option<bool>,
+    comments: Option<CommentConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentConnection {
+    nodes: Vec<Option<Comment>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Comment {
+    /// `None` for a comment whose author has since been deleted.
+    author: Option<Author>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -634,6 +714,37 @@ fn is_conflicting(pr: &PullRequestNode) -> bool {
     pr.mergeable.as_deref() == Some("CONFLICTING")
 }
 
+/// Whether `login` is GitHub's automatic reviewer, however the API spelled it.
+fn is_copilot(login: &str) -> bool {
+    login.strip_suffix("[bot]").unwrap_or(login).eq_ignore_ascii_case(COPILOT_REVIEWER)
+}
+
+/// How many of Copilot's review threads are still open on this pull request.
+///
+/// Resolved threads are done, and **outdated** ones point at a line that has since changed — GitHub's
+/// own UI hides those, and keeping the bar amber for a comment on code that no longer exists is the
+/// cry-wolf this axis is written to avoid. The cost is that pushing something unrelated can outdate a
+/// thread you never read, and the bar goes quiet on it; erring quiet is the direction chosen
+/// everywhere else here.
+///
+/// Only the thread's **first** comment is fetched, because that is the one that started it: a human
+/// replying to Copilot does not make the thread theirs.
+fn copilot_unresolved(pr: &PullRequestNode) -> u32 {
+    pr.review_threads
+        .iter()
+        .flat_map(|c| c.nodes.iter().flatten())
+        .filter(|thread| thread.is_resolved != Some(true) && thread.is_outdated != Some(true))
+        .filter(|thread| {
+            thread
+                .comments
+                .iter()
+                .flat_map(|c| c.nodes.iter().flatten())
+                .filter_map(|comment| comment.author.as_ref())
+                .any(|author| is_copilot(&author.login))
+        })
+        .count() as u32
+}
+
 /// Whether anybody is attached to this pull request.
 ///
 /// A pending request means someone is waiting to review; a standing opinionated review means someone
@@ -662,8 +773,8 @@ fn blocked_by_conflict(pr: &PullRequestNode) -> bool {
 /// (`still_on_you`), or a merge conflict with someone waiting (`blocked_by_conflict`). The bar used
 /// to be only the first, and its query said so server-side; it now asks for every open pull request
 /// of yours and decides here, because `mergeable` is not a search qualifier.
-fn work_required(pr: &PullRequestNode) -> bool {
-    still_on_you(pr) || blocked_by_conflict(pr)
+fn work_required(pr: &PullRequestNode, copilot: bool) -> bool {
+    still_on_you(pr) || blocked_by_conflict(pr) || (copilot && copilot_unresolved(pr) > 0)
 }
 
 /// Whether a reviewer approved this pull request and nobody's objection stands against it.
@@ -678,12 +789,12 @@ fn work_required(pr: &PullRequestNode) -> bool {
 /// already vouched for, so a hole in the payload leaves the bar lit. This one is the only filter there
 /// is: the server hands over every open pull request, and a missing or empty review list is simply no
 /// evidence of approval. Lighting a green bar over a PR nobody approved would be the false claim.
-fn approved(pr: &PullRequestNode) -> bool {
-    // A conflict takes the pull request to the work-required bar instead, so the two never light for
-    // the same one. A conflict is work before it is news, and the approval is still there to be told
-    // about the moment you rebase. Note this needs no `has_active_reviewers` check of its own: a pull
-    // request cannot be approved without a review, so anything reaching this veto already has one.
-    if is_conflicting(pr) {
+fn approved(pr: &PullRequestNode, copilot: bool) -> bool {
+    // Anything that puts the pull request on the work-required bar takes it off this one, so the two
+    // never light for the same PR. Work before news, and the approval is still there to be told about
+    // the moment you deal with it. The conflict veto needs no `has_active_reviewers` check of its own:
+    // a pull request cannot be approved without a review, so anything reaching it already has one.
+    if is_conflicting(pr) || (copilot && copilot_unresolved(pr) > 0) {
         return false;
     }
     let mut any_approved = false;
@@ -753,6 +864,7 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
         activity: activity.map(str::to_string),
         is_draft: node.is_draft,
         conflicting: is_conflicting(node),
+        copilot_unresolved: copilot_unresolved(node),
         checks: node
             .status_check_rollup
             .as_ref()
@@ -762,28 +874,13 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
     })
 }
 
-/// Success-body parser for the work-required GraphQL query: `work_required` decides each hit.
-fn parse_changes_requested(body: &str) -> Result<Parsed, String> {
-    parse_reviewed(body, work_required)
-}
-
-/// Success-body parser for the approved GraphQL query: `approved` decides each hit.
-fn parse_approved(body: &str) -> Result<Parsed, String> {
-    parse_reviewed(body, approved)
-}
-
-/// Success-body parser for the review-requested GraphQL query: every hit counts.
-fn parse_review_requested(body: &str) -> Result<Parsed, String> {
-    parse_reviewed(body, |_| true)
-}
-
 /// Shared body of the two GraphQL parsers: one `PR_REVIEWS_DOCUMENT` answer, one predicate per axis.
 ///
 /// GraphQL answers `200 OK` and puts failures in an `errors` array, so `classify_with` cannot see them
 /// from the status line. A parser that read only `data` would turn any such failure into a confident
 /// **zero** — a dark bar meaning "the request broke". Errors are therefore checked before anything else
 /// and surface as `Err`, which becomes `Transient`, which leaves the previous count standing.
-fn parse_reviewed(body: &str, keep: fn(&PullRequestNode) -> bool) -> Result<Parsed, String> {
+fn parse_reviewed(body: &str, keep: impl Fn(&PullRequestNode) -> bool) -> Result<Parsed, String> {
     let response: GraphQlResponse =
         serde_json::from_str(body).map_err(|e| format!("unparseable PR review payload: {e}"))?;
 
@@ -968,7 +1065,7 @@ mod tests {
 
     /// Shorthand: classify a NOTIFICATIONS response.
     fn notif(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, parse_notifications)
+        classify_with(status, h, body, now, &parse_notifications)
     }
 
     /// Shorthand: classify a REVIEW-REQUESTED (GraphQL) response.
@@ -977,7 +1074,7 @@ mod tests {
     /// status-line and rate-limit tests below drive it, and none of them looks at the success body —
     /// so repointing it at the GraphQL parser preserves that coverage exactly rather than rewriting it.
     fn search(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, parse_review_requested)
+        classify_with(status, h, body, now, &|b| parse_reviewed(b, |_| true))
     }
 
     // ── Notifications body parsing ────────────────────────────────────────────
@@ -1015,7 +1112,7 @@ mod tests {
 
     /// Shorthand: classify a CHANGES-REQUESTED (GraphQL) response.
     fn changes(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, parse_changes_requested)
+        classify_with(status, h, body, now, &|b| parse_reviewed(b, |pr| work_required(pr, true)))
     }
 
     /// One search hit, described by who blocked it and who has a re-review pending.
@@ -1258,7 +1355,7 @@ mod tests {
 
     /// Shorthand: classify an APPROVED (GraphQL) response.
     fn approved_resp(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, parse_approved)
+        classify_with(status, h, body, now, &|b| parse_reviewed(b, |pr| approved(pr, true)))
     }
 
     /// One search hit with the given latest opinionated review states, each from a distinct reviewer.
@@ -1510,6 +1607,139 @@ mod tests {
     fn truncate_respects_char_boundaries() {
         assert_eq!(truncate("\u{fc}n\u{ef}c\u{f6}d\u{e9}", 3), "\u{fc}n\u{ef}\u{2026}");
         assert_eq!(truncate("short", 50), "short");
+    }
+
+    // ── Copilot's unresolved comments ─────────────────────────────────────────
+
+    /// A hit carrying review threads. `threads` are `(author, resolved, outdated)`.
+    fn threaded(url: &str, threads: &[(&str, bool, bool)]) -> String {
+        let nodes = threads
+            .iter()
+            .map(|(author, resolved, outdated)| {
+                format!(
+                    r#"{{"isResolved":{resolved},"isOutdated":{outdated},"comments":{{"nodes":[{{"author":{{"login":"{author}"}}}}]}}}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let bare = verdict_hit(url, &[], &[]);
+        format!(r#"{{"reviewThreads":{{"nodes":[{nodes}]}},{}"#, &bare[1..])
+    }
+
+    const COPILOT: &str = "copilot-pull-request-reviewer";
+
+    /// Copilot reviews by *commenting* — it never approves and never requests changes — so
+    /// `latestOpinionatedReviews` drops it entirely and `still_on_you` has never been able to see it.
+    /// An unresolved thread is the only verdict it leaves.
+    #[test]
+    fn an_unresolved_copilot_thread_is_work() {
+        let body = payload(&[threaded("https://github.com/o/r/pull/1", &[(COPILOT, false, false)])]);
+        assert_eq!(changes_count(&body), 1);
+    }
+
+    #[test]
+    fn a_resolved_copilot_thread_is_not_work() {
+        let body = payload(&[threaded("https://github.com/o/r/pull/1", &[(COPILOT, true, false)])]);
+        assert_eq!(changes_count(&body), 0);
+    }
+
+    /// A thread on a line you have since changed. GitHub's own UI hides these, and the code it
+    /// pointed at is gone, so the bar does not keep burning for it.
+    #[test]
+    fn an_outdated_copilot_thread_is_not_work() {
+        let body = payload(&[threaded("https://github.com/o/r/pull/1", &[(COPILOT, false, true)])]);
+        assert_eq!(changes_count(&body), 0);
+    }
+
+    /// Humans get a verdict to express themselves with, and `still_on_you` already reads it. Counting
+    /// every open human discussion thread as work would light the bar on ordinary conversation.
+    #[test]
+    fn an_unresolved_human_thread_is_not_work() {
+        let body = payload(&[threaded("https://github.com/o/r/pull/1", &[("alice", false, false)])]);
+        assert_eq!(changes_count(&body), 0);
+    }
+
+    /// REST spells the bot with a `[bot]` suffix and GraphQL is not documented to agree. Matching on
+    /// the stem rather than picking one spelling makes the question moot.
+    #[test]
+    fn the_bot_login_matches_with_or_without_the_bot_suffix() {
+        for spelling in [COPILOT, "copilot-pull-request-reviewer[bot]"] {
+            let body = payload(&[threaded("https://github.com/o/r/pull/1", &[(spelling, false, false)])]);
+            assert_eq!(changes_count(&body), 1, "{spelling}");
+        }
+    }
+
+    /// Only the unresolved, current ones are counted, so the page can say how many.
+    #[test]
+    fn the_entry_carries_how_many_copilot_comments_are_open() {
+        let body = payload(&[threaded(
+            "https://github.com/o/r/pull/1",
+            &[
+                (COPILOT, false, false),
+                (COPILOT, false, false),
+                (COPILOT, true, false),
+                (COPILOT, false, true),
+                ("alice", false, false),
+            ],
+        )]);
+        match changes(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { prs: Some(list), .. } => assert_eq!(list[0].copilot_unresolved, 2),
+            other => panic!("expected Fresh with a list, got {:?}", other),
+        }
+    }
+
+    /// Same call as merge conflicts: work before news, and the two bars stay disjoint.
+    #[test]
+    fn unresolved_copilot_comments_veto_the_approved_count() {
+        let approved_with_nits = format!(
+            r#"{{"reviewThreads":{{"nodes":[{{"isResolved":false,"isOutdated":false,"comments":{{"nodes":[{{"author":{{"login":"{COPILOT}"}}}}]}}}}]}},{}"#,
+            &verdict_hit("https://github.com/o/r/pull/1", &[("APPROVED", "alice")], &[])[1..]
+        );
+        match approved_resp(StatusCode::OK, &headers(&[]), &payload(&[approved_with_nits]), 0) {
+            PollResult::Fresh { count, .. } => assert_eq!(count, Some(0)),
+            other => panic!("expected Fresh, got {:?}", other),
+        }
+    }
+
+    /// `copilotReviews=off` takes it back out of both rules, and the axes then stop asking for review
+    /// threads at all, so the setting is a cost saving as well as a preference.
+    #[test]
+    fn the_setting_off_leaves_copilot_comments_out_of_both_bars() {
+        let body = payload(&[threaded("https://github.com/o/r/pull/1", &[(COPILOT, false, false)])]);
+        let off = classify_with(
+            StatusCode::OK,
+            &headers(&[]),
+            &body,
+            0,
+            &|b| parse_reviewed(b, |pr| work_required(pr, false)),
+        );
+        match off {
+            PollResult::Fresh { count, .. } => assert_eq!(count, Some(0), "not work when off"),
+            other => panic!("expected Fresh, got {:?}", other),
+        }
+
+        let approved_with_nits = format!(
+            r#"{{"reviewThreads":{{"nodes":[{{"isResolved":false,"isOutdated":false,"comments":{{"nodes":[{{"author":{{"login":"{COPILOT}"}}}}]}}}}]}},{}"#,
+            &verdict_hit("https://github.com/o/r/pull/2", &[("APPROVED", "alice")], &[])[1..]
+        );
+        let still_approved = classify_with(
+            StatusCode::OK,
+            &headers(&[]),
+            &payload(&[approved_with_nits]),
+            0,
+            &|b| parse_reviewed(b, |pr| approved(pr, false)),
+        );
+        match still_approved {
+            PollResult::Fresh { count, .. } => assert_eq!(count, Some(1), "no veto when off"),
+            other => panic!("expected Fresh, got {:?}", other),
+        }
+    }
+
+    /// A hit with no `reviewThreads` at all — the axes that pass `first: 0` — must not read as work.
+    #[test]
+    fn a_hit_without_review_threads_is_not_work() {
+        let body = payload(&[verdict_hit("https://github.com/o/r/pull/1", &[], &[])]);
+        assert_eq!(changes_count(&body), 0);
     }
 
     // ── Activity, for the hoot ledger ─────────────────────────────────────────
@@ -1956,6 +2186,9 @@ mod tests {
             "statusCheckRollup",
             "mergeable",
             "submittedAt",
+            "reviewThreads",
+            "isResolved",
+            "isOutdated",
             "rateLimit",
         ] {
             assert!(PR_REVIEWS_DOCUMENT.contains(field), "document is missing {field}");
