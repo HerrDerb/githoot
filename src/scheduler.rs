@@ -65,8 +65,8 @@ static UPDATE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// reviews. The narrower one would count only requests naming the user directly.
 ///
 /// `sort:updated-desc` from the equivalent UI search is deliberately absent: it is a UI-only
-/// qualifier (the REST API takes separate `sort`/`order` params) and irrelevant when the only
-/// thing read from the response is `total_count`.
+/// qualifier the API does not read, and the order hits come back in is the page's business, not the
+/// count's. `REVIEW_UI_SORT` adds it back for the browser view alone.
 const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false archived:false \
                             -label:dependencies -author:app/dependabot -author:app/renovate";
 
@@ -90,8 +90,8 @@ const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:fals
 /// Search query for the user's own pull requests where a reviewer requested changes.
 const CHANGES_QUERY: &str = "is:pr author:@me review:changes_requested state:open archived:false";
 
-/// Sort order for the browser view only. Meaningless to the API (which reads `total_count`), but
-/// it is what makes the web page useful to look at.
+/// Sort order for the browser view only. Meaningless to the API, but it is what makes GitHub's own
+/// search page useful to look at when it stands in as a fallback.
 const REVIEW_UI_SORT: &str = "sort:updated-desc";
 
 /// The search query behind `axis`'s dot. `PrAxis` itself doesn't know about queries — issuing
@@ -104,55 +104,62 @@ fn pr_query(axis: PrAxis) -> &'static str {
     }
 }
 
-/// Which endpoint answers an axis's poll.
+/// Which rule decides whether a search hit counts for an axis.
 ///
-/// Split out of `poll_pr` for one reason: `poll_pr` does I/O and therefore cannot be asserted, while
-/// *which endpoint an axis uses* is exactly the kind of decision that should not be able to change
-/// unnoticed. Same motivation as `pr_query` above — the mapping gets one definition and a test.
+/// All three axes now issue the same GraphQL document against the same endpoint, so what separates
+/// them is the query string and this. It used to be `PrEndpoint`, and the rename is the point: with
+/// `ReviewRequested` moved off REST Search there is one endpoint left, and a type naming three of
+/// them would be a lie in a type name.
+///
+/// Split out of `poll_pr` for the reason the old type was: `poll_pr` does I/O and therefore cannot be
+/// asserted, while *which rule judges which axis* is exactly the kind of decision that should not be
+/// able to change unnoticed. Same motivation as `pr_query` above — one definition, one test.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PrEndpoint {
-    /// A `total_count` read off the REST Search API, `per_page=1`. Nothing about the individual hits is
-    /// needed, so nothing about them is fetched.
-    SearchTotal,
-    /// The GraphQL search judged by `github::approved`, because the answer needs reading hit by hit.
-    ApprovedGraphQl,
-    /// The GraphQL search judged by `github::still_on_you`, for the same reason.
-    ChangesGraphQl,
+enum PrJudge {
+    /// Every hit counts. `review-requested:@me` is a real server-side filter, so there is nothing for
+    /// a client-side rule to narrow; the hits are fetched only so the page can name them.
+    EveryHit,
+    /// `github::approved` reads each hit's reviews, because Search's `review:` qualifier reads a field
+    /// GitHub leaves empty wherever no review policy exists.
+    Approved,
+    /// `github::still_on_you` reads each hit's pending requests, which Search cannot express at all.
+    StillOnYou,
 }
 
-/// The endpoint behind `axis`'s dot.
-fn pr_endpoint(axis: PrAxis) -> PrEndpoint {
+/// The rule behind `axis`'s dot.
+fn pr_judge(axis: PrAxis) -> PrJudge {
     match axis {
-        PrAxis::ReviewRequested => PrEndpoint::SearchTotal,
-        PrAxis::ReadyToMerge => PrEndpoint::ApprovedGraphQl,
-        PrAxis::ChangesRequested => PrEndpoint::ChangesGraphQl,
+        PrAxis::ReviewRequested => PrJudge::EveryHit,
+        PrAxis::ReadyToMerge => PrJudge::Approved,
+        PrAxis::ChangesRequested => PrJudge::StillOnYou,
     }
 }
 
 /// Issues `axis`'s poll.
 ///
-/// All three axes take the same kind of query string; they differ in which endpoint answers it and how
-/// much of the answer has to be read. Only `ReviewRequested` is a plain `total_count`. The other two
-/// judge each hit by its reviews client-side, because Search's `review:` qualifier reads a field GitHub
-/// leaves empty wherever no review policy exists — see `github::PR_REVIEWS_DOCUMENT`.
+/// One endpoint, one document, three query strings and three rules. The three `github::poll_*`
+/// functions stay separate rather than collapsing into one call taking the rule, because each carries
+/// the argument for why its rule exists — and on this axis that argument is the asset, not the code.
 fn poll_pr(client: &reqwest::blocking::Client, token: &str, axis: PrAxis) -> github::PollResponse {
     let query = pr_query(axis);
-    match pr_endpoint(axis) {
-        PrEndpoint::SearchTotal => github::poll_reviews(client, token, query),
-        PrEndpoint::ApprovedGraphQl => github::poll_approved(client, token, query),
-        PrEndpoint::ChangesGraphQl => github::poll_changes_requested(client, token, query),
+    match pr_judge(axis) {
+        PrJudge::EveryHit => github::poll_review_requested(client, token, query),
+        PrJudge::Approved => github::poll_approved(client, token, query),
+        PrJudge::StillOnYou => github::poll_changes_requested(client, token, query),
     }
 }
 
 /// The GitHub search page for `axis`'s query.
 ///
 /// Built from the same query the search itself uses, so the page cannot drift from the icon the
-/// way a hand-written URL would the moment a query changes. For `ReviewRequested`, the one
-/// `SearchTotal` axis, that makes page and count exactly equal, and the page is what its menu entry
-/// opens. The two GraphQL axes narrow their hits client-side with a rule Search has no qualifier for,
+/// way a hand-written URL would the moment a query changes.
+///
+/// It is a *fallback*, never the first choice: for `ReviewRequested` the page and the count agree
+/// exactly, but the other two narrow their hits client-side with a rule Search has no qualifier for,
 /// so for them this page is a superset — every open PR of yours for the green bar, every PR with
-/// changes requested including handed-back ones for the amber — and only the *fallback* for a click
-/// (see `pr_targets`). A page listing more than the dot beats one missing PRs the dot claims.
+/// changes requested including handed-back ones for the amber. A page listing more than the dot beats
+/// one missing PRs the dot claims, which is why it is still worth opening when there is no confirmed
+/// list to show.
 pub fn pr_list_url(axis: PrAxis) -> String {
     format!(
         "https://github.com/pulls?q={}",
@@ -160,21 +167,21 @@ pub fn pr_list_url(axis: PrAxis) -> String {
     )
 }
 
-/// The last PR URLs each axis's poll confirmed, indexed by `PrAxis::index`, for `pr_targets`.
+/// The last pull requests each axis's poll confirmed, indexed by `PrAxis::index`.
 ///
 /// A `static` for the same reason `UPDATE_IN_FLIGHT` is: the writer is the poll thread and the
 /// reader is a menu-click handler on the UI thread, created before the poll loop exists, so there
 /// is no value to thread through. `None` means "no confirmed list" — never "no PRs", which is
-/// `Some(vec![])`. `ReviewRequested`'s slot stays `None` for life: a `total_count` read has no hits
-/// to name, and its search page is exact anyway.
+/// `Some(vec![])`. All three axes fill their slot now; before 1.17.0 `ReviewRequested`'s stayed empty
+/// for life, because a `total_count` read has no hits to name.
 static PR_URLS: std::sync::Mutex<[Option<Vec<github::PrEntry>>; 3]> =
     std::sync::Mutex::new([None, None, None]);
 
 /// What clicking `axis`'s menu entry should open.
 ///
 /// The exact PRs the dot is counting when the poll has a confirmed list, because no search URL can
-/// express either GraphQL axis's rule: `review:approved` misses every approval in a repository that
-/// requires none, and `review:changes_requested` keeps matching a PR after the author re-requests
+/// express what two of the three bars count: `review:approved` misses every approval in a repository
+/// that requires none, and `review:changes_requested` keeps matching a PR after the author re-requests
 /// review. The search page remains the fallback for every state where the list cannot be trusted:
 /// before the first answer, after the track gives up, when the payload had holes — and when the list
 /// is confirmed *empty*, where the page at least shows the superset instead of a click doing nothing.
@@ -395,16 +402,20 @@ fn run_poll_loop(
         }
 
         // ── PR axes (serial, not concurrent: GitHub asks for serial requests) ─
-        // Search has its own 30-per-minute budget and returns no ETag, so this is always an
-        // unconditional request. All three axes share one credential (see `PrTokenStore`), whose
+        // All three are GraphQL POSTs, which never answer 304, so this is always an unconditional
+        // request. What they draw on is a points budget rather than a request count, and what each
+        // query actually costs is logged by `parse_reviewed` from GitHub's own `rateLimit` field —
+        // measured rather than estimated, because the obvious arithmetic gets it wrong. All three
+        // axes share one credential (see `PrTokenStore`), whose
         // access is granted by installing the GitHub App rather than by a scope, so there is no
         // per-poll scope check here: whether it can see anything at all is checked once, at
         // startup, in `main.rs`.
         if let Some(store) = pr.as_ref() {
             for axis in PrAxis::ALL {
                 // Skipped before the request, not after: `apply_pr` would discard the answer for an
-                // axis that is not in play, and Search has its own 30-per-minute budget, so issuing
-                // it would be pure cost.
+                // axis that is not in play, and a GraphQL document reading up to a hundred hits and
+                // their reviews is the most expensive call this app makes, so issuing it would be
+                // pure cost. Worth more now than when this was a 30-per-minute search budget.
                 //
                 // An `if` rather than `.filter()` on the iterator: the adaptor would hold `&state`
                 // across a body that needs `&mut state` for `apply_pr`.
@@ -1046,11 +1057,25 @@ mod tests {
 
     const STEADY: Duration = Duration::from_secs(60);
 
-    /// The review-requested axis reads a count and nothing else: `review-requested:@me` is a real
-    /// server-side filter, so nothing about a hit needs reading.
+    /// The review-requested axis keeps every hit: `review-requested:@me` is a real server-side
+    /// filter, so there is nothing left for a client-side rule to narrow.
+    ///
+    /// It read a plain `total_count` off REST Search until the PR page needed to *name* the pull
+    /// requests behind the number, which a total never could.
     #[test]
-    fn review_requested_reads_a_plain_search_total() {
-        assert_eq!(pr_endpoint(PrAxis::ReviewRequested), PrEndpoint::SearchTotal);
+    fn review_requested_counts_every_hit() {
+        assert_eq!(pr_judge(PrAxis::ReviewRequested), PrJudge::EveryHit);
+    }
+
+    /// The whole point of the move is that the server-side filter did not change. If this literal
+    /// drifts, the count moves with it and the bar starts meaning something else.
+    #[test]
+    fn the_review_query_is_unchanged_by_the_move_to_graphql() {
+        assert_eq!(
+            REVIEW_QUERY,
+            "is:pr review-requested:@me state:open draft:false archived:false \
+-label:dependencies -author:app/dependabot -author:app/renovate"
+        );
     }
 
     /// The approved axis went back to GraphQL, and its query must not carry the qualifier it left behind.
@@ -1062,14 +1087,15 @@ mod tests {
     /// reintroduce the hole in front of the judge.
     #[test]
     fn ready_to_merge_judges_reviews_over_graphql_without_a_review_qualifier() {
-        assert_eq!(pr_endpoint(PrAxis::ReadyToMerge), PrEndpoint::ApprovedGraphQl);
+        assert_eq!(pr_judge(PrAxis::ReadyToMerge), PrJudge::Approved);
         assert!(!MERGE_QUERY.contains("review:"), "got {MERGE_QUERY}");
     }
 
-    /// `still_on_you` answers a question the Search query genuinely cannot, so this axis keeps GraphQL.
+    /// `still_on_you` answers a question the Search query genuinely cannot, so this axis keeps its
+    /// client-side rule.
     #[test]
-    fn changes_requested_still_needs_graphql() {
-        assert_eq!(pr_endpoint(PrAxis::ChangesRequested), PrEndpoint::ChangesGraphQl);
+    fn changes_requested_still_narrows_its_hits() {
+        assert_eq!(pr_judge(PrAxis::ChangesRequested), PrJudge::StillOnYou);
     }
 
     fn burst_of(secs: &[u64]) -> VecDeque<Duration> {

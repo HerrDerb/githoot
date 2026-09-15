@@ -353,8 +353,8 @@ fn device_code_flow(http: &Client) -> Result<Credential, AuthError> {
 
 // ── GitHub App installations ────────────────────────────────────────────────────
 
-/// `GET /user/installations`'s `total_count`. Everything else in the response is unused —
-/// mirrors how `github.rs`'s `SearchResult` reads just `total_count` from search responses.
+/// `GET /user/installations`'s `total_count`. Everything else in the response is unused: the only
+/// question asked here is whether the App is installed anywhere at all.
 #[derive(Deserialize)]
 struct InstallationsResponse {
     total_count: u64,

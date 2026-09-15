@@ -13,7 +13,6 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const NOTIFICATIONS_URL: &str = "https://api.github.com/notifications";
-const SEARCH_URL: &str = "https://api.github.com/search/issues";
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const AGENT: &str = "githoot-tray";
 
@@ -168,13 +167,6 @@ type BodyParser = fn(&str) -> Result<Parsed, String>;
 #[derive(Debug, Deserialize)]
 struct Notification {}
 
-/// The one field we need from `/search/issues`. `total_count` is a required field of that
-/// response, and it counts matches across all pages — so `per_page=1` still gives a true total.
-#[derive(Debug, Deserialize)]
-struct SearchResult {
-    total_count: u32,
-}
-
 /// Everything GitHub can tell us, kept distinguishable because the caller must react
 /// differently to each one.
 #[derive(Debug)]
@@ -253,24 +245,6 @@ pub fn poll_notifications(client: &Client, token: &str, etag: Option<&str>) -> P
     send(request, token, etag, parse_notifications)
 }
 
-/// Polls a pull-request search, reading nothing but its `total_count`.
-///
-/// Named for the axis it was written for, and now shared with the approved axis, which stopped needing
-/// anything about the individual hits — see `scheduler::pr_endpoint`.
-///
-/// No `If-None-Match` is sent: the search endpoint was measured to return no `etag` at all, and
-/// replaying one yields `200` rather than `304`, so a conditional request would only add a
-/// header for nothing. Note also that search has its own rate-limit resource — 30 requests per
-/// *minute*, independent of the 15000/hour core budget — which is why `classify` reads the
-/// rate-limit headers off whichever response it was handed rather than assuming a shared pool.
-pub fn poll_reviews(client: &Client, token: &str, query: &str) -> PollResponse {
-    let request = client
-        .get(SEARCH_URL)
-        .query(&[("q", query), ("per_page", "1")]);
-
-    send(request, token, None, parse_search_total)
-}
-
 /// The GraphQL document behind both axes that judge pull requests by their reviews.
 ///
 /// Search's `review:` qualifier is not a view of the reviews. It is a projection of `reviewDecision`,
@@ -322,6 +296,20 @@ query($q:String!,$hits:Int!,$reviews:Int!){\
 /// No `If-None-Match`: GraphQL is a POST and does not answer `304`.
 pub fn poll_changes_requested(client: &Client, token: &str, query: &str) -> PollResponse {
     poll_reviewed(client, token, query, parse_changes_requested)
+}
+
+/// Polls the pull requests waiting on the user's review.
+///
+/// The one axis with no client-side rule: `review-requested:@me` is a real server-side filter, so
+/// every hit counts and the query string alone decides the number.
+///
+/// It read `total_count` off REST Search until 1.17.0. A total is a number with no members, and the
+/// PR page has to name the pull requests behind the bar, which no total ever could. The query string
+/// is handed to `search` unchanged, so the count does not move — except that it now shares the other
+/// two axes' cap: past `SEARCH_HITS_CAP` matches the extras are not seen. That undercounts rather
+/// than overcounts, and is unreachable by the inbox this app exists for.
+pub fn poll_review_requested(client: &Client, token: &str, query: &str) -> PollResponse {
+    poll_reviewed(client, token, query, parse_review_requested)
 }
 
 /// Polls the user's own open pull requests and counts the ones a reviewer approved.
@@ -393,13 +381,6 @@ fn parse_notifications(body: &str) -> Result<Parsed, String> {
         .map(|list| Parsed { present: !list.is_empty(), count: None, prs: None })
         // Previously `.unwrap_or_default()`, which turned a garbled payload into "no unread".
         .map_err(|e| format!("unparseable notification payload: {e}"))
-}
-
-/// Success-body parser for `/search/issues`: exact count, so the tooltip can quote it.
-fn parse_search_total(body: &str) -> Result<Parsed, String> {
-    serde_json::from_str::<SearchResult>(body)
-        .map(|r| Parsed { present: r.total_count > 0, count: Some(r.total_count), prs: None })
-        .map_err(|e| format!("unparseable search payload: {e}"))
 }
 
 // ─── The changes-requested payload ────────────────────────────────────────────
@@ -682,6 +663,11 @@ fn parse_approved(body: &str) -> Result<Parsed, String> {
     parse_reviewed(body, approved)
 }
 
+/// Success-body parser for the review-requested GraphQL query: every hit counts.
+fn parse_review_requested(body: &str) -> Result<Parsed, String> {
+    parse_reviewed(body, |_| true)
+}
+
 /// Shared body of the two GraphQL parsers: one `PR_REVIEWS_DOCUMENT` answer, one predicate per axis.
 ///
 /// GraphQL answers `200 OK` and puts failures in an `errors` array, so `classify_with` cannot see them
@@ -876,9 +862,13 @@ mod tests {
         classify_with(status, h, body, now, parse_notifications)
     }
 
-    /// Shorthand: classify a SEARCH response.
+    /// Shorthand: classify a REVIEW-REQUESTED (GraphQL) response.
+    ///
+    /// Named `search` historically, when this axis read REST Search. The name is kept because a dozen
+    /// status-line and rate-limit tests below drive it, and none of them looks at the success body —
+    /// so repointing it at the GraphQL parser preserves that coverage exactly rather than rewriting it.
     fn search(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, parse_search_total)
+        classify_with(status, h, body, now, parse_review_requested)
     }
 
     // ── Notifications body parsing ────────────────────────────────────────────
@@ -1126,11 +1116,14 @@ mod tests {
         }
     }
 
-    /// The two search-total endpoints have no per-hit view, so they must never claim one.
+    /// Notifications is the one endpoint left with no per-hit view, so it must never claim one.
     #[test]
-    fn search_totals_carry_no_entries() {
-        match search(StatusCode::OK, &headers(&[]), r#"{"total_count":7,"items":[{}]}"#, 0) {
-            PollResult::Fresh { prs, .. } => assert_eq!(prs, None),
+    fn notifications_carry_no_entries() {
+        match notif(StatusCode::OK, &headers(&[]), "[{}]", 0) {
+            PollResult::Fresh { prs, count, .. } => {
+                assert_eq!(prs, None);
+                assert_eq!(count, None, "presence only, so there is no number either");
+            }
             other => panic!("expected Fresh, got {:?}", other),
         }
     }
@@ -1240,8 +1233,8 @@ mod tests {
     // ── Search body parsing ───────────────────────────────────────────────────
 
     #[test]
-    fn zero_total_count_means_no_review_pending() {
-        match search(StatusCode::OK, &headers(&[]), r#"{"total_count":0,"items":[]}"#, 0) {
+    fn no_hits_means_no_review_pending() {
+        match search(StatusCode::OK, &headers(&[]), &payload(&[]), 0) {
             PollResult::Fresh { present, count, .. } => {
                 assert!(!present);
                 assert_eq!(count, Some(0));
@@ -1250,20 +1243,35 @@ mod tests {
         }
     }
 
+    /// Every hit counts on this axis, and each one is named — which is the whole reason it left
+    /// `total_count` behind: a number the page cannot expand into pull requests is not enough.
     #[test]
-    fn positive_total_count_means_review_pending_and_reports_the_count() {
-        match search(StatusCode::OK, &headers(&[]), r#"{"total_count":7,"items":[{}]}"#, 0) {
-            PollResult::Fresh { present, count, .. } => {
+    fn every_hit_counts_for_review_requested_and_each_is_named() {
+        let body = payload(&[
+            hit_at("https://github.com/o/r/pull/1", &["alice"], &[("User", "alice")]),
+            hit_at("https://github.com/o/r/pull/2", &[], &[]),
+        ]);
+        match search(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { present, count, prs, .. } => {
                 assert!(present);
-                assert_eq!(count, Some(7), "total_count is free, so the tooltip can quote it");
+                assert_eq!(count, Some(2), "no client-side rule narrows this axis");
+                let opened: Vec<String> =
+                    prs.expect("a confirmed list").iter().map(|e| e.url.clone()).collect();
+                assert_eq!(
+                    opened,
+                    vec![
+                        "https://github.com/o/r/pull/1".to_string(),
+                        "https://github.com/o/r/pull/2".to_string(),
+                    ]
+                );
             }
             other => panic!("expected Fresh, got {:?}", other),
         }
     }
 
-    /// A body without `total_count` must not read as "nothing to review".
+    /// A body carrying neither `data` nor `errors` must not read as "nothing to review".
     #[test]
-    fn search_body_missing_total_count_is_transient() {
+    fn a_body_with_neither_data_nor_errors_is_transient() {
         assert!(matches!(
             search(StatusCode::OK, &headers(&[]), r#"{"items":[]}"#, 0),
             PollResult::Transient(_)

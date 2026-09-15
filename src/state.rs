@@ -237,10 +237,11 @@ pub const AUTOSTART_MENU_LABEL: &str = "Start at sign-in";
 /// One of the three independent PR-search signals.
 ///
 /// All three share one credential and one query string apiece, and all three land in the same
-/// `Track` machinery. Two of them are a `total_count` read off the Search API (`github::poll_reviews`,
-/// despite its name — see its own doc comment); changes-requested goes through GraphQL instead, because
-/// its query alone cannot tell "still on me" from "handed back to the reviewer". See
-/// `github::poll_changes_requested`. `scheduler::pr_endpoint` is the one place that mapping lives.
+/// `Track` machinery, and since 1.17.0 all three read the same GraphQL document. What separates them
+/// is the rule applied to the hits: review-requested keeps every one, because its query is a real
+/// filter; the other two narrow client-side, because Search can express neither "somebody approved
+/// this" in a repository that requires no reviews nor "still on me rather than handed back".
+/// `scheduler::pr_judge` is the one place that mapping lives.
 ///
 /// The middle axis means **approved**, not mergeable. It used to mean both: the count dropped any
 /// approved pull request whose checks were red, on the reasoning that a green bar over red CI claims
