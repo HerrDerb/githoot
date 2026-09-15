@@ -47,36 +47,6 @@ const HOOT_FILE: &str = "githoot-hoot.mp3";
 /// Whether a hoot is currently playing. See the module doc: overlapping hoots are dropped.
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
-/// Whether hooting is wanted, shared between the tray menu and the poll loop.
-///
-/// The setting used to be a plain `bool` read out of `config.txt` at startup and copied into the poll
-/// loop, which was fine while a text editor was the only way to change it — editing the file already
-/// meant restarting to apply it. A checkbox does not: unticking a box and then still hearing the next
-/// hoot is a broken switch, whatever the log says.
-///
-/// A shared flag rather than a channel, because there is nothing to deliver — the loop does not need
-/// to *react* to the change, only to read the current answer at the one moment it is about to hoot.
-/// A message would add a queue, an ordering question and a wake-up for a value that is one bit wide.
-///
-/// `Relaxed` is the right ordering for exactly that reason: nothing else is published alongside this
-/// flag, so there is nothing for it to order. The worst a race can do is hoot once more, or once less,
-/// in the same instant the user clicked — and either is indistinguishable from clicking a moment later.
-#[derive(Clone)]
-pub struct Switch(std::sync::Arc<AtomicBool>);
-
-impl Switch {
-    pub fn new(on: bool) -> Self {
-        Self(std::sync::Arc::new(AtomicBool::new(on)))
-    }
-
-    pub fn is_on(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    pub fn set(&self, on: bool) {
-        self.0.store(on, Ordering::Relaxed);
-    }
-}
 
 /// Plays the hoot, returning immediately.
 ///
@@ -264,26 +234,5 @@ mod tests {
             std::fs::metadata(first).expect("unpacked file must exist").len(),
             HOOT.len() as u64
         );
-    }
-}
-
-#[cfg(test)]
-mod switch_tests {
-    use super::*;
-
-    /// The whole point of the type: the menu holds one handle and the poll loop another, and a click
-    /// on the first has to be visible from the second. A `bool` copied into the loop could not do it,
-    /// which is what made unticking the box take a restart.
-    #[test]
-    fn a_clone_sees_what_the_original_was_set_to() {
-        let menus_copy = Switch::new(true);
-        let poll_loops_copy = menus_copy.clone();
-        assert!(poll_loops_copy.is_on(), "it starts where it was built");
-
-        menus_copy.set(false);
-        assert!(!poll_loops_copy.is_on(), "unticking the box must silence the loop at once");
-
-        menus_copy.set(true);
-        assert!(poll_loops_copy.is_on(), "and ticking it must bring the hoot back");
     }
 }

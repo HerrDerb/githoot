@@ -303,16 +303,18 @@ pub struct PollInputs {
     /// this" with no opinion about settings, and the loop's own log line is silent too when it is off.
     ///
     /// A shared switch rather than the `bool` it was, because the tray's Hoot checkbox changes it while
-    /// this loop is running — see `sound::Switch`. Read once per cycle, at the moment it matters.
-    pub sound: crate::sound::Switch,
+    /// this loop is running — see `config::Switch`. Read once per cycle, at the moment it matters.
+    pub sound: crate::config::Switch,
     /// Which parts of GitHub may raise the outage mark. Empty means the whole page — see
     /// `config::Config::status_components`.
     pub status_components: Vec<String>,
     /// Whether Copilot's unresolved comments count as work. See `config::Config::copilot_reviews`.
     ///
-    /// Read at startup like everything but the hoot, and threaded down to the two axes whose rules
-    /// consult it — which is also what decides whether they pay for the review-thread connection.
-    pub copilot_reviews: bool,
+    /// A `Switch` rather than a `bool`, for the reason `sound` is one: the tray has a checkbox for it
+    /// and a box that needs a restart to take effect is a broken box. Read at the top of each cycle,
+    /// so the next poll obeys the new answer — and since it also decides whether the two axes ask
+    /// GitHub for review threads at all, switching it off stops the cost immediately too.
+    pub copilot_reviews: crate::config::Switch,
 }
 
 // ─── Shared polling core ──────────────────────────────────────────────────────
@@ -444,7 +446,7 @@ fn run_poll_loop(
                 if !state.pr_in_play(axis) {
                     continue;
                 }
-                let response = poll_pr(&client, store.token(), axis, copilot_reviews);
+                let response = poll_pr(&client, store.token(), axis, copilot_reviews.is_on());
                 // Only a failed axis speaks up, and it says what actually failed — this is the line
                 // that would have shown the merge-ready `statusCheckRollup` FORBIDDEN outright.
                 if let Some(detail) = response.result.problem() {

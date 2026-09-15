@@ -187,8 +187,47 @@ pub fn config_path(app_asset_path: &Path) -> std::path::PathBuf {
 /// place in the app that changes a value the user owns, which is why this takes a single named
 /// setting rather than a whole `Config` — a "write the config back" function would rewrite the file
 /// from the parsed values and silently discard every comment, blank line and unread key in it.
+/// A setting the tray menu can change while the app is running, shared with the poll loop.
+///
+/// A setting used to be a plain `bool` read out of `config.txt` at startup and copied into the poll
+/// loop, which was fine while a text editor was the only way to change one — editing the file already
+/// meant restarting to apply it. A checkbox does not: unticking a box and then still hearing the next
+/// hoot is a broken switch, whatever the log says. The same goes for any other box added beside it.
+///
+/// A shared flag rather than a channel, because there is nothing to deliver — the loop does not need
+/// to *react* to the change, only to read the current answer at the one moment it matters.
+/// A message would add a queue, an ordering question and a wake-up for a value that is one bit wide.
+///
+/// `Relaxed` is the right ordering for exactly that reason: nothing else is published alongside this
+/// flag, so there is nothing for it to order. The worst a race can do is act on the old answer once,
+/// in the same instant the user clicked — indistinguishable from clicking a moment later.
+///
+/// Lives here rather than in `sound`, where it started, because it is a *setting* that can change at
+/// runtime and nothing about it is about audio. The hoot was simply the first box on the menu.
+#[derive(Clone)]
+pub struct Switch(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Switch {
+    pub fn new(on: bool) -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(on)))
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set(&self, on: bool) {
+        self.0.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
     set_flag(&config_path(app_asset_path), KEY_SOUND, on)
+}
+
+/// Writes the `copilotReviews` value, the same surgical single-line edit `set_sound` makes.
+pub fn set_copilot_reviews(app_asset_path: &Path, on: bool) -> Result<(), String> {
+    set_flag(&config_path(app_asset_path), KEY_COPILOT_REVIEWS, on)
 }
 
 /// Reads the file, replaces one value, writes it back.
@@ -496,6 +535,23 @@ fn is_on(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The live switch ───────────────────────────────────────────────────────
+    /// The whole point of the type: the menu holds one handle and the poll loop another, and a click
+    /// on the first has to be visible from the second. A `bool` copied into the loop could not do it,
+    /// which is what made unticking the box take a restart.
+    #[test]
+    fn a_clone_sees_what_the_original_was_set_to() {
+        let menus_copy = Switch::new(true);
+        let poll_loops_copy = menus_copy.clone();
+        assert!(poll_loops_copy.is_on(), "it starts where it was built");
+
+        menus_copy.set(false);
+        assert!(!poll_loops_copy.is_on(), "unticking the box must silence the loop at once");
+
+        menus_copy.set(true);
+        assert!(poll_loops_copy.is_on(), "and ticking it must bring the hoot back");
+    }
 
     /// The first-run signal, end to end through a real directory. Both halves matter: `Yes` exactly
     /// once, and `No` on every start after it, because `autostart` asks a question that must never be

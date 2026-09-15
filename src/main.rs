@@ -260,8 +260,9 @@ fn main() {
     };
 
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
-    // `sound::Switch` for why this is shared state rather than a value copied into the loop.
-    let sound = sound::Switch::new(config.sound);
+    // `config::Switch` for why this is shared state rather than a value copied into the loop.
+    let sound = config::Switch::new(config.sound);
+    let copilot = config::Switch::new(config.copilot_reviews);
 
     let mut indicator = AppIndicator::new("github_notifications", "");
     indicator.set_status(AppIndicatorStatus::Active);
@@ -393,6 +394,42 @@ fn main() {
     // Read from the session's own autostart directory rather than from `config.txt`: the OS entry is
     // the only record of this answer, and a copy in the settings file would be a second one to keep in
     // step with a directory the user can edit behind our back. See `docs/startup.md`.
+    // Beside the hoot, and built the same way: live flag first, file second, and the tick reverts
+    // with a dialog if the file cannot be written. Unlike the hoot this changes what is *counted*,
+    // so the poll is pulled forward — leaving a stale amber count on screen after deliberately
+    // changing the rule behind it is the kind of thing that reads as the click not having worked.
+    let copilot_item = gtk::CheckMenuItem::with_label(state::COPILOT_MENU_LABEL);
+    copilot_item.set_active(copilot.is_on());
+    let copilot_flag = copilot.clone();
+    let copilot_config_path = app_asset_path.clone();
+    let copilot_reverting = reverting.clone();
+    let copilot_wake_tx = wake_tx.clone();
+    copilot_item.connect_toggled(move |item| {
+        if copilot_reverting.get() {
+            return;
+        }
+        let on = item.is_active();
+        copilot_flag.set(on);
+        if let Err(e) = config::set_copilot_reviews(&copilot_config_path, on) {
+            errorln!("could not save the Copilot setting ({e})");
+            report_in_background(
+                "githoot-tray: could not save the setting",
+                format!(
+                    "Copilot comments {} counted for now, but the setting could not be written, so \
+                     the next start will not remember it.\n\n{e}",
+                    if on { "are" } else { "are not" }
+                ),
+            );
+            copilot_flag.set(!on);
+            copilot_reverting.set(true);
+            item.set_active(!on);
+            copilot_reverting.set(false);
+            return;
+        }
+        infoln!("Copilot comments as work {}", if on { "on" } else { "off" });
+        let _ = copilot_wake_tx.send(scheduler::Wake::Refresh);
+    });
+
     let autostart_item = gtk::CheckMenuItem::with_label(state::AUTOSTART_MENU_LABEL);
     autostart_item.set_active(autostart::is_enabled());
     let autostart_reverting = reverting.clone();
@@ -444,6 +481,7 @@ fn main() {
 
     let settings_menu = Menu::new();
     settings_menu.append(&hoot_item);
+    settings_menu.append(&copilot_item);
     settings_menu.append(&autostart_item);
     // The rule separates what a click changes from what a click opens.
     settings_menu.append(&gtk::SeparatorMenuItem::new());
@@ -536,7 +574,7 @@ fn main() {
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
             sound: sound.clone(),
             status_components: config.status_components.clone(),
-            copilot_reviews: config.copilot_reviews,
+            copilot_reviews: copilot.clone(),
         },
         wake_rx,
         restart_tx,
@@ -693,8 +731,9 @@ fn main() {
     };
 
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
-    // `sound::Switch` for why this is shared state rather than a value copied into the loop.
-    let sound = sound::Switch::new(config.sound);
+    // `config::Switch` for why this is shared state rather than a value copied into the loop.
+    let sound = config::Switch::new(config.sound);
+    let copilot = config::Switch::new(config.copilot_reviews);
 
     // ── Tray ─────────────────────────────────────────────────────────────────
 
@@ -733,6 +772,8 @@ fn main() {
         /// The hoot checkbox. Its tick is the truth the user sees, so a failed write puts it back.
         hoot_item: tray_icon::menu::CheckMenuItem,
         hoot_item_id: tray_icon::menu::MenuId,
+        copilot_item: tray_icon::menu::CheckMenuItem,
+        copilot_item_id: tray_icon::menu::MenuId,
         /// The start-at-sign-in checkbox. Backed by the OS, not by `config.txt` — see `autostart`.
         autostart_item: tray_icon::menu::CheckMenuItem,
         autostart_item_id: tray_icon::menu::MenuId,
@@ -798,7 +839,7 @@ fn main() {
     /// moments: on Windows the tray must be created up front on the main thread, while on macOS an
     /// `NSStatusItem` has nothing to attach to until `NSApplication` is running. Returning `Result`
     /// rather than calling `fatal` directly keeps that decision with the caller.
-    fn build_tray(sound_on: bool) -> Result<Tray, String> {
+    fn build_tray(sound_on: bool, copilot_on: bool) -> Result<Tray, String> {
         // Decode and composite the embedded PNG assets.
         let icons = icons::load_tray_icons()?;
 
@@ -829,6 +870,8 @@ fn main() {
         // now. Cheap enough to do on the way in, and the only way the box can open telling the truth.
         let hoot_item = CheckMenuItem::new(state::HOOT_MENU_LABEL, true, sound_on, None);
         let hoot_item_id = hoot_item.id().clone();
+        let copilot_item = CheckMenuItem::new(state::COPILOT_MENU_LABEL, true, copilot_on, None);
+        let copilot_item_id = copilot_item.id().clone();
         let autostart_item =
             CheckMenuItem::new(state::AUTOSTART_MENU_LABEL, true, autostart::is_enabled(), None);
         let autostart_item_id = autostart_item.id().clone();
@@ -841,6 +884,7 @@ fn main() {
             true,
             &[
                 &hoot_item,
+                &copilot_item,
                 &autostart_item,
                 // The rule separates what a click changes from what a click opens.
                 &tray_icon::menu::PredefinedMenuItem::separator(),
@@ -907,6 +951,8 @@ fn main() {
             settings_menu,
             hoot_item,
             hoot_item_id,
+            copilot_item,
+            copilot_item_id,
             autostart_item,
             autostart_item_id,
             settings_file_item_id,
@@ -942,7 +988,7 @@ fn main() {
     // — an `NSStatusItem` created before `NSApplication` exists never appears in the menu bar — so
     // there it is deferred to `App::resumed`.
     #[cfg(target_os = "windows")]
-    let tray = match build_tray(sound.is_on()) {
+    let tray = match build_tray(sound.is_on(), copilot.is_on()) {
         Ok(tray) => Some(tray),
         Err(e) => fatal(&e),
     };
@@ -1019,7 +1065,7 @@ fn main() {
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
             sound: sound.clone(),
             status_components: config.status_components.clone(),
-            copilot_reviews: config.copilot_reviews,
+            copilot_reviews: copilot.clone(),
         },
         wake_rx,
         proxy,
@@ -1041,7 +1087,9 @@ fn main() {
         /// way back to the settings file it opens and the one setting it writes.
         app_asset_path: std::path::PathBuf,
         /// The menu's handle on the hoot switch. The poll loop holds the other one.
-        sound: sound::Switch,
+        sound: config::Switch,
+        /// The same, for whether Copilot's comments count as work.
+        copilot: config::Switch,
     }
 
     impl App {
@@ -1093,6 +1141,8 @@ fn main() {
                 // `muda` has already flipped the tick, so the item is the request rather than the
                 // state: read it, try to make it true, and put it back if that fails.
                 self.set_hoot(tray.hoot_item.is_checked(), &tray.hoot_item);
+            } else if *id == tray.copilot_item_id {
+                self.set_copilot(tray.copilot_item.is_checked(), &tray.copilot_item);
             } else if *id == tray.autostart_item_id {
                 self.set_autostart(tray.autostart_item.is_checked(), &tray.autostart_item);
             } else if *id == tray.settings_file_item_id {
@@ -1146,6 +1196,32 @@ fn main() {
             if on {
                 sound::hoot();
             }
+        }
+
+        /// Switches whether Copilot's unresolved comments count as work.
+        ///
+        /// Same order and same revert-with-a-dialog as `set_hoot`. One thing differs: this changes
+        /// what is *counted*, not just what is heard, so the next poll is pulled forward. Leaving a
+        /// stale amber count on screen after deliberately changing the rule behind it reads as the
+        /// click not having worked.
+        fn set_copilot(&self, on: bool, item: &tray_icon::menu::CheckMenuItem) {
+            self.copilot.set(on);
+            if let Err(e) = config::set_copilot_reviews(&self.app_asset_path, on) {
+                errorln!("could not save the Copilot setting ({e})");
+                report_in_background(
+                    "githoot-tray: could not save the setting",
+                    format!(
+                        "Copilot comments {} counted for now, but the setting could not be written, \
+                         so the next start will not remember it.\n\n{e}",
+                        if on { "are" } else { "are not" }
+                    ),
+                );
+                item.set_checked(!on);
+                self.copilot.set(!on);
+                return;
+            }
+            infoln!("Copilot comments as work {}", if on { "on" } else { "off" });
+            let _ = self.wake_tx.send(scheduler::Wake::Refresh);
         }
 
         /// Registers or unregisters the startup entry, and keeps the tick honest about the result.
@@ -1452,7 +1528,7 @@ fn main() {
                 return;
             }
 
-            let mut tray = match build_tray(self.sound.is_on()) {
+            let mut tray = match build_tray(self.sound.is_on(), self.copilot.is_on()) {
                 Ok(tray) => tray,
                 Err(e) => fatal(&e),
             };
@@ -1538,6 +1614,7 @@ fn main() {
         wake_tx,
         app_asset_path: app_asset_path.clone(),
         sound,
+        copilot,
     };
 
     if let Err(e) = event_loop.run_app(&mut app) {

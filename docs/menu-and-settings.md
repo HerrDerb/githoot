@@ -48,14 +48,20 @@ listener cannot start at all, the entries fall back to that search page directly
 | Item | Does | Where the answer is kept |
 |---|---|---|
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
+| ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
 | **Open GitHoot on GitHub** | Opens this app's own repository: releases, issues, and these docs | — |
 
-Both checkboxes **take effect the moment you click them**, with no restart: the hoot is a flag the poll
-loop reads each cycle, and the startup entry is written straight to the OS. Everything else in
-`config.txt` is still read only at startup, which is why editing the file still ends in a restart
-prompt.
+All three checkboxes **take effect the moment you click them**, with no restart: the hoot and the
+Copilot rule are flags the poll loop reads each cycle, and the startup entry is written straight to the
+OS. Everything else in `config.txt` is still read only at startup, which is why editing the file still
+ends in a restart prompt.
+
+**Unticking Copilot re-polls at once.** Unlike the hoot, that box changes what is *counted*, so the
+amber bar and its page would otherwise sit on a number the rule behind them no longer produces — which
+reads as the click not having worked. Switching it off also stops both affected queries asking GitHub
+for review threads at all, so it is a saving as well as a preference.
 
 **Ticking Hoot plays one hoot.** The question behind that box is not "is the setting on" but "what will
 I hear", and a silent tick leaves you waiting for a pull request to find out whether it works. Unticking
@@ -67,7 +73,7 @@ export over DBus — and all three dismiss the popup on any click, with no flag 
 it afterwards was tried and thrown away: a submenu is positioned by Windows against its parent, that
 position cannot be read back, and a menu that reappears somewhere else is worse than one that closes.
 
-So two settings means two trips into the menu. The tick you find there next time is read fresh: the hoot
+So three settings means three trips into the menu. The tick you find there next time is read fresh: the hoot
 from the file, the startup entry from the OS.
 
 **Start at sign-in shows presence, not correctness.** An entry left behind by a copy of GitHoot in
@@ -86,10 +92,10 @@ tick goes back to what it was and a dialog says why.
 file is **never** rewritten wholesale, so your edits are safe — which also means a later version's new keys
 will not appear in it, and the table below is the complete list.
 
-The one thing that edits an existing file is the **Hoot** checkbox, and it changes exactly one value
-line: comments, blank lines, spacing and keys this version has never heard of all survive it byte for
-byte. If the file has no `sound` line at all — every file written before that key existed — the key is
-appended rather than the file regenerated.
+The only things that edit an existing file are the **Hoot** and **Copilot** checkboxes, and each
+changes exactly one value line: comments, blank lines, spacing and keys this version has never heard of
+all survive it byte for byte. If the file has no such line at all — every file written before that key
+existed — the key is appended rather than the file regenerated.
 
 > **Upgrading from `git-system-tray`?** The app was renamed, and with it the asset names, the binary
 > and this directory — settings and log used to live in `~/.github-trayicon/`. Nothing is migrated
