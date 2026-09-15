@@ -19,6 +19,14 @@ reviewer's standing verdict.
 | Port and token | New on every run |
 | Contents | Title, repo, number, author, age, draft, checks, per-reviewer verdicts |
 
+**Newest first.** GitHub's search answers in *best match* relevance order whenever the query names no
+sort, and none of the three does, so what comes back is effectively arbitrary and can differ between
+two polls over the same pull requests. The page sorts by last update instead, so the list does not
+shuffle under you between reloads. A pull request GitHub gave no date sorts last.
+
+**Links open in the same window.** Opening a tab per click is the habit this page exists to get away
+from; the back button is the way back to the list.
+
 **Reloading re-renders.** Each request is answered from the latest poll, so the tab stays useful
 without going back to the tray. The header says how old the data is. The page never refreshes itself:
 a tab you forgot about would re-render for ever, and the "as of" line makes staleness visible instead.

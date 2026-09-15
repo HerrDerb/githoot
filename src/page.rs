@@ -234,7 +234,7 @@ pub fn axis_page(
             github_link(fallback_url, "See GitHub's own search")
         )),
         Some(list) => {
-            for e in list {
+            for e in newest_first(list) {
                 h.push_str(&card(e, now_unix));
             }
         }
@@ -248,6 +248,37 @@ pub fn axis_page(
     h
 }
 
+/// The entries in the order the page shows them: most recently updated first.
+///
+/// Sorted here rather than trusted from the poll, because GitHub's search answers in **"best match"
+/// relevance** order whenever the query names no sort — and none of the three does. For queries this
+/// narrow that ordering is effectively arbitrary, so the same pull requests could come back in a
+/// different order on the next poll and the list would shuffle under the reader between two reloads.
+/// A list you are meant to scan has to sit still.
+///
+/// Done on the rendered copy, not on what the poll stored: the order is a presentation decision, and
+/// `scheduler`'s snapshot stays exactly what GitHub said.
+///
+/// An entry with no `updatedAt` sorts **last**. Treating a missing date as the epoch would be the
+/// other obvious choice and it is the wrong one: it puts the entry GitHoot knows least about at the
+/// bottom either way, but only this way round does it stay out of the top of the list, which is the
+/// part anyone actually reads.
+fn newest_first(list: &[PrEntry]) -> Vec<&PrEntry> {
+    let mut sorted: Vec<&PrEntry> = list.iter().collect();
+    // `sort_by_key` cannot borrow from the element, so this is `sort_by` with the same comparison.
+    // Stable, so pull requests sharing a timestamp keep GitHub's relative order rather than swapping.
+    sorted.sort_by(|a, b| {
+        let key = |e: &PrEntry| e.updated_at.as_deref().and_then(unix_from_iso);
+        match (key(a), key(b)) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    sorted
+}
+
 /// A `Duration` as the same short form `age` produces, for the "as of" line.
 fn age_of(d: Duration) -> String {
     let s = d.as_secs();
@@ -259,16 +290,19 @@ fn age_of(d: Duration) -> String {
     }
 }
 
-/// An outbound link. Every one on this page goes through here, so `noreferrer` cannot be forgotten
-/// on one of them — and `noopener` with it, since `target="_blank"` without it hands the opened tab a
-/// handle back to this one.
+/// An outbound link. Every one on this page goes through here, so `noreferrer` cannot be forgotten on
+/// one of them — and it is the load-bearing half: without it the click hands GitHub this page's URL,
+/// token included, in the `Referer` header.
+///
+/// No `target="_blank"`. Links replace the page, because opening a tab per click is the habit this
+/// page exists to get away from, and the back button is a better way back to the list than a pile of
+/// tabs. `noopener` goes with `_blank`: it exists to deny the opened tab a handle back to this one,
+/// and a same-window navigation has no opened tab to deny.
 fn github_link(url: &str, text: &str) -> String {
     match safe_url(url) {
-        Some(safe) => format!(
-            "<a href=\"{}\" target=\"_blank\" rel=\"noreferrer noopener\">{}</a>",
-            esc(safe),
-            esc(text)
-        ),
+        Some(safe) => {
+            format!("<a href=\"{}\" rel=\"noreferrer\">{}</a>", esc(safe), esc(text))
+        }
         None => esc(text),
     }
 }
@@ -278,11 +312,7 @@ fn card(e: &PrEntry, now_unix: u64) -> String {
     let title = e.title.as_deref().unwrap_or("(untitled)");
     // A URL that is not GitHub's own is shown but not offered as a link — see `safe_url`.
     let headline = match safe_url(&e.url) {
-        Some(url) => format!(
-            "<a href=\"{}\" target=\"_blank\" rel=\"noreferrer noopener\">{}</a>",
-            esc(url),
-            esc(title)
-        ),
+        Some(url) => format!("<a href=\"{}\" rel=\"noreferrer\">{}</a>", esc(url), esc(title)),
         None => esc(title),
     };
 
@@ -439,6 +469,16 @@ mod tests {
         assert_eq!(html.matches("noreferrer").count(), links, "every link, not most of them");
     }
 
+    /// Links replace the page rather than piling up tabs. Opening a new tab per click is the habit
+    /// this whole page was built to get away from, and the back button is the way back to the list.
+    #[test]
+    fn no_link_opens_a_new_tab() {
+        for entries in [None, Some(&[][..]), Some(&[entry("https://github.com/o/r/pull/1")][..])] {
+            let html = page(entries);
+            assert!(!html.contains("target="), "got: {html}");
+        }
+    }
+
     // ── What the page says ────────────────────────────────────────────────────
 
     /// `None` is "we do not know", and it must never be dressed up as a zero. Same refusal
@@ -454,6 +494,49 @@ mod tests {
     fn a_confirmed_empty_list_reads_as_nothing_here() {
         let html = page(Some(&[]));
         assert!(html.to_lowercase().contains("nothing"));
+    }
+
+    /// GitHub's search answers in "best match" relevance order when the query names no sort, which
+    /// for these three queries is effectively arbitrary — the same poll twice can hand back the same
+    /// pull requests in a different order. A list you are meant to scan has to sit still.
+    #[test]
+    fn the_list_is_newest_first_whatever_order_github_sent() {
+        let at = |n: u64, iso: &str| {
+            let mut e = entry(&format!("https://github.com/o/r/pull/{n}"));
+            e.number = Some(n);
+            e.updated_at = Some(iso.to_string());
+            e
+        };
+        let scrambled = [
+            at(2, "2026-09-10T00:00:00Z"),
+            at(3, "2026-09-01T00:00:00Z"),
+            at(1, "2026-09-14T00:00:00Z"),
+        ];
+        let html = page(Some(&scrambled));
+        // The full span text, not "#1": the stylesheet is full of hex colours like `#1c1f23`.
+        let seen: Vec<_> = [1, 2, 3]
+            .map(|n| {
+                let needle = format!("<span>qumea/care-api #{n}</span>");
+                html.find(&needle).unwrap_or_else(|| panic!("missing {needle} in {html}"))
+            })
+            .into_iter()
+            .collect();
+        assert!(seen[0] < seen[1] && seen[1] < seen[2], "newest first, got {seen:?}");
+    }
+
+    /// An entry GitHub gave no `updatedAt` cannot be placed by date. It goes last rather than
+    /// sorting as the epoch and displacing something real from the top of the list.
+    #[test]
+    fn an_entry_without_a_date_sorts_last_rather_than_oldest() {
+        let mut undated = entry("https://github.com/o/r/pull/9");
+        undated.number = Some(9);
+        undated.updated_at = None;
+        let mut old = entry("https://github.com/o/r/pull/8");
+        old.number = Some(8);
+        old.updated_at = Some("2020-01-01T00:00:00Z".to_string());
+        let html = page(Some(&[undated, old]));
+        let at = |n: u32| html.find(&format!("<span>qumea/care-api #{n}</span>")).expect("a card");
+        assert!(at(8) < at(9), "the dated one comes first");
     }
 
     #[test]
