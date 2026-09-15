@@ -194,16 +194,21 @@ fn random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
     std::fs::File::open("/dev/urandom")?.read_exact(buf)
 }
 
+/// `winapi::shared::bcrypt`, not `um` — `bcrypt.rs` lives under `shared/` in winapi 0.3, and getting
+/// that wrong is a Windows-only compile error a Linux build cannot see. `cargo check --target
+/// x86_64-pc-windows-msvc` catches it without an MSVC linker, since checking does not link.
 #[cfg(windows)]
 fn random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
-    // `BCRYPT_USE_SYSTEM_PREFERRED_RNG` (0x0002) means no algorithm handle has to be opened first.
-    const USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+    use winapi::shared::bcrypt::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    // The flag means no algorithm handle has to be opened first, which is why the first argument is
+    // null. A non-zero `NTSTATUS` is a failure, and `start` treats that as "no page at all" rather
+    // than falling back to a weaker source.
     let status = unsafe {
-        winapi::um::bcrypt::BCryptGenRandom(
+        BCryptGenRandom(
             std::ptr::null_mut(),
             buf.as_mut_ptr(),
             buf.len() as u32,
-            USE_SYSTEM_PREFERRED_RNG,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
         )
     };
     if status == 0 {
