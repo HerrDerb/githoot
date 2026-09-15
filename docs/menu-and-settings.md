@@ -215,7 +215,7 @@ dialog. Because slot positions are fixed, disabling the middle signal leaves a g
 app logs a line naming the replacement, but cannot honour the old key — which matters most for
 `update_check=off`, since left unedited it stops being read and update checks come back on.
 
-**Removed in 1.18.0:** the blue "unread notifications" tint, along with `notificationIndication`, the
+**Removed in 2.0.0:** the blue "unread notifications" tint, along with `notificationIndication`, the
 separate OAuth credential it needed and the **Open GitHub Notifications** entry. An old
 `notificationIndication` line in your `config.txt` is now simply an unknown key, which has always been
 ignored. `~/.githoot-tray/access_token.txt` and `client_id.txt` are no longer read by anything.

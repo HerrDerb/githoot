@@ -110,7 +110,7 @@ pub fn all_status_components() -> Vec<String> {
 /// updater someone deliberately disabled would switch back on.
 ///
 /// `notifications` → `notificationIndication` used to be the other entry. Both spellings are gone
-/// now: the feature they named was removed in 1.18.0, so there is no replacement to point at and an
+/// now: the feature they named was removed in 2.0.0, so there is no replacement to point at and an
 /// old line is simply an unknown key, which `parse` has always ignored.
 const RENAMED_KEYS: [(&str, &str); 1] = [("update_check", KEY_UPDATE_CHECK)];
 

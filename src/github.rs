@@ -398,7 +398,7 @@ fn poll_reviewed(
 ///
 /// No conditional request. `If-None-Match` existed for `/notifications`, the one endpoint that
 /// answered `304`; GraphQL is a POST and never does, so the whole ETag path went with the
-/// notification feature in 1.18.0.
+/// notification feature in 2.0.0.
 fn send(
     request: reqwest::blocking::RequestBuilder,
     token: &str,

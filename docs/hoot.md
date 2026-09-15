@@ -17,7 +17,7 @@ down hoots, and should.
 
 ## Why it is not "the count went up"
 
-It was, until 1.18.0, and that was only ever a proxy for the thing the sound means.
+It was, until 2.0.0, and that was only ever a proxy for the thing the sound means.
 
 **GitHub's search index is eventually consistent.** It will drop a pull request from one answer and hand
 it back in the next, untouched. Counting rises, that reads as `3 → 2 → 3`, and the app hooted for a pull

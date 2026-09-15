@@ -11,7 +11,7 @@
 //! counter.
 //!
 //! A fourth used to sit alongside them: unread GitHub notifications, drawn as a blue glyph and
-//! polled with a second, user-registered OAuth credential. It was removed in 1.18.0 along with the
+//! polled with a second, user-registered OAuth credential. It was removed in 2.0.0 along with the
 //! credential, the `/notifications` endpoint and the blue asset.
 //!
 //! Nothing here does I/O, so all of it is testable.
