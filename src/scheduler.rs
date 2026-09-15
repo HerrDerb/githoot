@@ -87,8 +87,21 @@ const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false ar
 /// unchecked, and always was: branch-protection rules needing more than one approval or named reviewers.
 const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
 
-/// Search query for the user's own pull requests where a reviewer requested changes.
-const CHANGES_QUERY: &str = "is:pr author:@me review:changes_requested state:open archived:false";
+/// Search query for the user's own pull requests that might need work from you.
+///
+/// Server-side: yours, open, not a draft. Nothing else — **`review:changes_requested` is deliberately
+/// gone.** The axis counts two things now, a reviewer's standing objection *or* a merge conflict with
+/// someone waiting, and `mergeable` is not a search qualifier, so a hit has to be looked at either
+/// way. Narrowing to one of the two halves server-side would have hidden the other.
+///
+/// `draft:false` is new with it. A draft is work you already know is unfinished, so neither half of
+/// this bar is news on one; before the conflict half existed the qualifier was absent, and a draft
+/// carrying a changes-requested review did count.
+///
+/// This is now character-for-character `MERGE_QUERY`. Two identical searches per cycle is real waste,
+/// and collapsing them into one poll feeding two rules is worth doing — it is left alone here only so
+/// a semantic change and a poll-loop refactor do not land in the same commit.
+const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
 
 /// Sort order for the browser view only. Meaningless to the API, but it is what makes GitHub's own
 /// search page useful to look at when it stands in as a fallback.
@@ -155,11 +168,10 @@ fn poll_pr(client: &reqwest::blocking::Client, token: &str, axis: PrAxis) -> git
 /// way a hand-written URL would the moment a query changes.
 ///
 /// It is a *fallback*, never the first choice: for `ReviewRequested` the page and the count agree
-/// exactly, but the other two narrow their hits client-side with a rule Search has no qualifier for,
-/// so for them this page is a superset — every open PR of yours for the green bar, every PR with
-/// changes requested including handed-back ones for the amber. A page listing more than the dot beats
-/// one missing PRs the dot claims, which is why it is still worth opening when there is no confirmed
-/// list to show.
+/// exactly, but the other two narrow their hits client-side with rules Search has no qualifier for,
+/// so for them this page is a superset — every open non-draft PR of yours, for both. A page listing
+/// more than the dot beats one missing PRs the dot claims, which is why it is still worth opening
+/// when there is no confirmed list to show.
 pub fn pr_list_url(axis: PrAxis) -> String {
     format!(
         "https://github.com/pulls?q={}",
@@ -1236,12 +1248,16 @@ mod tests {
         assert!(url.starts_with("https://github.com/pulls?q="), "got {url}");
         for qualifier in [
             "author%3A%40me",
-            "review%3Achanges_requested",
             "state%3Aopen",
+            "draft%3Afalse",
             "archived%3Afalse",
             "sort%3Aupdated-desc",
         ] {
             assert!(url.contains(qualifier), "{qualifier} missing from {url}");
         }
+        // The fallback page has to be a *superset* of what the bar counts, never a subset. Since the
+        // bar also counts merge conflicts, which carry no changes-requested review, this qualifier
+        // would now hide half of them.
+        assert!(!url.contains("review%3A"), "got {url}");
     }
 }

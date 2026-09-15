@@ -256,7 +256,13 @@ pub const AUTOSTART_MENU_LABEL: &str = "Start at sign-in";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrAxis {
     ReviewRequested,
+    /// Means **approved**, not mergeable — see the note above.
     ReadyToMerge,
+    /// Means **work required from you**: a reviewer's objection still standing, *or* a merge conflict
+    /// with someone waiting to review. The variant keeps its narrower original name for the same
+    /// reason `ReadyToMerge` does, and for the same reason the `changesRequested` config key does:
+    /// renaming it touches forty-odd sites and one user-visible setting for no behaviour at all. Every
+    /// string a user actually reads says "work required".
     ChangesRequested,
 }
 
@@ -285,7 +291,7 @@ impl PrAxis {
         match self {
             PrAxis::ReviewRequested => "requested-reviews",
             PrAxis::ReadyToMerge => "approved",
-            PrAxis::ChangesRequested => "changes-requested",
+            PrAxis::ChangesRequested => "work-required",
         }
     }
 
@@ -301,7 +307,7 @@ impl PrAxis {
             // never drift apart.
             PrAxis::ReviewRequested => REVIEWS_MENU_LABEL,
             PrAxis::ReadyToMerge => "Open Approved PRs",
-            PrAxis::ChangesRequested => "Open Changes Requested",
+            PrAxis::ChangesRequested => "Open Work Required",
         }
     }
 
@@ -312,8 +318,8 @@ impl PrAxis {
             (PrAxis::ReviewRequested, None) => "PRs awaiting your review".to_string(),
             (PrAxis::ReadyToMerge, Some(n)) => format!("{n} PR(s) approved"),
             (PrAxis::ReadyToMerge, None) => "PRs approved".to_string(),
-            (PrAxis::ChangesRequested, Some(n)) => format!("{n} PR(s) with changes requested"),
-            (PrAxis::ChangesRequested, None) => "PRs with changes requested".to_string(),
+            (PrAxis::ChangesRequested, Some(n)) => format!("{n} PR(s) needing your work"),
+            (PrAxis::ChangesRequested, None) => "PRs needing your work".to_string(),
         }
     }
 
@@ -322,7 +328,7 @@ impl PrAxis {
         match self {
             PrAxis::ReviewRequested => "No reviews requested",
             PrAxis::ReadyToMerge => "No approvals yet",
-            PrAxis::ChangesRequested => "No changes requested",
+            PrAxis::ChangesRequested => "Nothing needing your work",
         }
     }
 
@@ -1539,7 +1545,7 @@ mod tests {
 
         assert_eq!(state.pr_menu_label(PrAxis::ReviewRequested), "Open Requested Reviews (3)");
         assert_eq!(state.pr_menu_label(PrAxis::ReadyToMerge), "Open Approved PRs (1)");
-        assert_eq!(state.pr_menu_label(PrAxis::ChangesRequested), "Open Changes Requested (5)");
+        assert_eq!(state.pr_menu_label(PrAxis::ChangesRequested), "Open Work Required (5)");
     }
 
     #[test]

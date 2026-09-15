@@ -31,7 +31,7 @@ Three things it watches:
 |:---:|---|
 | <img src="docs/icons/tray_review.png" height="26"> | **somebody wants your review** |
 | <img src="docs/icons/tray_merge.png" height="26"> | **your pull request was approved** |
-| <img src="docs/icons/tray_changes.png" height="26"> | **a reviewer asked for changes** |
+| <img src="docs/icons/tray_changes.png" height="26"> | **your pull request needs work from you** |
 
 Every lit bar has a menu entry that takes you to it, with the count on the label. Clicking one opens
 **a page GitHoot renders itself**, listing exactly the pull requests that bar counted, with their check
@@ -90,7 +90,7 @@ marks around it do, and **every mark combines with every other**, so any state c
 | <img src="docs/icons/tray.png" height="26"> | Nothing pending. Genuinely nothing — an unreadable answer is never reported as a confident zero |
 | <img src="docs/icons/tray_review.png" height="26"> | Red bar: a PR waits on your review |
 | <img src="docs/icons/tray_merge.png" height="26"> | Green bar: one of your PRs is approved |
-| <img src="docs/icons/tray_changes.png" height="26"> | Amber bar: a reviewer asked for changes |
+| <img src="docs/icons/tray_changes.png" height="26"> | Amber bar: a reviewer asked for changes, or a conflict is blocking one |
 | <img src="docs/icons/tray_update.png" height="26"> | Green arrow: a newer release is available |
 | <img src="docs/icons/tray_alert.png" height="26"> | Red exclamation: not authorized, GitHub is down, or a poll failed — the tooltip says which |
 | <img src="docs/icons/tray_review_merge_changes.png" height="26"> | All three at once. A very bad Monday |
@@ -121,8 +121,10 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 - **The green bar reads the reviews, not `review:approved`.** That qualifier is a projection of
   GitHub's *review policy* verdict, and a repo that requires no reviews reports `null` on every PR,
   approved or not. Measured: 100 of 100 PRs `null`, six carrying a real approval → [why](docs/pr-status.md).
-- **Changes requested clears itself when you hand the work back**, which GitHub's own search cannot
-  express — re-requesting a review does not dismiss the old verdict.
+- **The amber bar means work required, not just changes requested.** It counts a reviewer's objection
+  that still stands *and* a merge conflict with somebody waiting on it — neither of which GitHub's own
+  search can express, since re-requesting a review does not dismiss the old verdict and `mergeable` is
+  not a qualifier at all → [both halves](docs/pr-status.md).
 - **A read-only fine-grained GitHub App**, not a classic `repo` scope, which would also grant write
   to everything you can reach. Contents is deliberately not requested.
 - **The self-updater verifies a minisign signature against a key compiled into the copy you already

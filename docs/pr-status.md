@@ -6,7 +6,7 @@ Three independent signals, each a GitHub Search query against your own pull requ
 |---|---|---|
 | 🔴 | `is:pr review-requested:@me state:open draft:false archived:false -label:dependencies -author:app/dependabot -author:app/renovate` | counted as is |
 | 🟢 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when its latest reviews hold an `APPROVED` and no `CHANGES_REQUESTED` |
-| 🟠 | `is:pr author:@me review:changes_requested state:open archived:false` | a hit counts while no re-review is pending from the reviewer who asked |
+| 🟠 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when a reviewer's objection still stands, **or** it has a merge conflict and someone is waiting on it |
 
 **The green bar reads the reviews, not `review:approved`.** That qualifier looks like "somebody approved
 this", and it is not. It is a projection of `reviewDecision`, GitHub's verdict on whether the base branch's
@@ -28,23 +28,42 @@ check darkened it. That hid the thing worth being told — somebody approved you
 disagreed with the entry beside it. Approval is the whole signal now. Whether CI is green is shown beside
 each pull request on [the page](pr-page.md) the entry opens, where it informs rather than hides.
 
-Still not checked, and never was: branch protection needing multiple approvals or named reviewers, and
-merge conflicts (`mergeable` is computed lazily and reads `UNKNOWN` on a cold poll). Also unchanged: the
-GraphQL page reads at most 100 open PRs of yours, so past that the bar undercounts.
+Still not checked: branch protection needing multiple approvals or named reviewers. Merge conflicts used
+to be on that list, for the lazy-computation reason below; the amber bar reads them now. Also unchanged:
+the GraphQL page reads at most 100 open PRs of yours, so past that the bar undercounts.
 
 **Checks: read** and **Commit statuses: read** were unused for several releases, after the green bar
 stopped gating on CI. They were kept rather than withdrawn, because narrowing an installed App's
 permissions makes every installation owner re-approve. That turned out well: the PR page reads the check
 rollup again, at no re-approval cost to anyone.
 
-**Changes requested does one thing more than its query.** Re-requesting a review does not dismiss the
-reviewer's earlier verdict, so `review:changes_requested` keeps matching a pull request you have already
-handed back, and the bar used to stay lit until the reviewer replied. That query is now sent through
-GraphQL, which also returns each pull request's pending review requests, and a hit is counted only when
-**no re-review is pending from a reviewer who requested changes**. The same GraphQL answer carries each
-counted PR itself, which is what the menu entry shows. Adding a *different* reviewer does not
-clear it — the original objection still stands. A pending *team* request does not clear it either, since a
-team has no login to match against the blocker; erring that way keeps the bar lit rather than hiding work.
+**The amber bar means work required from you, and counts two things.**
+
+*A reviewer's objection still standing.* Re-requesting a review does not dismiss the earlier verdict, so
+`review:changes_requested` keeps matching a pull request you have already handed back, and the bar used to
+stay lit until the reviewer replied. A hit counts only when **no re-review is pending from a reviewer who
+requested changes**. Adding a *different* reviewer does not clear it — the original objection still
+stands. A pending *team* request does not clear it either, since a team has no login to match against the
+blocker; erring that way keeps the bar lit rather than hiding work.
+
+*A merge conflict with someone waiting.* GitHub's `mergeable` says `CONFLICTING`, and the pull request has
+a reviewer attached — either a pending request or a standing review. A conflict blocks the reviewer as
+surely as their own objection does, and it is yours to fix. A conflict on a pull request **nobody is
+attached to** blocks nobody and does not count.
+
+**Only a definite `CONFLICTING` counts.** GitHub computes `mergeable` lazily and answers `UNKNOWN` until
+something asks; asking is what starts the computation, so a cold poll sees `UNKNOWN` and the next cycle
+sees the answer. Treating `UNKNOWN` as a conflict would light the bar on every freshly pushed pull request
+and clear it a minute later. Undercounting for one cycle is the cheaper error.
+
+**A conflict takes the pull request off the green bar.** The two never light for the same one: a conflict
+is work before it is news, and the approval is still there to be told about the moment you rebase.
+
+**The query stopped filtering.** It was `is:pr author:@me review:changes_requested …`, which would now
+hide every conflicted pull request that carries no objection, and `mergeable` is not a search qualifier.
+So it asks for every open pull request of yours and decides here. `draft:false` came with that: a draft is
+work you already know is unfinished, so neither half is news on one. Before this, a draft carrying a
+changes-requested review did count.
 
 Caps, which undercount rather than overcount: the first 100 matching pull requests, and the first 20
 reviews and 20 pending requests within each.

@@ -60,6 +60,9 @@ pub struct PrEntry {
     /// GitHub's ISO-8601, kept raw. Rendering it is the page's job, not the client's.
     pub updated_at: Option<String>,
     pub is_draft: bool,
+    /// The head branch conflicts with the base. Only ever `true` for a definite `CONFLICTING`; an
+    /// uncomputed `UNKNOWN` is absence of evidence, not evidence of a clean merge.
+    pub conflicting: bool,
     pub checks: CheckRollup,
     /// One verdict per reviewer, `COMMENTED` already dropped by GitHub's own
     /// `latestOpinionatedReviews`.
@@ -83,6 +86,7 @@ impl PrEntry {
             author: None,
             updated_at: None,
             is_draft: false,
+            conflicting: false,
             checks: CheckRollup::Unknown,
             verdicts: Vec::new(),
             pending: Vec::new(),
@@ -278,7 +282,7 @@ query($q:String!,$hits:Int!,$reviews:Int!){\
   rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
-      url title number isDraft updatedAt \
+      url title number isDraft updatedAt mergeable \
       repository{nameWithOwner}\
       author{login}\
       statusCheckRollup{state}\
@@ -482,6 +486,11 @@ struct PullRequestNode {
     #[serde(default)]
     is_draft: bool,
     updated_at: Option<String>,
+    /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`. Computed lazily by GitHub: it answers `UNKNOWN`
+    /// until something asks, and asking is what starts the computation, so a cold poll sees
+    /// `UNKNOWN` and the next one sees the truth. Only `CONFLICTING` is ever treated as a conflict
+    /// — see `blocked_by_conflict`.
+    mergeable: Option<String>,
     repository: Option<Repository>,
     author: Option<Author>,
     status_check_rollup: Option<StatusCheckRollup>,
@@ -545,9 +554,10 @@ struct RequestedReviewer {
 /// back. A pending request from anyone else does not — adding a fresh reviewer while the original
 /// blocker's objection stands leaves the work with you.
 ///
-/// Both fallbacks below return `true`, i.e. keep the bar lit. A lit bar that should be dark costs a
-/// glance; a dark bar that should be lit hides work you owe someone, which is the failure this whole
-/// module is written to avoid.
+/// The remaining fallback returns `true`, i.e. keeps the bar lit: a pending *team* request cannot be
+/// matched against a blocker's login, and erring that way keeps work you owe someone visible rather
+/// than hiding it. A lit bar that should be dark costs a glance; a dark bar that should be lit is the
+/// failure this whole module is written to avoid.
 fn still_on_you(pr: &PullRequestNode) -> bool {
     let blockers: Vec<&str> = pr
         .latest_opinionated_reviews
@@ -557,10 +567,16 @@ fn still_on_you(pr: &PullRequestNode) -> bool {
         .filter_map(|review| review.author.as_ref().map(|a| a.login.as_str()))
         .collect();
 
-    // GitHub matched `review:changes_requested` but names nobody we can intersect against — a deleted
-    // account, or a review list truncated by the cap. Trust the server's verdict over our own reading.
+    // Nobody's objection stands, so nothing is on you by this half of the rule.
+    //
+    // This used to return `true`. The query was `review:changes_requested`, so GitHub had already
+    // vouched that every hit carried an objection, and an empty blocker list meant we could not *see*
+    // it — a deleted account, or a list truncated by the cap — where trusting the server beat trusting
+    // our own reading. That premise is gone: the query now asks for every open pull request of yours,
+    // because `mergeable` is not a search qualifier, so an empty list is the ordinary case and no
+    // longer evidence of anything. Same stance `approved` has always taken about an empty review list.
     if blockers.is_empty() {
-        return true;
+        return false;
     }
 
     let handed_back = pr
@@ -578,6 +594,49 @@ fn still_on_you(pr: &PullRequestNode) -> bool {
     !handed_back
 }
 
+/// Whether GitHub has definitely said the head branch conflicts with the base.
+///
+/// `UNKNOWN` and a missing field both read as "no conflict known", never as a conflict. GitHub
+/// computes `mergeable` lazily and answers `UNKNOWN` until something asks; asking is what starts the
+/// computation, so a cold poll sees `UNKNOWN` and the next cycle sees the answer. Counting `UNKNOWN`
+/// would light the bar on every freshly pushed pull request and clear it a minute later, which is the
+/// cry-wolf this whole axis is written to avoid. Undercounting for one cycle is the cheaper error.
+fn is_conflicting(pr: &PullRequestNode) -> bool {
+    pr.mergeable.as_deref() == Some("CONFLICTING")
+}
+
+/// Whether anybody is attached to this pull request.
+///
+/// A pending request means someone is waiting to review; a standing opinionated review means someone
+/// already has. Either way a person is engaged, which is what turns a conflict from your own untidy
+/// branch into work you owe somebody.
+fn has_active_reviewers(pr: &PullRequestNode) -> bool {
+    let reviewed = pr.latest_opinionated_reviews.iter().flat_map(|c| c.nodes.iter().flatten()).count();
+    let requested = pr.review_requests.iter().flat_map(|c| c.nodes.iter().flatten()).count();
+    reviewed + requested > 0
+}
+
+/// Whether a merge conflict is standing between this pull request and someone who wants to review it.
+///
+/// The second half of the work-required axis. A conflict on a pull request nobody is attached to
+/// blocks nobody and is yours to deal with whenever; a conflict with a reviewer waiting is work you
+/// owe them, which is the same situation a standing `CHANGES_REQUESTED` describes.
+///
+/// Drafts never reach here: `CHANGES_QUERY` carries `draft:false`, so the server filters them out.
+fn blocked_by_conflict(pr: &PullRequestNode) -> bool {
+    is_conflicting(pr) && has_active_reviewers(pr)
+}
+
+/// Whether this pull request needs work from its author before a reviewer can move.
+///
+/// Two independent reasons, counted once: a reviewer's objection still standing against it
+/// (`still_on_you`), or a merge conflict with someone waiting (`blocked_by_conflict`). The bar used
+/// to be only the first, and its query said so server-side; it now asks for every open pull request
+/// of yours and decides here, because `mergeable` is not a search qualifier.
+fn work_required(pr: &PullRequestNode) -> bool {
+    still_on_you(pr) || blocked_by_conflict(pr)
+}
+
 /// Whether a reviewer approved this pull request and nobody's objection stands against it.
 ///
 /// The rule: at least one `APPROVED` among the latest opinionated reviews, and no `CHANGES_REQUESTED`.
@@ -591,6 +650,13 @@ fn still_on_you(pr: &PullRequestNode) -> bool {
 /// is: the server hands over every open pull request, and a missing or empty review list is simply no
 /// evidence of approval. Lighting a green bar over a PR nobody approved would be the false claim.
 fn approved(pr: &PullRequestNode) -> bool {
+    // A conflict takes the pull request to the work-required bar instead, so the two never light for
+    // the same one. A conflict is work before it is news, and the approval is still there to be told
+    // about the moment you rebase. Note this needs no `has_active_reviewers` check of its own: a pull
+    // request cannot be approved without a review, so anything reaching this veto already has one.
+    if is_conflicting(pr) {
+        return false;
+    }
     let mut any_approved = false;
     for review in pr.latest_opinionated_reviews.iter().flat_map(|c| c.nodes.iter().flatten()) {
         match review.state.as_str() {
@@ -644,6 +710,7 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
         author: node.author.as_ref().map(|a| a.login.clone()),
         updated_at: node.updated_at.clone(),
         is_draft: node.is_draft,
+        conflicting: is_conflicting(node),
         checks: node
             .status_check_rollup
             .as_ref()
@@ -653,9 +720,9 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
     })
 }
 
-/// Success-body parser for the changes-requested GraphQL query: `still_on_you` decides each hit.
+/// Success-body parser for the work-required GraphQL query: `work_required` decides each hit.
 fn parse_changes_requested(body: &str) -> Result<Parsed, String> {
-    parse_reviewed(body, still_on_you)
+    parse_reviewed(body, work_required)
 }
 
 /// Success-body parser for the approved GraphQL query: `approved` decides each hit.
@@ -984,11 +1051,17 @@ mod tests {
         assert_eq!(count_of(&payload(&[hit(&["alice"], &[("Team", "backend")])])), 1);
     }
 
-    /// GitHub matched the query but named nobody we can check. Its verdict wins over our reading.
+    /// Nobody's objection stands and nothing conflicts, so there is no work to report.
+    ///
+    /// This asserted the opposite until the axis grew its conflict half. The query was
+    /// `review:changes_requested`, so GitHub had vouched that every hit carried an objection and an
+    /// empty blocker list meant we could not see it. The query now asks for every open pull request
+    /// of yours, so an empty blocker list is the ordinary case — most of your PRs — and counting it
+    /// would light the bar permanently.
     #[test]
-    fn a_hit_with_no_identifiable_blocker_stays_counted() {
-        assert_eq!(count_of(&payload(&[hit(&[], &[("User", "alice")])])), 1);
-        assert_eq!(count_of(&payload(&[r#"{}"#.to_string()])), 1, "a node with no fields at all");
+    fn a_hit_with_nothing_standing_against_it_is_not_work() {
+        assert_eq!(count_of(&payload(&[hit(&[], &[("User", "alice")])])), 0);
+        assert_eq!(count_of(&payload(&[r#"{}"#.to_string()])), 0, "a node with no fields at all");
     }
 
     #[test]
@@ -1397,6 +1470,130 @@ mod tests {
         assert_eq!(truncate("short", 50), "short");
     }
 
+    // ── Merge conflicts as work ───────────────────────────────────────────────
+
+    /// A hit with an explicit `mergeable`, plus whoever is attached to it.
+    ///
+    /// `reviews` are `(state, login)` standing verdicts; `pending` are `(typename, name)` review
+    /// requests. Both empty means nobody is looking at it.
+    fn conflicted(
+        url: &str,
+        mergeable: &str,
+        reviews: &[(&str, &str)],
+        pending: &[(&str, &str)],
+    ) -> String {
+        let bare = verdict_hit(url, reviews, pending);
+        format!(r#"{{"mergeable":"{mergeable}",{}"#, &bare[1..])
+    }
+
+    fn changes_count(body: &str) -> u32 {
+        match changes(StatusCode::OK, &headers(&[]), body, 0) {
+            PollResult::Fresh { count: Some(n), .. } => n,
+            other => panic!("expected Fresh with a count, got {:?}", other),
+        }
+    }
+
+    /// A conflict is work you owe someone, exactly as a changes-requested review is. The reviewer is
+    /// waiting and cannot act until you rebase, which is the same situation the amber bar exists for.
+    #[test]
+    fn a_conflicting_pr_someone_is_waiting_on_counts_as_work() {
+        let pending = conflicted("https://github.com/o/r/pull/1", "CONFLICTING", &[], &[("User", "alice")]);
+        assert_eq!(changes_count(&payload(&[pending])), 1, "a reviewer is waiting on it");
+
+        let reviewed = conflicted("https://github.com/o/r/pull/2", "CONFLICTING", &[("APPROVED", "bob")], &[]);
+        assert_eq!(changes_count(&payload(&[reviewed])), 1, "a reviewer has spoken on it");
+    }
+
+    /// A conflict on a pull request nobody is attached to blocks nobody. It is yours to deal with when
+    /// you get to it, and lighting the tray for it is the cry-wolf this bar has to avoid.
+    #[test]
+    fn a_conflicting_pr_nobody_is_reviewing_does_not_count() {
+        let alone = conflicted("https://github.com/o/r/pull/1", "CONFLICTING", &[], &[]);
+        assert_eq!(changes_count(&payload(&[alone])), 0);
+    }
+
+    /// The server-side query no longer filters at all, so a clean pull request with reviewers on it is
+    /// the ordinary case and must stay dark.
+    #[test]
+    fn a_mergeable_pr_with_reviewers_is_not_work() {
+        let clean = conflicted("https://github.com/o/r/pull/1", "MERGEABLE", &[("APPROVED", "bob")], &[]);
+        assert_eq!(changes_count(&payload(&[clean])), 0);
+    }
+
+    /// `mergeable` is computed lazily: GitHub answers `UNKNOWN` until something asks, and asking is
+    /// what starts the computation, so the *next* poll has the real answer. Counting `UNKNOWN` as a
+    /// conflict would light the bar on every freshly pushed pull request and clear a minute later.
+    /// Undercounting for one cycle beats a bar that blinks.
+    #[test]
+    fn an_uncomputed_mergeable_is_not_yet_a_conflict() {
+        for absent in [
+            conflicted("https://github.com/o/r/pull/1", "UNKNOWN", &[], &[("User", "alice")]),
+            // The field missing outright, which is the same absence of evidence.
+            verdict_hit("https://github.com/o/r/pull/2", &[], &[("User", "alice")]),
+        ] {
+            assert_eq!(changes_count(&payload(&[absent])), 0);
+        }
+    }
+
+    /// Both halves of the bar, and a pull request that is in both is still one pull request.
+    #[test]
+    fn the_two_halves_are_counted_together_without_double_counting() {
+        let body = payload(&[
+            conflicted("https://github.com/o/r/pull/1", "CONFLICTING", &[("CHANGES_REQUESTED", "alice")], &[]),
+            conflicted("https://github.com/o/r/pull/2", "MERGEABLE", &[("CHANGES_REQUESTED", "bob")], &[]),
+            conflicted("https://github.com/o/r/pull/3", "CONFLICTING", &[("APPROVED", "carol")], &[]),
+            conflicted("https://github.com/o/r/pull/4", "MERGEABLE", &[("APPROVED", "dave")], &[]),
+        ]);
+        assert_eq!(changes_count(&body), 3, "only the clean approved one is not work");
+    }
+
+    /// The green bar loses a conflicted pull request to the amber one, so the two never light for the
+    /// same PR. A conflict is work before it is news.
+    #[test]
+    fn a_conflict_vetoes_the_approved_count() {
+        let body = payload(&[conflicted(
+            "https://github.com/o/r/pull/1",
+            "CONFLICTING",
+            &[("APPROVED", "alice")],
+            &[],
+        )]);
+        match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { count, .. } => assert_eq!(count, Some(0)),
+            other => panic!("expected Fresh, got {:?}", other),
+        }
+    }
+
+    /// And the ordinary approval is untouched by the veto.
+    #[test]
+    fn a_clean_approval_still_counts() {
+        let body = payload(&[conflicted(
+            "https://github.com/o/r/pull/1",
+            "MERGEABLE",
+            &[("APPROVED", "alice")],
+            &[],
+        )]);
+        match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { count, .. } => assert_eq!(count, Some(1)),
+            other => panic!("expected Fresh, got {:?}", other),
+        }
+    }
+
+    /// The conflict reaches the page too, or a pull request counted for a reason the page cannot show
+    /// is a number with no explanation behind it.
+    #[test]
+    fn a_conflict_is_carried_on_the_entry() {
+        let body = payload(&[conflicted(
+            "https://github.com/o/r/pull/1",
+            "CONFLICTING",
+            &[("APPROVED", "alice")],
+            &[],
+        )]);
+        match changes(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { prs: Some(list), .. } => assert!(list[0].conflicting),
+            other => panic!("expected Fresh with a list, got {:?}", other),
+        }
+    }
+
     // ── Rich entries ──────────────────────────────────────────────────────────
 
     /// A hit carrying every display field the page shows, as the real payload sends it.
@@ -1616,6 +1813,7 @@ mod tests {
             "updatedAt",
             "nameWithOwner",
             "statusCheckRollup",
+            "mergeable",
             "rateLimit",
         ] {
             assert!(PR_REVIEWS_DOCUMENT.contains(field), "document is missing {field}");

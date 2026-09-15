@@ -862,7 +862,7 @@ fn main() {
             (&open_item as &dyn tray_icon::menu::IsMenuItem, "open"),
             (&reviews_item, "reviews"),
             (&ready_to_merge_item, "ready to merge"),
-            (&changes_requested_item, "changes requested"),
+            (&changes_requested_item, "work required"),
             (&pr_inbox_item, "PR inbox"),
             (&settings_menu as &dyn tray_icon::menu::IsMenuItem, "settings"),
             (&quit_item, "quit"),

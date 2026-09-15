@@ -106,7 +106,7 @@ fn heading(axis: PrAxis) -> &'static str {
     match axis {
         PrAxis::ReviewRequested => "Awaiting your review",
         PrAxis::ReadyToMerge => "Approved",
-        PrAxis::ChangesRequested => "Changes requested",
+        PrAxis::ChangesRequested => "Work required",
     }
 }
 
@@ -335,6 +335,11 @@ fn card(e: &PrEntry, now_unix: u64) -> String {
     if e.is_draft {
         meta.push_str("<span class=\"pill draft\">Draft</span>");
     }
+    // Load-bearing, not decoration: a conflict is one of the two reasons a pull request is on the
+    // work-required page at all, so without it half that list has no visible explanation.
+    if e.conflicting {
+        meta.push_str("<span class=\"pill checks-failure\">Merge conflict</span>");
+    }
     let (class, words) = checks_pill(e.checks);
     meta.push_str(&format!("<span class=\"pill {class}\">{words}</span>"));
 
@@ -381,6 +386,7 @@ mod tests {
             author: Some("octocat".to_string()),
             updated_at: Some("2026-09-15T09:12:33Z".to_string()),
             is_draft: false,
+            conflicting: false,
             checks: CheckRollup::Success,
             verdicts: vec![],
             pending: vec![],

@@ -16,7 +16,7 @@ blue when notifications are on and something is unread
 |:---:|---|---|
 | <img src="icons/tray_review.png" alt="review bar" height="28"> | red bar | A PR is waiting on your review |
 | <img src="icons/tray_merge.png" alt="merge bar" height="28"> | green bar | One of your PRs is approved |
-| <img src="icons/tray_changes.png" alt="changes bar" height="28"> | amber bar | A reviewer asked for changes on your PR |
+| <img src="icons/tray_changes.png" alt="changes bar" height="28"> | amber bar | Your PR needs work: an objection stands, or it conflicts |
 | <img src="icons/tray_update.png" alt="update arrow" height="28"> | green up-arrow | A newer release is available |
 | <img src="icons/tray_alert.png" alt="exclamation" height="28"> | red exclamation | Something needs saying, see below |
 

@@ -1,7 +1,7 @@
 # The hoot
 
 Whenever a PR count **goes up**, the app plays a short hoot. Each of the three axes hoots for itself:
-reviews requested of you, your PRs that were approved, your PRs with changes requested.
+reviews requested of you, your PRs that were approved, your PRs needing work.
 
 Any rise counts. Zero to three hoots, and so does one to four — four reviews waiting where one was
 waiting is three pieces of news, and the tray having been lit already is no reason not to mention them.
