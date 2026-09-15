@@ -33,9 +33,13 @@ Three things it watches:
 | <img src="docs/icons/tray_merge.png" height="26"> | **your pull request was approved** |
 | <img src="docs/icons/tray_changes.png" height="26"> | **a reviewer asked for changes** |
 
-Every lit bar has a menu entry that takes you to it, with the count on the label. No `gh` CLI, no
-token to paste, nothing to register: sign-in is GitHub's own Device Flow, and the device code is
-already on your clipboard when the dialog appears.
+Every lit bar has a menu entry that takes you to it, with the count on the label. Clicking one opens
+**a page GitHoot renders itself**, listing exactly the pull requests that bar counted, with their check
+state and every reviewer's verdict — because no GitHub search URL can express what two of the three
+bars count → [the PR page](docs/pr-page.md).
+
+No `gh` CLI, no token to paste, nothing to register: sign-in is GitHub's own Device Flow, and the
+device code is already on your clipboard when the dialog appears.
 
 ## Get it
 
@@ -125,7 +129,11 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
   have**, because TLS and a checksum over the same channel prove nothing an attacker with a trusted
   root cannot forge → [the whole chain](docs/updates-and-releases.md#what-is-verified-and-what-that-proves).
 - **A failed poll is never a zero.** The last known count is held, the exclamation goes up, and the
-  tooltip names the axis that has gone quiet.
+  tooltip names the axis that has gone quiet. The PR page says "not known" rather than showing you an
+  empty list it cannot stand behind.
+- **The PR page is served from loopback, not written to disk**, on a port and a path token that are new
+  every run and die with the process. It binds `127.0.0.1` and `[::1]` only, checks the `Host` header
+  against DNS rebinding, sends no CORS header and no `Referer` → [what guards it](docs/pr-page.md#what-guards-it).
 - Rust, no audio crate, no `gh` shell-outs. `libappindicator` + GTK 3 on Linux, `tray-icon` +
   `winit` on Windows and macOS.
 
@@ -137,6 +145,7 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [Startup](docs/startup.md) | The one first-run question, what it writes on each platform, and how to undo it |
 | [Menu and settings](docs/menu-and-settings.md) | All menu entries and all config keys |
 | [PR status](docs/pr-status.md) | The three queries, the GraphQL rationale, the GitHub App |
+| [The PR page](docs/pr-page.md) | What the menu entries open, why it is served locally, and what guards it |
 | [The hoot](docs/hoot.md) | Exactly which transitions make a sound, and which stay quiet |
 | [Troubleshooting](docs/troubleshooting.md) | Tooltip meanings, the log, the Defender verdict |
 | [Updates and releases](docs/updates-and-releases.md) | Verification, recovery, immutable releases, signing keys |

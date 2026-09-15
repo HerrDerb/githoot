@@ -9,9 +9,9 @@
 | *— separator —* | Something above **and** below it | |
 | **Authenticate GitHub PR Status** | PR status has no usable credential | Starts the sign-in flow |
 | **Open GitHub Notifications** | Notifications on and something unread | Opens them, then re-checks a few seconds later |
-| **Open Requested Reviews (N)** | A PR waits on your review | Opens exactly what the red bar counts, newest first |
-| **Open Approved PRs (N)** | One of yours has been approved | Opens the exact PRs the bar counts, one tab each; falls back to a list of your open PRs when it has no confirmed list (see below) |
-| **Open Changes Requested (N)** | A reviewer asked for changes and it is still on you | Opens the exact PRs the bar counts, one tab each; falls back to GitHub's changes-requested list when it has no confirmed list (see below) |
+| **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
+| **Open Approved PRs (N)** | One of yours has been approved | Opens GitHoot's own page for exactly what the green bar counts |
+| **Open Changes Requested (N)** | A reviewer asked for changes and it is still on you | Opens GitHoot's own page for exactly what the amber bar counts |
 | **Open PR inbox** | None of the three entries above is shown | Opens [GitHub's own PR inbox](https://github.com/pulls/inbox) |
 | *— separator —* | Always | |
 | **Settings ▸** | Always | A submenu: two checkboxes, the settings file, and the repository (see below) |
@@ -29,17 +29,16 @@ empty list is a dead end. On a quiet day that left no way into your pull request
 URL rather than a search of ours, it also needs no credential, so it stays while the app is waiting to be
 authorized and the three entries that do need one are hidden.
 
-The requested-reviews URL is generated from the same query its bar counts, so that page cannot disagree
-with the icon. Labels carry the exact count, unbounded.
+**All three now open one tab: a page GitHoot renders and serves itself** → [The PR page](pr-page.md).
+Approved and changes requested used to open one browser tab *per pull request*, because no GitHub search
+URL can express what either bar counts — `review:approved` misses every approval in a repository that
+requires none, and `review:changes_requested` keeps matching a PR you have already handed back (see
+below). The page shows the exact pull requests the bar counted, with the check state and the reviewer
+verdicts GitHub's list cannot show.
 
-**The other two bars apply a filter GitHub's web search cannot express, so no search page can match
-them.** Approved reads each PR's reviews, because `review:approved` misses every approval in a repository
-that requires none (see below). Changes requested counts a PR only while *no re-review is pending from the
-reviewer who asked*, and `review:changes_requested` keeps matching one you have already handed back.
-Clicking either entry therefore opens the exact pull requests its bar counts, one tab each, straight from
-the poll that counted them. A search page remains the fallback whenever there is no confirmed list to
-open: before the first answer, while the axis has lost track, or when the bar counts zero. For approved
-that page is simply your open PRs; for changes requested it is GitHub's changes-requested list.
+The page says so plainly when a bar has no confirmed list — before the first answer, or after the axis
+has lost track — rather than rendering a zero, and links to GitHub's own search from there. If the local
+listener cannot start at all, the entries fall back to that search page directly.
 
 
 ---
