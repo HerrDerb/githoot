@@ -1,4 +1,4 @@
-//! Notification scheduler.
+//! Poll scheduler.
 //!
 //! Both platforms share one polling loop (`run_poll_loop`) and differ only in how an update is
 //! handed to the UI thread. Linux forwards through an mpsc channel drained by a GTK timer;
@@ -8,7 +8,6 @@
 //! buys three things at once: pacing that adapts to GitHub's `x-poll-interval`, an on-demand
 //! refresh when the user opens their notifications, and a clean exit when the UI goes away.
 
-use crate::access_token::TokenStore;
 use crate::github;
 use crate::github_app::{AuthError, PrStatus, PrTokenStore, PR_NOT_INSTALLED};
 use crate::update::{Available, RestartPlan};
@@ -285,7 +284,6 @@ pub struct Update {
 /// and the Linux one had reached nine parameters — at which point the order is the only thing telling
 /// two `bool`s apart. Naming them at the call site is worth a struct.
 pub struct PollInputs {
-    pub tokens: Option<TokenStore>,
     pub pr: PrStatus,
     /// Held for the whole run because `Wake::Authenticate` can arrive at any time and
     /// `PrTokenStore::authenticate` needs somewhere to save what it obtains.
@@ -348,7 +346,6 @@ fn run_poll_loop(
     restart: impl Fn(RestartPlan) + Send + Clone + 'static,
 ) {
     let PollInputs {
-        mut tokens,
         pr,
         app_asset_path,
         update_check: update_check_enabled,
@@ -374,7 +371,7 @@ fn run_poll_loop(
     // The config, not `[pr.is_some(); 3]`. Whether a credential exists is said by the two calls
     // below; putting it here as well would make `require_pr_auth` a no-op on the very path that
     // exists to obtain one. See `PollState::new`.
-    let mut state = PollState::new(tokens.is_some(), pr_enabled);
+    let mut state = PollState::new(pr_enabled);
     // Both branches mean "no PR dots", and both are deliberately said differently: one has a menu
     // item waiting to be clicked, the other has a reason clicking cannot address. The three axes
     // share one credential, so whichever it is applies to all three at once.
@@ -387,7 +384,6 @@ fn run_poll_loop(
         }
     }
     let mut burst: VecDeque<Duration> = VecDeque::new();
-    let mut last_reauth: Option<Instant> = None;
     let mut last_pr_reauth: Option<Instant> = None;
     // `None` means "never checked", which is what makes the first check happen immediately.
     let mut last_update_check: Option<Instant> = None;
@@ -403,27 +399,9 @@ fn run_poll_loop(
     // While a refresh burst is draining we send no `If-None-Match`. A conditional request can
     // legitimately answer 304 from a cached view, which would leave a just-read icon stuck on
     // "unread" — the exact symptom the burst exists to cure.
-    let mut skip_etag = false;
 
     loop {
         state.begin_cycle();
-
-        // ── Notifications (skipped entirely when the feature is off) ──────────
-        let etag = if skip_etag {
-            None
-        } else {
-            state.notifications_etag().map(str::to_string)
-        };
-        if let Some(store) = tokens.as_ref() {
-            let response = github::poll_notifications(&client, store.token(), etag.as_deref());
-            // A clean poll (200 or 304) says nothing; only a failure earns a line, and it carries
-            // the real reason rather than a bare tag.
-            if let Some(detail) = response.result.problem() {
-                let conditional = if etag.is_some() { "conditional" } else { "unconditional" };
-                errorln!("{conditional} notifications poll: {detail}");
-            }
-            state.apply_notifications(response);
-        }
 
         // ── PR axes (serial, not concurrent: GitHub asks for serial requests) ─
         // All three are GraphQL POSTs, which never answer 304, so this is always an unconditional
@@ -572,23 +550,8 @@ fn run_poll_loop(
             }
         }
 
-        // ── Credential recovery, per axis ────────────────────────────────────
-        // Each credential is renewed independently: a dead review token must never stop the
-        // notifications half from working, and vice versa.
+        // ── Credential recovery ──────────────────────────────────────────────
         let mut retry_now = false;
-
-        if state.take_notifications_reauth()
-            && may_retry(&mut last_reauth)
-        {
-            match tokens.as_mut().map(TokenStore::reauthenticate) {
-                Some(Ok(())) => {
-                    state.clear_notifications_etag();
-                    retry_now = true;
-                }
-                Some(Err(e)) => errorln!("re-authentication failed: {e}"),
-                None => {}
-            }
-        }
 
         // All three PR axes share one credential, so a rejection on any of them — or the
         // credential simply approaching its known expiry, for a GitHub App that has token expiry
@@ -636,7 +599,6 @@ fn run_poll_loop(
             Pace::Burst(delay) => delay,
             // Leaving the burst also ends the unconditional streak it was running.
             Pace::Steady(delay) => {
-                skip_etag = false;
                 delay
             }
         };
@@ -650,7 +612,6 @@ fn run_poll_loop(
             // conditional request may legitimately answer 304 from a cached view, which would leave
             // a user who just asked for an update staring at the icon they were trying to change.
             Ok(wake) => {
-                skip_etag = true;
                 match wake {
                     Wake::Refresh => {
                         infoln!("refresh requested — polling {} more times", REFRESH_BURST.len());
@@ -704,7 +665,6 @@ fn run_poll_loop(
                     // want a poll at all — hence `skip_etag` going back down. All it does is arm the
                     // watcher, which then lives on its own thread.
                     Wake::SettingsOpened => {
-                        skip_etag = false;
                         crate::settings_watch::spawn(
                             crate::config::config_path(&app_asset_path),
                             restart.clone(),
@@ -808,7 +768,6 @@ const UI_DRAIN_INTERVAL: Duration = Duration::from_secs(1);
 /// A struct rather than two more parameters, because the list was going to keep growing.
 #[cfg(target_os = "linux")]
 pub struct MenuItems {
-    pub notifications: gtk::MenuItem,
     pub reviews: gtk::MenuItem,
     pub ready_to_merge: gtk::MenuItem,
     pub changes_requested: gtk::MenuItem,
@@ -884,7 +843,7 @@ pub fn start_notification_scheduler(
     let mut indicator = indicator;
     // Index 0 is notifications; indices 1..4 are the PR axes at `PrAxis::index() + 1` — one array
     // instead of four separate bools so the loop below does not have to hand-repeat itself.
-    let mut applied: Option<[bool; 4]> = None;
+    let mut applied: Option<[bool; 3]> = None;
     let mut applied_labels: [Option<String>; 3] = [None, None, None];
     // Tracked separately from `applied` because it is not one of the four signals but a replacement
     // for all of them, and because it drives a menu item the four do not.
@@ -904,12 +863,11 @@ pub fn start_notification_scheduler(
             // `Unknown` on any axis deliberately leaves that part of the picture alone — a brief
             // failure should change the words, not make the icon flap. Only a confirmed answer
             // moves the image, so an unknown axis falls back to whatever is on screen.
-            let current = applied.unwrap_or([false; 4]);
+            let current = applied.unwrap_or([false; 3]);
             let wanted = [
-                update.icon.notifications.as_confirmed().unwrap_or(current[0]),
-                update.icon.review_requested.as_confirmed().unwrap_or(current[1]),
-                update.icon.ready_to_merge.as_confirmed().unwrap_or(current[2]),
-                update.icon.changes_requested.as_confirmed().unwrap_or(current[3]),
+                update.icon.review_requested.as_confirmed().unwrap_or(current[0]),
+                update.icon.ready_to_merge.as_confirmed().unwrap_or(current[1]),
+                update.icon.changes_requested.as_confirmed().unwrap_or(current[2]),
             ];
             let needs_auth = update.icon.needs_auth;
             let update_available = update.icon.update_available;
@@ -962,14 +920,7 @@ pub fn start_notification_scheduler(
                 // replaced the bars; now it is just another bit, so every mark composes with every other.
                 indicator.set_icon(
                     icons
-                        .get(
-                            wanted[0],
-                            wanted[1],
-                            wanted[2],
-                            wanted[3],
-                            update_available,
-                            exclamation,
-                        )
+                        .get(wanted[0], wanted[1], wanted[2], update_available, exclamation)
                         .as_str(),
                 );
 
@@ -987,7 +938,6 @@ pub fn start_notification_scheduler(
                 // GTK has per-item visibility, so this is a flag rather than the remove-and-append
                 // dance the Windows side needs. `show_all` is called once during setup and never
                 // again, so nothing undoes these.
-                menu_items.notifications.set_visible(wanted[0]);
                 // `needs_auth`, deliberately not `exclamation`: an outage hides the *bars* because the
                 // icon has only one exclamation to give, but the counts behind these entries are the
                 // last known good ones and the lists still open. Hiding them would take away working
@@ -997,7 +947,7 @@ pub fn start_notification_scheduler(
                 }
                 // Deliberately *not* gated on `needs_auth`: a plain URL needs no credential, which is
                 // exactly what makes it worth keeping when the three that do need one are hidden.
-                let pr_entries = [wanted[1], wanted[2], wanted[3]];
+                let pr_entries = wanted;
                 menu_items.pr_inbox.set_visible(crate::state::shows_pr_inbox(pr_entries, needs_auth));
 
                 applied = Some(wanted);

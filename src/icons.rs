@@ -25,7 +25,6 @@ use std::path::Path;
 /// page's logo — the same file, not a second copy, so the page and the tray cannot show two
 /// different owls.
 pub(crate) const TRAY_ICON: &[u8] = include_bytes!("../assets/tray.png");
-const TRAY_BLUE_ICON: &[u8] = include_bytes!("../assets/tray_blue.png");
 
 // ── Indicator geometry ──────────────────────────────────────────────────────
 // One column of rounded bars down the right-hand side. Ratios rather than pixels so the layout
@@ -535,21 +534,13 @@ fn decode(bytes: &[u8]) -> Result<RgbaImage, String> {
 /// The cost is exactly the doubling that shape implies: 32 variants became 64, measured at ~14ms to
 /// generate and ~300KB on disk.
 pub struct IconSet<T> {
-    variants: [T; 64],
+    variants: [T; 32],
 }
 
 impl<T> IconSet<T> {
-    fn index(
-        unread: bool,
-        review: bool,
-        merge: bool,
-        changes: bool,
-        update: bool,
-        mark: bool,
-    ) -> usize {
-        (usize::from(mark) << 5)
-            | (usize::from(update) << 4)
-            | (usize::from(unread) << 3)
+    fn index(review: bool, merge: bool, changes: bool, update: bool, mark: bool) -> usize {
+        (usize::from(mark) << 4)
+            | (usize::from(update) << 3)
             | (usize::from(review) << 2)
             | (usize::from(merge) << 1)
             | usize::from(changes)
@@ -558,45 +549,34 @@ impl<T> IconSet<T> {
     /// The variant for one complete state. `mark` is the exclamation, which since it moved to the
     /// bottom-left is a sixth *independent* signal rather than an override — every combination of the
     /// other five can be shown alongside it.
-    pub fn get(
-        &self,
-        unread: bool,
-        review: bool,
-        merge: bool,
-        changes: bool,
-        update: bool,
-        mark: bool,
-    ) -> &T {
-        &self.variants[Self::index(unread, review, merge, changes, update, mark)]
+    pub fn get(&self, review: bool, merge: bool, changes: bool, update: bool, mark: bool) -> &T {
+        &self.variants[Self::index(review, merge, changes, update, mark)]
     }
 
 }
 
-/// Builds all sixteen variants from the two embedded base icons.
+/// Builds all thirty-two variants from the embedded base icon.
 ///
-/// Infallible past decoding the two base assets: compositing dots never fails, so the loop needs
+/// Infallible past decoding the base asset: compositing dots never fails, so the loop needs
 /// no error path of its own — that is what makes a plain `std::array::from_fn` sufficient here
 /// (contrast `create_icons`/`load_tray_icons` below, where PNG encoding or icon creation can fail
 /// per variant).
 fn build_variants() -> Result<IconSet<RgbaImage>, String> {
     let plain = decode(TRAY_ICON)?;
-    let blue = decode(TRAY_BLUE_ICON)?;
 
-    let variants: [RgbaImage; 64] = std::array::from_fn(|i| {
-        let unread = i & 0b001000 != 0;
+    let variants: [RgbaImage; 32] = std::array::from_fn(|i| {
         // One call for all three, unlike the per-corner discs this replaced: the bars share a carve
         // pass, and carving them one at a time would let each bar's border bite into the last bar's
         // colour. See `with_indicator_bars`.
-        let lit = [i & 0b000100 != 0, i & 0b000010 != 0, i & 0b000001 != 0];
-        let base = if unread { &blue } else { &plain };
-        let img = with_indicator_bars(base, lit);
+        let lit = [i & 0b00100 != 0, i & 0b00010 != 0, i & 0b00001 != 0];
+        let img = with_indicator_bars(&plain, lit);
         // Arrow next, in the top-left, which nothing else claims.
-        let img = if i & 0b010000 != 0 { with_update_arrow(&img) } else { img };
+        let img = if i & 0b01000 != 0 { with_update_arrow(&img) } else { img };
         // The mark last, in the bottom-left. Order matters: each of these carves a transparent border,
         // and carving after the others means this one's border cannot be painted over by them. It sits in
         // the one band free of both — x 0..54, y 39..95 — so its carve cannot reach the bars or the
         // arrow either. `the_mark_never_touches_the_bars_or_the_arrow` is what holds that.
-        if i & 0b100000 != 0 { with_exclamation(&img) } else { img }
+        if i & 0b10000 != 0 { with_exclamation(&img) } else { img }
     });
 
     Ok(IconSet { variants })
@@ -613,35 +593,34 @@ const ICON_SUBDIR: &str = "icons";
 /// table — the table would just be this function's output written out by hand, with all the same
 /// opportunities to get one entry wrong.
 ///
-/// The prefix was `github` until the base glyph stopped being GitHub's mark. Suffixes are still
-/// append-only, but the prefix change does rename every file, so a Linux install that predates it
-/// keeps its 64 `github_*.png` next to the new ones. Deliberately not swept: nothing reads them, and
-/// a delete loop pointed at a user's directory is a worse risk than a few hundred stale KB.
+/// The prefix was `github` until the base glyph stopped being GitHub's mark, and `_blue` existed
+/// until the notification tint was removed. Neither rename touches the files that survive — the
+/// suffixes are still built from the same bits in the same order — so a Linux install that predates
+/// either keeps its stale `github_*.png` and `tray_blue_*.png` next to the current ones. Deliberately
+/// not swept: nothing reads them, and a delete loop pointed at a user's directory is a worse risk
+/// than a few hundred stale KB.
 #[cfg(target_os = "linux")]
 fn variant_filename(i: usize) -> String {
     let mut name = String::from("tray");
-    if i & 0b001000 != 0 {
-        name.push_str("_blue");
-    }
-    if i & 0b000100 != 0 {
+    if i & 0b00100 != 0 {
         name.push_str("_review");
     }
-    if i & 0b000010 != 0 {
+    if i & 0b00010 != 0 {
         name.push_str("_merge");
     }
-    if i & 0b000001 != 0 {
+    if i & 0b00001 != 0 {
         name.push_str("_changes");
     }
     // Appended last even though it is the *high* bit, so that adding the update arrow did not rename
     // any of the sixteen files that already existed in users' asset directories. Cosmetic, but it keeps
     // `write_icon_if_changed`'s mtime-stability promise intact across the upgrade instead of rewriting
     // every icon once.
-    if i & 0b010000 != 0 {
+    if i & 0b01000 != 0 {
         name.push_str("_update");
     }
     // Appended after `_update`, for the same reason `_update` came after the original four: adding a
     // signal must not rename files that already exist in users' asset directories.
-    if i & 0b100000 != 0 {
+    if i & 0b10000 != 0 {
         name.push_str("_alert");
     }
     name.push_str(".png");
@@ -702,7 +681,7 @@ pub fn create_icons(app_asset_path: &Path) -> Result<IconSet<String>, String> {
         paths.push(path.to_string_lossy().into_owned());
     }
 
-    let variants: [String; 64] = paths
+    let variants: [String; 32] = paths
         .try_into()
         .map_err(|_| "internal error: expected exactly 64 icon variants".to_string())?;
 
@@ -731,7 +710,7 @@ pub fn load_tray_icons() -> Result<IconSet<tray_icon::Icon>, String> {
         icons.push(to_icon(image)?);
     }
 
-    let variants: [tray_icon::Icon; 64] = icons
+    let variants: [tray_icon::Icon; 32] = icons
         .try_into()
         .map_err(|_| "internal error: expected exactly 32 icon variants".to_string())?;
     Ok(IconSet { variants })
@@ -880,10 +859,10 @@ mod tests {
     }
 
     #[test]
-    fn all_sixty_four_variants_build_and_are_pairwise_distinct() {
+    fn all_thirty_two_variants_build_and_are_pairwise_distinct() {
         let set = build_variants().expect("variants must build");
-        for i in 0..64 {
-            for j in (i + 1)..64 {
+        for i in 0..32 {
+            for j in (i + 1)..32 {
                 assert_ne!(
                     set.variants[i].as_raw(),
                     set.variants[j].as_raw(),
@@ -1042,10 +1021,10 @@ mod tests {
     #[test]
     fn every_variant_has_a_mark_bearing_twin() {
         let set = build_variants().expect("variants must build");
-        for i in 0..32 {
+        for i in 0..16 {
             assert_ne!(
                 set.variants[i].as_raw(),
-                set.variants[i | 0b100000].as_raw(),
+                set.variants[i | 0b10000].as_raw(),
                 "variant {i:#08b} must differ from its marked twin"
             );
         }
@@ -1056,7 +1035,7 @@ mod tests {
     #[test]
     fn the_mark_leaves_the_bar_colours_intact() {
         let set = build_variants().expect("variants must build");
-        let all_bars_and_mark = set.get(false, true, true, true, false, true);
+        let all_bars_and_mark = set.get(true, true, true, false, true);
         for (name, colour) in
             [("review", REVIEW_DOT_COLOR), ("merge", MERGE_DOT_COLOR), ("changes", CHANGES_DOT_COLOR)]
         {
@@ -1209,15 +1188,14 @@ mod tests {
     fn get_indexes_by_the_matching_bit_pattern() {
         let set = build_variants().expect("variants must build");
         let raw = |i: usize| set.variants[i].as_raw();
-        assert_eq!(set.get(false, false, false, false, false, false).as_raw(), raw(0b000000));
-        assert_eq!(set.get(true, false, false, false, false, false).as_raw(), raw(0b001000));
-        assert_eq!(set.get(false, true, false, false, false, false).as_raw(), raw(0b000100));
-        assert_eq!(set.get(false, false, true, false, false, false).as_raw(), raw(0b000010));
-        assert_eq!(set.get(false, false, false, true, false, false).as_raw(), raw(0b000001));
-        assert_eq!(set.get(false, false, false, false, true, false).as_raw(), raw(0b010000));
+        assert_eq!(set.get(false, false, false, false, false).as_raw(), raw(0b00000));
+        assert_eq!(set.get(true, false, false, false, false).as_raw(), raw(0b00100));
+        assert_eq!(set.get(false, true, false, false, false).as_raw(), raw(0b00010));
+        assert_eq!(set.get(false, false, true, false, false).as_raw(), raw(0b00001));
+        assert_eq!(set.get(false, false, false, true, false).as_raw(), raw(0b01000));
         // The bit that moved the mark into the combinable space.
-        assert_eq!(set.get(false, false, false, false, false, true).as_raw(), raw(0b100000));
-        assert_eq!(set.get(true, true, true, true, true, true).as_raw(), raw(0b111111));
+        assert_eq!(set.get(false, false, false, false, true).as_raw(), raw(0b10000));
+        assert_eq!(set.get(true, true, true, true, true).as_raw(), raw(0b11111));
     }
 
     /// Geometric proof, independent of the rendered-pixel tests above, that the column fits.
@@ -1268,14 +1246,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn variant_filenames_are_unique_and_encode_the_bits() {
-        let names: Vec<String> = (0..16).map(variant_filename).collect();
+        let names: Vec<String> = (0..32).map(variant_filename).collect();
         let mut sorted = names.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), 16, "every variant must get a distinct filename");
+        assert_eq!(sorted.len(), 32, "every variant must get a distinct filename");
 
-        assert_eq!(variant_filename(0b0000), "tray.png");
-        assert_eq!(variant_filename(0b1111), "tray_blue_review_merge_changes.png");
+        assert_eq!(variant_filename(0b00000), "tray.png");
+        assert_eq!(variant_filename(0b00111), "tray_review_merge_changes.png");
+        assert_eq!(variant_filename(0b11111), "tray_review_merge_changes_update_alert.png");
     }
 }
 
@@ -1303,5 +1282,29 @@ mod render_dump {
             img.save(dir.join(variant_filename(i))).expect("save");
         }
         println!("dumped {} variants to {}", set.variants.len(), dir.display());
+    }
+}
+
+/// Linux-gated for the same reason `variant_filename` is: it is the only platform with a filename
+/// convention for the composited icons, and this borrows it.
+#[cfg(all(test, target_os = "linux"))]
+mod docgen {
+    use super::*;
+    /// Regenerates `docs/icons/` from the real compositor, so the README and `docs/icons.md` cannot
+    /// show a mark the app no longer draws. Run by hand: `cargo test docgen -- --ignored`.
+    #[test]
+    #[ignore]
+    fn write_doc_icons() {
+        let set = build_variants().expect("variants must build");
+        let dir = std::path::Path::new("docs/icons");
+        for i in 0..32 {
+            let name = variant_filename(i);
+            if !dir.join(&name).exists() && name != "tray_review_merge_changes_update_alert.png" {
+                continue;
+            }
+            std::fs::write(dir.join(&name), encode_png(&set.variants[i]).expect("encode"))
+                .expect("write");
+            println!("wrote {name}");
+        }
     }
 }

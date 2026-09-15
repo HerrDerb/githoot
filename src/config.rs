@@ -27,7 +27,6 @@ const CONFIG_FILE: &str = "config.txt";
 // the generated template, and in the round-trip test that proves those two agree.
 
 const KEY_UPDATE_CHECK: &str = "updateCheck";
-const KEY_NOTIFICATION_INDICATION: &str = "notificationIndication";
 const KEY_REVIEW_REQUESTED: &str = "reviewRequested";
 const KEY_READY_TO_MERGE: &str = "readyToMerge";
 const KEY_CHANGES_REQUESTED: &str = "changesRequested";
@@ -107,11 +106,13 @@ pub fn all_status_components() -> Vec<String> {
 ///
 /// These are **not** aliases. The old spelling is not read, deliberately — that is the clean break.
 /// They are listed only so `Config::load` can say so out loud, because the alternative is a feature
-/// quietly changing behaviour on upgrade: an old `notifications=on` would stop being read and
-/// notifications would go silent, and an old `update_check=off` would stop being read and the
+/// quietly changing behaviour on upgrade: an old `update_check=off` would stop being read and the
 /// updater someone deliberately disabled would switch back on.
-const RENAMED_KEYS: [(&str, &str); 2] =
-    [("notifications", KEY_NOTIFICATION_INDICATION), ("update_check", KEY_UPDATE_CHECK)];
+///
+/// `notifications` → `notificationIndication` used to be the other entry. Both spellings are gone
+/// now: the feature they named was removed in 1.18.0, so there is no replacement to point at and an
+/// old line is simply an unknown key, which `parse` has always ignored.
+const RENAMED_KEYS: [(&str, &str); 1] = [("update_check", KEY_UPDATE_CHECK)];
 
 /// Whether [`Config::load`] found no `config.txt` and successfully wrote one.
 ///
@@ -134,9 +135,6 @@ pub enum FirstRun {
 
 /// Settings read from `config.txt`.
 pub struct Config {
-    /// Whether the blue "unread notifications" tint is drawn at all. Off by default: notifications
-    /// need their own credential (see `access_token`), and the core of the app is PR status.
-    pub notification_indication: bool,
     /// Whether to check GitHub for newer releases once a day. On unless explicitly turned off.
     pub update_check: bool,
     /// Whether each PR signal is wanted, indexed by `PrAxis::index`.
@@ -230,13 +228,12 @@ pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
 /// Public because the settings page renders from it: one list, so a key cannot appear in the form
 /// without the page knowing whether to warn about it, and cannot be added to the file without
 /// appearing in the form.
-pub const WRITABLE_KEYS: [(&str, bool); 9] = [
+pub const WRITABLE_KEYS: [(&str, bool); 8] = [
     (KEY_REVIEW_REQUESTED, false),
     (KEY_READY_TO_MERGE, false),
     (KEY_CHANGES_REQUESTED, false),
     (KEY_COPILOT_REVIEWS, true),
     (KEY_SOUND, true),
-    (KEY_NOTIFICATION_INDICATION, false),
     (KEY_UPDATE_CHECK, false),
     (KEY_LOG_LEVEL, false),
     (KEY_STATUS_COMPONENTS, false),
@@ -256,7 +253,6 @@ fn value_of(wanted: &Config, key: &str) -> String {
         KEY_CHANGES_REQUESTED => flag(wanted.pr_enabled[2]),
         KEY_COPILOT_REVIEWS => flag(wanted.copilot_reviews),
         KEY_SOUND => flag(wanted.sound),
-        KEY_NOTIFICATION_INDICATION => flag(wanted.notification_indication),
         KEY_UPDATE_CHECK => flag(wanted.update_check),
         KEY_LOG_LEVEL => match wanted.log_level {
             Level::Info => "info".to_string(),
@@ -421,7 +417,6 @@ impl Config {
     pub fn from_form(form: &crate::serve::Form, current: &Self) -> Self {
         Config {
             update_check: form.ticked(KEY_UPDATE_CHECK),
-            notification_indication: form.ticked(KEY_NOTIFICATION_INDICATION),
             pr_enabled: PrAxis::ALL.map(|axis| form.ticked(pr_key(axis))),
             sound: form.ticked(KEY_SOUND),
             copilot_reviews: form.ticked(KEY_COPILOT_REVIEWS),
@@ -442,13 +437,9 @@ impl Config {
 
     fn from_values(values: &std::collections::HashMap<&str, &str>) -> Self {
         Config {
-            notification_indication: values
-                .get(KEY_NOTIFICATION_INDICATION)
-                .is_some_and(|v| is_on(v)),
-            // Default **on**, unlike the notification tint, which deliberately departs from the
-            // "preserve today's behaviour for someone who never creates the file" habit: an
-            // auto-update mechanism that is off until you find out it exists does not do the job it
-            // was asked to do. `is_on` cannot express a default-on flag, hence `is_off`.
+            // Default **on**: an auto-update mechanism that is off until you find out it exists does
+            // not do the job it was asked to do. `is_on` cannot express a default-on flag, hence
+            // `is_off`.
             update_check: !values.get(KEY_UPDATE_CHECK).is_some_and(|v| is_off(v)),
             // Built by mapping over the axes rather than as a literal, so the axis name appears on
             // both sides of each pairing and the three cannot be written in the wrong order.
@@ -523,10 +514,6 @@ fn default_config() -> String {
          \n\
          # Check GitHub for a newer release once a day, and at startup.\n\
          {KEY_UPDATE_CHECK}=on\n\
-         \n\
-         # Tint the icon blue when you have unread GitHub notifications.\n\
-         # Needs its own credential, which you will be asked for on the next start.\n\
-         {KEY_NOTIFICATION_INDICATION}=off\n\
          \n\
          # The three pull-request signals, shown as coloured bars down the right of the icon.\n\
          # Turning one off removes its bar and its menu entry, and stops it being searched for.\n\
@@ -633,12 +620,6 @@ fn split_list(value: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-/// Whether a value means "on". Only a recognised affirmative counts — an unrecognised value
-/// (typo, wrong casing convention) must read as "off", the safe default, not silently as "on".
-fn is_on(value: &str) -> bool {
-    matches!(value.to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes")
 }
 
 #[cfg(test)]
@@ -782,20 +763,6 @@ mod tests {
     }
 
     #[test]
-    fn recognises_on_values_case_insensitively() {
-        for v in ["on", "On", "TRUE", "1", "yes"] {
-            assert!(is_on(v), "{v:?} should read as on");
-        }
-    }
-
-    #[test]
-    fn unrecognised_values_read_as_off() {
-        for v in ["off", "false", "0", "no", "", "enabled", "onn"] {
-            assert!(!is_on(v), "{v:?} should read as off");
-        }
-    }
-
-    #[test]
     fn recognises_off_values_case_insensitively() {
         for v in ["off", "Off", "FALSE", "0", "no", " off "] {
             assert!(is_off(v), "{v:?} should read as off");
@@ -849,7 +816,6 @@ mod tests {
         let values = parse(&template);
 
         assert_eq!(values.get(KEY_UPDATE_CHECK), Some(&"on"));
-        assert_eq!(values.get(KEY_NOTIFICATION_INDICATION), Some(&"off"));
         assert_eq!(values.get(KEY_LOG_LEVEL), Some(&"error"));
         assert_eq!(values.get(KEY_SOUND), Some(&"on"));
         for axis in PrAxis::ALL {
@@ -859,7 +825,7 @@ mod tests {
         // `the_template_is_explicit_where_an_absent_key_is_not`.
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // And nothing else, so a key added to the template without being read is caught.
-        assert_eq!(values.len(), 9, "unexpected keys in the template: {values:?}");
+        assert_eq!(values.len(), 8, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -907,7 +873,6 @@ mod tests {
     fn every_generated_key_is_one_that_is_read() {
         let known = [
             KEY_UPDATE_CHECK,
-            KEY_NOTIFICATION_INDICATION,
             KEY_REVIEW_REQUESTED,
             KEY_READY_TO_MERGE,
             KEY_CHANGES_REQUESTED,
@@ -982,8 +947,7 @@ mod tests {
     /// accidentally reinstated alias would make the rename a no-op and the warning a lie.
     #[test]
     fn the_old_key_names_are_not_read() {
-        let values = parse("notifications=on\nupdate_check=off\n");
-        assert_eq!(values.get(KEY_NOTIFICATION_INDICATION), None);
+        let values = parse("update_check=off\n");
         assert_eq!(values.get(KEY_UPDATE_CHECK), None);
         // …but they are recognised well enough to be warned about.
         for (old, _) in RENAMED_KEYS {
@@ -1015,7 +979,6 @@ mod tests {
     fn an_empty_file_gives_every_documented_default() {
         let cfg = from("");
         assert!(cfg.update_check, "updateCheck defaults on");
-        assert!(!cfg.notification_indication, "notificationIndication defaults off");
         assert_eq!(cfg.log_level, Level::Error, "logLevel defaults to error");
         for axis in PrAxis::ALL {
             assert!(cfg.pr_enabled(axis), "{axis:?} defaults on");
@@ -1037,7 +1000,6 @@ mod tests {
         let defaults = from("");
 
         assert_eq!(generated.update_check, defaults.update_check);
-        assert_eq!(generated.notification_indication, defaults.notification_indication);
         assert_eq!(generated.log_level, defaults.log_level);
         for axis in PrAxis::ALL {
             assert_eq!(generated.pr_enabled(axis), defaults.pr_enabled(axis), "{axis:?}");
@@ -1079,20 +1041,11 @@ mod tests {
         assert!(from("readyToMerge=onn\n").pr_enabled(PrAxis::ReadyToMerge));
     }
 
-    #[test]
-    fn the_default_off_setting_is_turned_on_only_by_a_recognised_yes() {
-        assert!(from("notificationIndication=on\n").notification_indication);
-        assert!(from("notificationIndication=TRUE\n").notification_indication);
-        // A typo leaves it off, which is the safe direction for a setting that costs a sign-in.
-        assert!(!from("notificationIndication=yse\n").notification_indication);
-    }
-
     /// The clean break, asserted end to end rather than only at the parse layer: the old spellings
     /// must not reach the settings they used to control.
     #[test]
     fn the_old_key_names_no_longer_change_anything() {
-        let cfg = from("notifications=on\nupdate_check=off\n");
-        assert!(!cfg.notification_indication, "the old name must not switch notifications on");
+        let cfg = from("update_check=off\n");
         assert!(cfg.update_check, "the old name must not switch update checks off");
     }
 

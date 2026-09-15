@@ -18,56 +18,8 @@
 //!     from any thread and needs neither of those two code paths — the same reasoning that picked
 //!     `osascript` over `NSAlert` on macOS.
 //!
-//! Centralised in one function because the alternative is the same three-way `cfg` fork repeated
-//! at five call sites in `main.rs` and `access_token.rs`.
-
-/// Shows `msg` under `title` and blocks until the user acknowledges it.
-///
-/// Best effort throughout: a dialog that cannot be shown must never take the app down with it,
-/// because every caller has already written the same information to the log.
-pub fn message(title: &str, msg: &str) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::ptr::null_mut;
-        use winapi::um::winuser::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
-
-        let title_w: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-        let msg_w: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
-        unsafe {
-            MessageBoxW(null_mut(), msg_w.as_ptr(), title_w.as_ptr(), MB_OK | MB_ICONINFORMATION);
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // `osascript` rather than a native NSAlert: it needs no extra dependency, and it can be
-        // called from any thread, which `show_auth_prompt` relies on. `display dialog` blocks
-        // until a button is clicked with no implicit timeout, which is exactly MessageBoxW's
-        // contract.
-        //
-        // The script is passed as a single argument, so nothing reaches a shell — but it *is*
-        // AppleScript source, and the messages arriving here include multi-line GitHub error
-        // bodies that contain quotes. Hence `escape`.
-        let script = format!(
-            r#"display dialog "{}" with title "{}" buttons {{"OK"}} default button "OK" with icon note"#,
-            escape(msg),
-            escape(title)
-        );
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        println!("\n{title}: {msg}\nPress Enter to continue...");
-        let _ = std::io::stdin().read_line(&mut String::new());
-    }
-}
+//! Centralised here because the alternative is the same three-way `cfg` fork repeated at every
+//! call site.
 
 /// Shows `msg` under `title` with two choices and blocks until the user picks one.
 ///
@@ -237,6 +189,60 @@ fn copy_to_clipboard(text: &str) {
 /// body text and macOS matches it against `osascript`'s stdout, so the two must not drift.
 const OPEN_WEBSITE_LABEL: &str = "Copy code & open website";
 
+/// Shows `msg` under `title` and blocks until the user acknowledges it.
+///
+/// Windows and macOS only. Its Linux arm waits on `stdin().read_line`, which is useless to a tray
+/// app launched from a desktop entry — so every Linux caller goes through `report` or `confirm`
+/// instead, and since the notifications credential was removed there is no unconditional caller left
+/// to keep it compiled everywhere.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+///
+/// Best effort throughout: a dialog that cannot be shown must never take the app down with it,
+/// because every caller has already written the same information to the log.
+pub fn message(title: &str, msg: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ptr::null_mut;
+        use winapi::um::winuser::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+
+        let title_w: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let msg_w: Vec<u16> = msg.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            MessageBoxW(null_mut(), msg_w.as_ptr(), title_w.as_ptr(), MB_OK | MB_ICONINFORMATION);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // `osascript` rather than a native NSAlert: it needs no extra dependency, and it can be
+        // called from any thread, which `show_auth_prompt` relies on. `display dialog` blocks
+        // until a button is clicked with no implicit timeout, which is exactly MessageBoxW's
+        // contract.
+        //
+        // The script is passed as a single argument, so nothing reaches a shell — but it *is*
+        // AppleScript source, and the messages arriving here include multi-line GitHub error
+        // bodies that contain quotes. Hence `escape`.
+        let script = format!(
+            r#"display dialog "{}" with title "{}" buttons {{"OK"}} default button "OK" with icon note"#,
+            escape(msg),
+            escape(title)
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        println!("\n{title}: {msg}\nPress Enter to continue...");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+}
+
 /// Displays a Device Flow authorization prompt and, if the user accepts, copies the device code and
 /// opens GitHub's verification page.
 ///
@@ -250,11 +256,9 @@ const OPEN_WEBSITE_LABEL: &str = "Copy code & open website";
 /// dialog can be shown at all, and again on the click, because minutes may have passed with the
 /// dialog sitting there and something else may own the clipboard by now.
 ///
-/// Tagged with `subject` so a user running more than one device flow at once (notifications and PR
-/// status can each need one) can tell the two dialogs apart. Shared by `access_token` (the
-/// notifications credential) and `github_app` (the PR-status credential) — both run the same GitHub
-/// Device Flow, just against different Client IDs and permissions, so the prompt itself has nothing
-/// credential-specific about it.
+/// Tagged with `subject` so the dialog names which credential is being authorized. Only
+/// `github_app` uses it today; the tag survives the second credential it was written for, because a
+/// prompt that says what it is asking about costs one word.
 ///
 /// Runs on a background thread, and must keep doing so: the caller's very next act is to start
 /// polling GitHub for the token, and blocking that thread on a dialog would mean no token ever
@@ -300,7 +304,7 @@ pub fn show_device_code_prompt(subject: &str, user_code: &str, verification_uri:
 /// human ever saw.
 ///
 /// Blocks until answered, so call it from the update thread — never from the UI thread, and never from
-/// the poll thread, which has notifications to fetch.
+/// the poll thread, which has pull requests to fetch.
 pub fn confirm_install(title: &str, msg: &str) -> bool {
     confirm(title, msg, "Install and restart", "Not now", false)
 }
@@ -335,7 +339,7 @@ pub fn confirm_autostart(title: &str, msg: &str) -> bool {
 
 /// Reports an update outcome the user should see, without ever blocking on stdin.
 ///
-/// `dialog::message`'s Linux arm waits on `stdin().read_line`, which on a machine launched from a
+/// A blocking dialog's Linux arm waits on `stdin().read_line`, which on a machine launched from a
 /// desktop entry means a background thread parked forever. This is reachable only from the update
 /// thread, so it uses the graphical mechanisms and falls back to the log rather than to a terminal
 /// nobody is reading.

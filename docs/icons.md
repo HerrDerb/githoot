@@ -1,16 +1,16 @@
 # Icons
 
-Everything is composited at runtime, so `assets/` holds two image files and the variants cannot drift
-apart. (A third file lives there, `hoot.mp3` — the notification sound, not an icon, and the only
-bundled file that is not this project's own work: see [NOTICE](../NOTICE).)
+Everything is composited at runtime, so `assets/` holds one image file and the variants cannot drift
+apart. (A second file lives there, `hoot.mp3` — the sound, not an icon, and the only bundled file that
+is not this project's own work: see [NOTICE](../NOTICE).) There used to be a blue owl beside it, for
+unread notifications; that feature and its asset were removed in 1.18.0.
 
 The base glyph is an owl, drawn for this project: the thing that sits still and watches so you do
 not have to. It used to be GitHub's Invertocat, which is their trademark and not this app's to wear
 as an application icon. The glyph carries no state, so replacing it cost nothing but the drawing.
 
-It is dark (<img src="icons/tray.png" alt="base icon" height="20" valign="middle">), or
-blue when notifications are on and something is unread
-(<img src="icons/tray_blue.png" alt="blue base icon" height="20" valign="middle">). On top of it:
+The glyph is dark (<img src="icons/tray.png" alt="base icon" height="20" valign="middle">) and carries
+no state of its own. On top of it:
 
 | Icon | Mark | Means |
 |:---:|---|---|
@@ -40,7 +40,7 @@ A few real composites:
 |:---:|---|
 | <img src="icons/tray_review_merge_changes.png" alt="all three bars" height="28"> | All three PR bars lit |
 | <img src="icons/tray_review_changes_alert.png" alt="bars beside the exclamation" height="28"> | Counts still visible beside the exclamation |
-| <img src="icons/tray_blue_review_merge_changes_update_alert.png" alt="every mark at once" height="28"> | Every mark at once: blue base, three bars, arrow and exclamation |
+| <img src="icons/tray_review_merge_changes_update_alert.png" alt="every mark at once" height="28"> | Every mark at once: three bars, arrow and exclamation |
 
 The arrow sits in the top middle and is drawn last, so it overlaps whatever is beneath it. Each bar's
 **centre** survives that: clip a bar's end and it still reads as a bar, reach its middle and it stops being

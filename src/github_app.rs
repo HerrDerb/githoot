@@ -1,8 +1,8 @@
 //! PR-status credential: a shared GitHub App's Device Flow.
 //!
 //! All three PR-search axes (`state::PrAxis`) are driven by one credential from one shared,
-//! fine-grained GitHub App — not a personally-registered OAuth App like the notifications
-//! credential in `access_token`, and not `gh`'s token. The App's Client ID is public by design
+//! fine-grained GitHub App — not a personally-registered OAuth App like the one the removed
+//! notifications credential used, and not `gh`'s token. The App's Client ID is public by design
 //! (Device Flow needs no client secret to authorize), so it is safe to hardcode and ship in the
 //! binary: every user still authorizes individually through their own browser and gets their own
 //! token, exactly as they would with a personal OAuth App, just without having to register one.

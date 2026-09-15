@@ -12,8 +12,7 @@ memory and never write one to disk.
 |---|---|
 | `N PR(s) awaiting your review` / `No reviews requested` | Confirmed by a successful search |
 | `N PR(s) approved` / `No approvals yet` | Confirmed |
-| `N PR(s) with changes requested` / `No changes requested` | Confirmed |
-| `unread notifications` / `no unread notifications` | Confirmed (when enabled) |
+| `N PR(s) needing your work` / `Nothing needing your work` | Confirmed |
 | `PR status: not authorized yet` | No credential — use the menu entry |
 | `PR status off: install the GitHub App to see your PRs` | Authorized, but installed nowhere |
 | `PR status off: setup failed` | No HTTP client could be built; clicking will not help |
@@ -25,11 +24,11 @@ memory and never write one to disk.
 A bar that is simply absent, with no message, means you genuinely have nothing pending. That distinction
 is the whole point: an unreadable answer must never be reported as a confident zero.
 
-Signals are independent — a failing search on one never disturbs another or the notification tint. Each
+Signals are independent — a failing search on one never disturbs another. Each
 cycle logs one line naming every signal it actually asked about; a switched-off one is absent:
 
 ```
-poll → conditional notifications→fresh, ReviewRequested→fresh, ChangesRequested→fresh → No/No/No/No (next in 60s) [...]
+poll → ReviewRequested→fresh, ReadyToMerge→fresh, ChangesRequested→fresh → No/No/No (next in 60s) [...]
 ```
 
 Polling is at least every 60s, backing off automatically when GitHub says so via `x-poll-interval` or

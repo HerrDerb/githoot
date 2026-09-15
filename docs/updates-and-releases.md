@@ -88,7 +88,7 @@ open githoot-tray.app
 ```
 
 The icon then appears in the menu bar with no Dock icon. It keeps its colour rather than using a macOS
-template image, which is drawn monochrome and would erase every bar along with the blue tint.
+template image, which is drawn monochrome and would erase every bar.
 
 ## Immutability
 

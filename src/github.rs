@@ -1,18 +1,17 @@
-//! GitHub notifications API client.
+//! GitHub pull-request API client.
 //!
 //! The job of this module is to be *honest*: every outcome GitHub can produce maps to a
 //! distinct variant, so the caller is never handed a plausible-looking zero in place of a
-//! failure. The previous version returned `Ok(0)` for any non-2xx response, which meant an
-//! expired token or a rate limit rendered as a confident "you have no notifications".
+//! failure. An early version returned `Ok(0)` for any non-2xx response, which meant an expired
+//! token or a rate limit rendered as a confident "nothing is waiting for you".
 
 use crate::infoln;
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT};
+use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, RETRY_AFTER, USER_AGENT};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const NOTIFICATIONS_URL: &str = "https://api.github.com/notifications";
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const AGENT: &str = "githoot-tray";
 
@@ -203,7 +202,7 @@ pub enum Reviewer {
 struct Parsed {
     /// Whether the signal is present at all — the one field every endpoint can answer.
     present: bool,
-    /// Exact match count, when the endpoint provides one (search does; notifications does not).
+    /// Exact match count.
     count: Option<u32>,
     /// The exact items `count` counted, when the endpoint reads its hits one by one. Only the
     /// GraphQL queries do; for a server total whose members were never fetched this is `None` — as
@@ -217,10 +216,6 @@ struct Parsed {
 /// over the `copilotReviews` setting.
 type BodyParser<'a> = &'a dyn Fn(&str) -> Result<Parsed, String>;
 
-/// We only ever ask whether the unread list is non-empty, so no fields are needed.
-#[derive(Debug, Deserialize)]
-struct Notification {}
-
 /// Everything GitHub can tell us, kept distinguishable because the caller must react
 /// differently to each one.
 #[derive(Debug)]
@@ -228,37 +223,34 @@ pub enum PollResult {
     /// A 200 with a usable body. `present` is authoritative.
     Fresh {
         present: bool,
-        etag: Option<String>,
-        /// Exact match count when the endpoint provides one (search does; notifications does
-        /// not, because we request `per_page=1` and only ask about presence).
+        /// Exact match count. Always `Some` now that every endpoint reads its hits, but kept an
+        /// `Option` because `Parsed` is the seam a future endpoint would arrive through.
         count: Option<u32>,
         /// The exact items `count` counted, when the endpoint reads its hits one by one — see
         /// `Parsed::prs`. Carried so the menu entry can show the very pull requests its dot is
         /// counting, which no search URL can express.
         prs: Option<Vec<PrEntry>>,
     },
-    /// 304 — the notification list is unchanged, so whatever we already show is still right.
-    NotModified,
     /// 401 — the token is dead. Waiting will not fix this; only re-authentication will.
     Unauthorized,
     /// 403/429 carrying a rate-limit signal. Hold state and wait exactly as instructed.
     RateLimited { retry_after: Duration },
     /// Anything else: transport failure, 5xx, unparseable body, or a 403 that is not about
-    /// rate limiting (a missing `notifications` scope, say). State is unknown, not clear.
+    /// rate limiting (a permission the query needs, say). State is unknown, not clear.
     Transient(String),
 }
 
 impl PollResult {
     /// The detail worth logging when a poll did **not** go cleanly, or `None` when it did.
     ///
-    /// `Fresh` and `NotModified` are the two expected outcomes, so they stay silent — logging
-    /// them on every cycle is what buried the one line that mattered. Every other variant names
+    /// `Fresh` is the expected outcome, so it stays silent — logging it on every cycle is what
+    /// buried the one line that mattered. Every other variant names
     /// what went wrong and carries the same message the tooltip would show, so a non-OK response
     /// or a transport failure is never swallowed the way the GraphQL `FORBIDDEN` was: the field
     /// error rides in on `Transient`'s string.
     pub fn problem(&self) -> Option<String> {
         match self {
-            PollResult::Fresh { .. } | PollResult::NotModified => None,
+            PollResult::Fresh { .. } => None,
             PollResult::Unauthorized => Some("token rejected by GitHub (401)".to_string()),
             PollResult::RateLimited { retry_after } => {
                 Some(format!("rate limited — holding for {}s", retry_after.as_secs()))
@@ -285,18 +277,6 @@ pub fn build_client() -> reqwest::Result<Client> {
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
-}
-
-/// Polls unread notifications. `etag` enables a conditional request; pass `None` to force a
-/// fresh read.
-pub fn poll_notifications(client: &Client, token: &str, etag: Option<&str>) -> PollResponse {
-    // `all=false` is already the default, but stating it makes `!list.is_empty()` provably a
-    // question about *unread* items. `per_page=1` because we need presence, not a count.
-    let request = client
-        .get(NOTIFICATIONS_URL)
-        .query(&[("all", "false"), ("per_page", "1")]);
-
-    send(request, token, etag, &parse_notifications)
 }
 
 /// The GraphQL document behind both axes that judge pull requests by their reviews.
@@ -411,25 +391,24 @@ fn poll_reviewed(
     });
     let request = client.post(GRAPHQL_URL).json(&body);
 
-    send(request, token, None, parse_ok)
+    send(request, token, parse_ok)
 }
 
-/// Shared request/response plumbing for both endpoints.
+/// Shared request/response plumbing.
+///
+/// No conditional request. `If-None-Match` existed for `/notifications`, the one endpoint that
+/// answered `304`; GraphQL is a POST and never does, so the whole ETag path went with the
+/// notification feature in 1.18.0.
 fn send(
     request: reqwest::blocking::RequestBuilder,
     token: &str,
-    etag: Option<&str>,
     parse_ok: BodyParser,
 ) -> PollResponse {
-    let mut request = request
+    let request = request
         .header(ACCEPT, "application/vnd.github+json")
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header("X-GitHub-Api-Version", "2022-11-28")
         .header(USER_AGENT, AGENT);
-
-    if let Some(tag) = etag {
-        request = request.header(IF_NONE_MATCH, tag);
-    }
 
     let response = match request.send() {
         Ok(response) => response,
@@ -446,22 +425,9 @@ fn send(
     let headers = response.headers().clone();
     let poll_interval = header_u64(&headers, "x-poll-interval").map(Duration::from_secs);
 
-    // A 304 has no body by definition; reading one would just block on nothing.
-    let body = if status == StatusCode::NOT_MODIFIED {
-        String::new()
-    } else {
-        response.text().unwrap_or_default()
-    };
+    let body = response.text().unwrap_or_default();
 
     PollResponse { result: classify_with(status, &headers, &body, unix_now(), parse_ok), poll_interval }
-}
-
-/// Success-body parser for `/notifications`: presence only, no count.
-fn parse_notifications(body: &str) -> Result<Parsed, String> {
-    serde_json::from_str::<Vec<Notification>>(body)
-        .map(|list| Parsed { present: !list.is_empty(), count: None, prs: None })
-        // Previously `.unwrap_or_default()`, which turned a garbled payload into "no unread".
-        .map_err(|e| format!("unparseable notification payload: {e}"))
 }
 
 // ─── The changes-requested payload ────────────────────────────────────────────
@@ -941,14 +907,6 @@ fn classify_with(
     now: u64,
     parse_ok: BodyParser,
 ) -> PollResult {
-    // ORDER MATTERS. `304` is not `is_success()`, so it has to be caught before the generic
-    // non-2xx arm below. Getting this backwards is exactly the old bug: the documented
-    // healthy answer for "nothing changed" would be logged as a failure and reported as
-    // zero unread, clearing the icon on every quiet poll.
-    if status == StatusCode::NOT_MODIFIED {
-        return PollResult::NotModified;
-    }
-
     // Never transient: a rejected token stays rejected until it is replaced.
     if status == StatusCode::UNAUTHORIZED {
         return PollResult::Unauthorized;
@@ -973,7 +931,6 @@ fn classify_with(
             present: parsed.present,
             count: parsed.count,
             prs: parsed.prs,
-            etag: header_string(headers, ETAG.as_str()),
         },
         Err(why) => PollResult::Transient(why),
     }
@@ -1063,11 +1020,6 @@ mod tests {
         map
     }
 
-    /// Shorthand: classify a NOTIFICATIONS response.
-    fn notif(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, &parse_notifications)
-    }
-
     /// Shorthand: classify a REVIEW-REQUESTED (GraphQL) response.
     ///
     /// Named `search` historically, when this axis read REST Search. The name is kept because a dozen
@@ -1077,33 +1029,13 @@ mod tests {
         classify_with(status, h, body, now, &|b| parse_reviewed(b, |_| true))
     }
 
-    // ── Notifications body parsing ────────────────────────────────────────────
+    // ── Status-line and rate-limit handling ───────────────────────────────────
 
+    /// Previously `.unwrap_or_default()` swallowed this into "nothing waiting".
     #[test]
-    fn empty_list_is_clear() {
+    fn a_malformed_body_is_transient_not_clear() {
         assert!(matches!(
-            notif(StatusCode::OK, &headers(&[]), "[]", 0),
-            PollResult::Fresh { present: false, .. }
-        ));
-    }
-
-    #[test]
-    fn non_empty_list_is_unread_and_keeps_etag() {
-        match notif(StatusCode::OK, &headers(&[("etag", "\"abc\"")]), "[{}]", 0) {
-            PollResult::Fresh { present, etag, count, .. } => {
-                assert!(present);
-                assert_eq!(etag.as_deref(), Some("\"abc\""));
-                assert_eq!(count, None, "notifications use per_page=1, so there is no true count");
-            }
-            other => panic!("expected Fresh, got {:?}", other),
-        }
-    }
-
-    /// Previously `.unwrap_or_default()` swallowed this into "no unread".
-    #[test]
-    fn malformed_notifications_body_is_transient_not_clear() {
-        assert!(matches!(
-            notif(StatusCode::OK, &headers(&[]), "not json at all", 0),
+            search(StatusCode::OK, &headers(&[]), "not json at all", 0),
             PollResult::Transient(_)
         ));
     }
@@ -1328,18 +1260,6 @@ mod tests {
         }
     }
 
-    /// Notifications is the one endpoint left with no per-hit view, so it must never claim one.
-    #[test]
-    fn notifications_carry_no_entries() {
-        match notif(StatusCode::OK, &headers(&[]), "[{}]", 0) {
-            PollResult::Fresh { prs, count, .. } => {
-                assert_eq!(prs, None);
-                assert_eq!(count, None, "presence only, so there is no number either");
-            }
-            other => panic!("expected Fresh, got {:?}", other),
-        }
-    }
-
     /// The document has to name every variable it uses, or GitHub rejects the whole query.
     #[test]
     fn the_query_document_declares_the_variables_it_sends() {
@@ -1500,16 +1420,9 @@ mod tests {
 
     // ── Status handling, shared by both endpoints ─────────────────────────────
 
-    /// The regression that matters most: 304 must never be read as "nothing pending".
     #[test]
-    fn not_modified_is_not_a_failure_and_not_clear() {
-        assert!(matches!(notif(StatusCode::NOT_MODIFIED, &headers(&[]), "", 0), PollResult::NotModified));
-        assert!(matches!(search(StatusCode::NOT_MODIFIED, &headers(&[]), "", 0), PollResult::NotModified));
-    }
-
-    #[test]
-    fn unauthorized_is_distinct_from_transient_on_both_endpoints() {
-        assert!(matches!(notif(StatusCode::UNAUTHORIZED, &headers(&[]), "{}", 0), PollResult::Unauthorized));
+    fn unauthorized_is_distinct_from_transient() {
+        assert!(matches!(search(StatusCode::UNAUTHORIZED, &headers(&[]), "{}", 0), PollResult::Unauthorized));
         assert!(matches!(search(StatusCode::UNAUTHORIZED, &headers(&[]), "{}", 0), PollResult::Unauthorized));
     }
 
@@ -1525,7 +1438,7 @@ mod tests {
     #[test]
     fn exhausted_quota_waits_for_reset() {
         let h = headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1000")]);
-        match notif(StatusCode::FORBIDDEN, &h, "", 100) {
+        match search(StatusCode::FORBIDDEN, &h, "", 100) {
             PollResult::RateLimited { retry_after } => assert_eq!(retry_after, Duration::from_secs(900)),
             other => panic!("expected RateLimited, got {:?}", other),
         }
@@ -1535,7 +1448,7 @@ mod tests {
     #[test]
     fn stale_reset_falls_back_to_the_minimum() {
         let h = headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "50")]);
-        match notif(StatusCode::FORBIDDEN, &h, "", 9_999) {
+        match search(StatusCode::FORBIDDEN, &h, "", 9_999) {
             PollResult::RateLimited { retry_after } => assert_eq!(retry_after, DEFAULT_RATE_LIMIT_WAIT),
             other => panic!("expected RateLimited, got {:?}", other),
         }
@@ -1561,7 +1474,7 @@ mod tests {
             other => panic!("expected RateLimited, got {:?}", other),
         }
         assert!(matches!(
-            notif(StatusCode::FORBIDDEN, &h, body, 0),
+            search(StatusCode::FORBIDDEN, &h, body, 0),
             PollResult::RateLimited { .. }
         ));
     }
@@ -1598,7 +1511,7 @@ mod tests {
     #[test]
     fn server_error_is_transient() {
         assert!(matches!(
-            notif(StatusCode::INTERNAL_SERVER_ERROR, &headers(&[]), "boom", 0),
+            search(StatusCode::INTERNAL_SERVER_ERROR, &headers(&[]), "boom", 0),
             PollResult::Transient(_)
         ));
     }

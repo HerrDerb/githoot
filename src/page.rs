@@ -322,7 +322,6 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
     h.push_str("<h2>Behaviour</h2><div class=\"card\">");
     h.push_str(&checkbox("copilotReviews", "Count Copilot's unresolved comments as work", cfg.copilot_reviews));
     h.push_str(&checkbox("sound", "Hoot when a pull request needs you", cfg.sound));
-    h.push_str(&checkbox("notificationIndication", "Tint the icon blue on unread notifications", cfg.notification_indication));
     h.push_str(&checkbox("updateCheck", "Check for a newer release", cfg.update_check));
     h.push_str("</div>\n");
 

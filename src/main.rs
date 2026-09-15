@@ -4,7 +4,6 @@
 //! Main entry point for the GitHoot Tray application.
 //! Handles cross-platform initialization and tray icon setup.
 
-mod access_token;
 mod autostart;
 mod config;
 mod dialog;
@@ -22,7 +21,6 @@ mod state;
 mod update;
 mod version;
 
-const NOTIFICATIONS_URL: &str = "https://github.com/notifications";
 
 // ─── Command-line contract ────────────────────────────────────────────────────
 //
@@ -236,19 +234,6 @@ fn main() {
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
     autostart::offer_on_first_run(first_run);
-    let tokens = if config.notification_indication {
-        match access_token::TokenStore::load(&app_asset_path) {
-            Ok(tokens) => Some(tokens),
-            Err(e) => {
-                errorln!("fatal: {e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        infoln!("notification indication off (enable with \"notificationIndication=on\" in config.txt)");
-        None
-    };
-
     // Skipped entirely when every PR signal is switched off. Without this guard a disabled feature
     // would still make a network call (`installation_count`) and, on Windows and macOS, could raise a
     // sign-in dialog — for something the user turned off.
@@ -264,9 +249,9 @@ fn main() {
     let sound = config::Switch::new(config.sound);
     let copilot = config::Switch::new(config.copilot_reviews);
 
-    let mut indicator = AppIndicator::new("github_notifications", "");
+    let mut indicator = AppIndicator::new("githoot_tray", "");
     indicator.set_status(AppIndicatorStatus::Active);
-    indicator.set_icon(icons.get(false, false, false, false, false, false).as_str());
+    indicator.set_icon(icons.get(false, false, false, false, false).as_str());
 
     // The poll loop waits on this channel, so a menu click can pull the next poll forward.
     let (wake_tx, wake_rx) = std::sync::mpsc::channel::<scheduler::Wake>();
@@ -275,17 +260,6 @@ fn main() {
     let (restart_tx, restart_rx) = std::sync::mpsc::channel::<update::RestartPlan>();
 
     let mut menu = Menu::new();
-    let item = MenuItem::with_label("Open GitHub Notifications");
-    let open_wake_tx = wake_tx.clone();
-    item.connect_activate(move |_| {
-        if let Err(e) = open::that(NOTIFICATIONS_URL) {
-            errorln!("failed to open browser: {e}");
-        }
-        // Whatever the user is about to read changes the answer, so re-poll soon rather than
-        // leaving a stale "unread" icon up for a whole interval.
-        let _ = open_wake_tx.send(scheduler::Wake::Refresh);
-    });
-
     // All three open one tab: GitHoot's own page for what that bar counts, served locally. It used
     // to be one browser tab *per pull request* for two of them, plus a GitHub search page that could
     // not express what either bar counted. See `serve` and `page`.
@@ -293,8 +267,7 @@ fn main() {
     let reviews_wake_tx = wake_tx.clone();
     reviews_item.connect_activate(move |_| {
         serve::open_axis_page(state::PrAxis::ReviewRequested);
-        // Reviewing is what clears the dot, so pull the next poll forward the same way the
-        // notifications item does.
+        // Reviewing is what clears the dot, so pull the next poll forward.
         let _ = reviews_wake_tx.send(scheduler::Wake::Refresh);
     });
 
@@ -529,7 +502,6 @@ fn main() {
     menu.append(&status_item);
     menu.append(&top_separator);
     menu.append(&authenticate_item);
-    menu.append(&item);
     menu.append(&reviews_item);
     menu.append(&ready_to_merge_item);
     menu.append(&changes_requested_item);
@@ -572,7 +544,6 @@ fn main() {
         // poll loop relabels and shows or hides. GTK widgets are reference-counted, so both refer
         // to the same items.
         scheduler::MenuItems {
-            notifications: item.clone(),
             reviews: reviews_item.clone(),
             ready_to_merge: ready_to_merge_item.clone(),
             changes_requested: changes_requested_item.clone(),
@@ -583,7 +554,6 @@ fn main() {
             update: update_item.clone(),
         },
         scheduler::PollInputs {
-            tokens,
             pr,
             app_asset_path: app_asset_path.clone(),
             update_check: config.update_check,
@@ -729,16 +699,6 @@ fn main() {
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
     autostart::offer_on_first_run(first_run);
-    let tokens = if config.notification_indication {
-        match access_token::TokenStore::load(&app_asset_path) {
-            Ok(tokens) => Some(tokens),
-            Err(e) => fatal(&format!("Could not authenticate with GitHub: {e}")),
-        }
-    } else {
-        infoln!("notification indication off (enable with \"notificationIndication=on\" in config.txt)");
-        None
-    };
-
     // Skipped entirely when every PR signal is switched off. Without this guard a disabled feature
     // would still make a network call (`installation_count`) and, on Windows and macOS, could raise a
     // sign-in dialog — for something the user turned off.
@@ -769,8 +729,6 @@ fn main() {
         menu: tray_icon::menu::Menu,
         /// The items are held, not just their ids: they are re-appended when they come back, and
         /// the review count is written into its text.
-        open_item: tray_icon::menu::MenuItem,
-        open_item_id: tray_icon::menu::MenuId,
         reviews_item: tray_icon::menu::MenuItem,
         reviews_item_id: tray_icon::menu::MenuId,
         ready_to_merge_item: tray_icon::menu::MenuItem,
@@ -822,7 +780,7 @@ fn main() {
         /// Which image the tray is actually showing, as `[notifications, review_requested,
         /// ready_to_merge, changes_requested]`, as far as we know. `None` means "unproven", which
         /// forces the next update to re-apply rather than assume.
-        applied: Option<[bool; 4]>,
+        applied: Option<[bool; 3]>,
         /// Whether the icon currently shows the needs-authorization variant. Separate from `applied`
         /// because it is not one of the four signals but a replacement for all of them.
         applied_needs_auth: Option<bool>,
@@ -840,14 +798,14 @@ fn main() {
 
     /// Which entries the menu should hold.
     ///
-    /// A named struct rather than the `([bool; 4], bool, bool, …)` tuple this grew out of. Once there
+    /// A named struct rather than the `([bool; 3], bool, bool, …)` tuple this grew out of. Once there
     /// were three independent flags beside the signal array, a positional tuple was one transposition
     /// away from a menu that offers a sign-in during an outage — and it would compile, type-check, and
     /// be visible only by right-clicking the tray. The same reasoning as `config::Config::pr_enabled`.
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct MenuShape {
         /// The four signals, indexed as `[notifications, then PrAxis::index + 1]`.
-        wanted: [bool; 4],
+        wanted: [bool; 3],
         needs_auth: bool,
         status_degraded: bool,
         update: bool,
@@ -868,8 +826,6 @@ fn main() {
         // Every entry starts present. Nothing has been polled yet, so both signals are `Unknown`,
         // and starting empty would mean the first second of the app's life offers no way to reach
         // GitHub. The first confirmed answer takes out whatever turns out to be empty.
-        let open_item = MenuItem::new("Open GitHub Notifications", true, None);
-        let open_item_id = open_item.id().clone();
         let reviews_item = MenuItem::new(state::REVIEWS_MENU_LABEL, true, None);
         let reviews_item_id = reviews_item.id().clone();
         let ready_to_merge_item =
@@ -927,12 +883,11 @@ fn main() {
         // something that may already be authorized is the misleading direction. The first update
         // arrives within a second and puts it in if it is needed.
         for (item, what) in [
-            (&open_item as &dyn tray_icon::menu::IsMenuItem, "open"),
-            (&reviews_item, "reviews"),
+            (&reviews_item as &dyn tray_icon::menu::IsMenuItem, "reviews"),
             (&ready_to_merge_item, "ready to merge"),
             (&changes_requested_item, "work required"),
             (&pr_inbox_item, "PR inbox"),
-            (&settings_menu as &dyn tray_icon::menu::IsMenuItem, "settings"),
+            (&settings_menu, "settings"),
             (&quit_item, "quit"),
         ] {
             menu.append(item)
@@ -941,7 +896,7 @@ fn main() {
 
         let tray_icon = TrayIconBuilder::new()
             .with_tooltip("GitHub Notifications")
-            .with_icon(icons.get(false, false, false, false, false, false).clone())
+            .with_icon(icons.get(false, false, false, false, false).clone())
             // Cloned rather than moved: `Menu` is a reference-counted handle, and the app keeps one
             // so it can take entries out later. The tray gets the same underlying menu.
             .with_menu(Box::new(menu.clone()))
@@ -961,8 +916,6 @@ fn main() {
             tray_icon,
             icons,
             menu,
-            open_item,
-            open_item_id,
             reviews_item,
             reviews_item_id,
             ready_to_merge_item,
@@ -999,7 +952,7 @@ fn main() {
             // The menu was built with the four signal entries present and every conditional entry
             // absent, and that much we did do, so it is recorded as such.
             applied_menu: Some(MenuShape {
-                wanted: [true; 4],
+                wanted: [true; 3],
                 needs_auth: false,
                 status_degraded: false,
                 update: false,
@@ -1079,7 +1032,6 @@ fn main() {
     // Launch the polling thread; it communicates back via the proxy.
     scheduler::start_notification_scheduler(
         scheduler::PollInputs {
-            tokens,
             pr,
             app_asset_path: app_asset_path.clone(),
             update_check: config.update_check,
@@ -1126,14 +1078,7 @@ fn main() {
                 return;
             };
 
-            if *id == tray.open_item_id {
-                if let Err(e) = open::that(NOTIFICATIONS_URL) {
-                    errorln!("failed to open browser: {e}");
-                }
-                // Whatever the user is about to read changes the answer, so re-poll soon rather
-                // than leaving a stale "unread" icon up for a whole interval.
-                let _ = self.wake_tx.send(scheduler::Wake::Refresh);
-            } else if *id == tray.reviews_item_id {
+            if *id == tray.reviews_item_id {
                 // All three open GitHoot's own page for what that bar counts — one tab, served
                 // locally. See `serve` and `page`.
                 serve::open_axis_page(state::PrAxis::ReviewRequested);
@@ -1400,7 +1345,7 @@ fn main() {
             // always something down there and the old `body_group` test was permanently true.
             let separate = top_group;
 
-            let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 12] = [
+            let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 11] = [
                 // The top group: the app's own state and the service's, rather than anything about your
                 // pull requests. First because when the icon is wearing a mark, two of the three things
                 // that explain it are here.
@@ -1408,17 +1353,13 @@ fn main() {
                 (&self.status_item, status_degraded, "github-status"),
                 (&top_separator, separate, "top-separator"),
                 (&self.authenticate_item, needs_auth, "authenticate"),
-                // Notifications is *not* gated on `needs_auth`: it is a separate credential that may
-                // be working perfectly, and hiding a working entry because a different one needs
-                // attention would take away a feature that still functions.
-                (&self.open_item, wanted[0], "notifications"),
                 // The three PR entries share the credential that is missing, so none of them can
                 // have anything behind them until it is obtained. Gated on `needs_auth` only, *not* on
                 // the outage bit: an outage hides the bars because the icon has one exclamation to
                 // give, but these counts are the last known good ones and the lists still open.
-                (&self.reviews_item, !needs_auth && wanted[1], "review-requested"),
-                (&self.ready_to_merge_item, !needs_auth && wanted[2], "ready-to-merge"),
-                (&self.changes_requested_item, !needs_auth && wanted[3], "changes-requested"),
+                (&self.reviews_item, !needs_auth && wanted[0], "review-requested"),
+                (&self.ready_to_merge_item, !needs_auth && wanted[1], "ready-to-merge"),
+                (&self.changes_requested_item, !needs_auth && wanted[2], "changes-requested"),
                 // The fallback, in the slot the three above would have filled. Deliberately *not*
                 // gated on `needs_auth`: it is a plain URL that needs no credential, which is what
                 // makes it worth keeping when the three that do need one are hidden.
@@ -1449,12 +1390,11 @@ fn main() {
             // `Unknown` on any axis deliberately leaves that part of the picture alone — a brief
             // failure should change the words, not make the icon flap. So an unknown axis falls
             // back to whatever is currently on screen.
-            let current = self.applied.unwrap_or([false; 4]);
+            let current = self.applied.unwrap_or([false; 3]);
             let wanted = [
-                update.icon.notifications.as_confirmed().unwrap_or(current[0]),
-                update.icon.review_requested.as_confirmed().unwrap_or(current[1]),
-                update.icon.ready_to_merge.as_confirmed().unwrap_or(current[2]),
-                update.icon.changes_requested.as_confirmed().unwrap_or(current[3]),
+                update.icon.review_requested.as_confirmed().unwrap_or(current[0]),
+                update.icon.ready_to_merge.as_confirmed().unwrap_or(current[1]),
+                update.icon.changes_requested.as_confirmed().unwrap_or(current[2]),
             ];
 
             let needs_auth = update.icon.needs_auth;
@@ -1476,14 +1416,7 @@ fn main() {
                 // mark *and* whatever counts are still known.
                 let icon = self
                     .icons
-                    .get(
-                        wanted[0],
-                        wanted[1],
-                        wanted[2],
-                        wanted[3],
-                        update_available,
-                        exclamation,
-                    )
+                    .get(wanted[0], wanted[1], wanted[2], update_available, exclamation)
                     .clone();
                 match self.tray_icon.set_icon(Some(icon)) {
                     // Only record success. A failed update leaves these `None` so the next

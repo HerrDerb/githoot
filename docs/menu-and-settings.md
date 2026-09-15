@@ -8,7 +8,6 @@
 | **GitHub is githubing again, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
 | *— separator —* | Something above **and** below it | |
 | **Authenticate GitHub PR Status** | PR status has no usable credential | Starts the sign-in flow |
-| **Open GitHub Notifications** | Notifications on and something unread | Opens them, then re-checks a few seconds later |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
 | **Open Approved PRs (N)** | One of yours has been approved | Opens GitHoot's own page for exactly what the green bar counts |
 | **Open Work Required (N)** | An objection stands, a conflict is blocking one, or Copilot has open comments | Opens GitHoot's own page for exactly what the amber bar counts |
@@ -134,7 +133,6 @@ existed — the key is appended rather than the file regenerated.
 | Key | Default | Does |
 |---|---|---|
 | `updateCheck` | `on` | Check for a newer release daily and at startup |
-| `notificationIndication` | `off` | Tint the icon blue on unread notifications |
 | `reviewRequested` | `on` | The red bar |
 | `readyToMerge` | `on` | The green bar (approved PRs; the key keeps its old name so existing `config.txt` files still work) |
 | `changesRequested` | `on` | The amber bar (work required; the key keeps its old name so existing `config.txt` files still work) |
@@ -213,7 +211,11 @@ Turning a PR signal off removes its bar and menu entry **and stops it being sear
 nothing against the rate limit. Turning all three off skips PR sign-in entirely — no network call, no
 dialog. Because slot positions are fixed, disabling the middle signal leaves a gap rather than closing up.
 
-**Renamed in 1.4.0, breaking:** `notifications` → `notificationIndication`, and `update_check` →
-`updateCheck`. The old spellings are no longer read. The app logs a line naming the replacement, but
-cannot honour the old key — which matters most for `update_check=off`, since left unedited it stops being
-read and update checks come back on.
+**Renamed in 1.4.0, breaking:** `update_check` → `updateCheck`. The old spelling is no longer read. The
+app logs a line naming the replacement, but cannot honour the old key — which matters most for
+`update_check=off`, since left unedited it stops being read and update checks come back on.
+
+**Removed in 1.18.0:** the blue "unread notifications" tint, along with `notificationIndication`, the
+separate OAuth credential it needed and the **Open GitHub Notifications** entry. An old
+`notificationIndication` line in your `config.txt` is now simply an unknown key, which has always been
+ignored. `~/.githoot-tray/access_token.txt` and `client_id.txt` are no longer read by anything.
