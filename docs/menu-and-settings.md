@@ -107,7 +107,7 @@ appended rather than the file regenerated.
 | `changesRequested` | `on` | The amber bar |
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
-| `statusComponents` | every component | Which parts of GitHub may raise the outage mark — see below |
+| `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
 
 Only `off`, `false`, `0` or `no` switch something off; anything else leaves the default, so a typo cannot
 silently disable a feature. Two keys are not toggles: `logLevel` takes `error` or `info`, falling back to
@@ -128,12 +128,20 @@ with pull requests. A single degraded component — Copilot, say — makes the w
 Degraded Service", which put a red exclamation on the tray for a service this app never touches. Cry wolf
 often enough and the mark stops meaning anything.
 
-So `statusComponents` names the parts that may raise it. A fresh `config.txt` lists every component GitHub
-publishes, on one line; delete the ones you do not care about:
+So `statusComponents` names the parts that may raise it. A fresh `config.txt` names **the parts this app
+actually uses**, on one line; delete the ones you do not care about:
 
 ```
-statusComponents=Git Operations, Webhooks, API Requests, Issues, Pull Requests, Actions, Packages, Pages, Copilot, Codespaces, Copilot AI Model Providers
+statusComponents=Git Operations, Webhooks, API Requests, Issues, Pull Requests, Actions, Packages, Pages
 ```
+
+The three GitHub publishes that are left out — `Copilot`, `Codespaces` and `Copilot AI Model Providers` —
+are named in a comment beside the key, so adding one back is an edit rather than a trip to the status
+page. Nothing this app calls goes near them.
+
+**This changes nothing for an existing install.** An existing `config.txt` is never rewritten, so a file
+with no `statusComponents` line keeps watching the whole page, which is what an absent key has always
+meant. Only a fresh file gets the narrower watch.
 
 - **One line, commas between.** There is no line-continuation syntax, so a wrapped list loses everything
   after the first line.

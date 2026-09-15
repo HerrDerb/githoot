@@ -37,10 +37,13 @@ const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 
 /// Every component GitHub publishes on its status page, in the order the page lists them.
 ///
-/// Written into a fresh `config.txt` as the value of `statusComponents`, so narrowing the watch is a
-/// deletion rather than a research task. Hardcoding it means it can go stale, which is why the
-/// ignored `every_component_named_in_the_default_config_still_exists` test in `github_status` checks
-/// it against the live payload; a stale entry costs nothing worse than an unwatched component and a
+/// Named in the *comment* above `statusComponents` in a fresh `config.txt`, not in its value — see
+/// `DEFAULT_STATUS_COMPONENTS`. Listing them all there is what keeps adding one back an edit rather
+/// than a research task against GitHub's status page.
+///
+/// Hardcoding it means it can go stale, which is why the ignored
+/// `every_component_named_in_the_default_config_still_exists` test in `github_status` checks it
+/// against the live payload; a stale entry costs nothing worse than an unwatched component and a
 /// line in the log.
 ///
 /// One name is deliberately absent: `Visit www.githubstatus.com for more information`, a Statuspage
@@ -59,12 +62,43 @@ const KNOWN_STATUS_COMPONENTS: [&str; 11] = [
     "Copilot AI Model Providers",
 ];
 
+/// What a fresh `config.txt` actually watches: the parts of GitHub a pull-request tray touches.
+///
+/// The shipped value used to be all eleven, and that was wrong in a way that took a while to see.
+/// GitHub's page-wide verdict is one judgement over everything it runs, and a component being
+/// degraded is enough to make it read "Partially Degraded Service" — so Copilot having a bad
+/// afternoon put a red exclamation on a tray that never calls Copilot. Cry wolf often enough and the
+/// mark stops meaning anything, which costs more than the outage it was reporting.
+///
+/// The three left out (`Copilot`, `Codespaces`, `Copilot AI Model Providers`) are still named in the
+/// comment beside the key, so putting one back is an edit and not a research task.
+///
+/// **Existing files are not rewritten**, so this changes nothing for anyone already installed: a
+/// `config.txt` with no `statusComponents` line keeps watching the whole page, which is what it has
+/// always meant. Only a fresh file gets the narrower watch.
+const DEFAULT_STATUS_COMPONENTS: [&str; 8] = [
+    "Git Operations",
+    "Webhooks",
+    "API Requests",
+    "Issues",
+    "Pull Requests",
+    "Actions",
+    "Packages",
+    "Pages",
+];
+
 /// The component list a fresh `config.txt` is written with.
 ///
-/// Test-only: the shipped file gets the list from `KNOWN_STATUS_COMPONENTS` directly. This exists so
-/// the live test in `github_status` can hold those names up against what GitHub actually publishes.
+/// Test-only: the shipped file gets the list from `DEFAULT_STATUS_COMPONENTS` directly. This exists
+/// so the live test in `github_status` can hold names up against what GitHub actually publishes.
 #[cfg(test)]
 pub fn default_status_components() -> Vec<String> {
+    DEFAULT_STATUS_COMPONENTS.iter().map(|name| name.to_string()).collect()
+}
+
+/// Every component GitHub publishes, for the same live check.
+#[cfg(test)]
+pub fn all_status_components() -> Vec<String> {
     KNOWN_STATUS_COMPONENTS.iter().map(|name| name.to_string()).collect()
 }
 
@@ -310,7 +344,14 @@ fn pr_key(axis: PrAxis) -> &'static str {
 fn default_config() -> String {
     // Joined rather than written out, so the list has exactly one definition and the file cannot name
     // a component the code has never heard of.
-    let components = KNOWN_STATUS_COMPONENTS.join(", ");
+    let components = DEFAULT_STATUS_COMPONENTS.join(", ");
+    // The ones the shipped value leaves out, so the comment can name them as the things to add back.
+    let others: Vec<&str> = KNOWN_STATUS_COMPONENTS
+        .iter()
+        .copied()
+        .filter(|c| !DEFAULT_STATUS_COMPONENTS.contains(c))
+        .collect();
+    let others = others.join(", ");
     format!(
         "# githoot-tray settings\n\
          #\n\
@@ -343,9 +384,13 @@ fn default_config() -> String {
          {KEY_LOG_LEVEL}=error\n\
          \n\
          # Which parts of GitHub may put the exclamation on the icon, comma separated, one line.\n\
-         # Every component GitHub publishes is listed below; delete the ones you do not care about,\n\
-         # and the rest stop raising the mark. GitHub's page-wide verdict says \"degraded\" whenever\n\
-         # any one of these is, including the ones a pull-request tray never touches.\n\
+         # Delete the ones you do not care about and they stop raising the mark; add any of the\n\
+         # others below to watch them too. GitHub's own page-wide verdict says \"degraded\" whenever\n\
+         # any single component is, including the ones a pull-request tray never touches, which is\n\
+         # why the line below names only the parts this app actually uses.\n\
+         #\n\
+         # Also available: {others}\n\
+         #\n\
          # Names must match GitHub's exactly, bar case. An empty list watches the whole page.\n\
          {KEY_STATUS_COMPONENTS}={components}\n"
     )
@@ -547,6 +592,45 @@ mod tests {
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // And nothing else, so a key added to the template without being read is caught.
         assert_eq!(values.len(), 8, "unexpected keys in the template: {values:?}");
+    }
+
+    /// A fresh file watches the parts a pull-request tray actually touches, and no more.
+    ///
+    /// A single degraded component makes GitHub's page-wide verdict read "Partially Degraded
+    /// Service", so shipping the full list meant Copilot having a bad afternoon put a red
+    /// exclamation on a tray that never calls it. Cry wolf often enough and the mark stops meaning
+    /// anything.
+    #[test]
+    fn a_fresh_config_watches_only_the_parts_a_pr_tray_touches() {
+        let text = default_config();
+        let values = parse(&text);
+        let watched = split_list(values.get(KEY_STATUS_COMPONENTS).expect("the key"));
+        assert_eq!(watched, default_status_components());
+        for absent in ["Copilot", "Codespaces", "Copilot AI Model Providers"] {
+            assert!(!watched.iter().any(|c| c == absent), "{absent} should not be watched");
+        }
+    }
+
+    /// The ones left out have to be *named* somewhere, or adding one back is a research task against
+    /// GitHub's status page rather than an edit. The value is the short list; the comment is the menu.
+    #[test]
+    fn the_comment_names_every_component_github_publishes() {
+        let text = default_config();
+        for component in KNOWN_STATUS_COMPONENTS {
+            assert!(text.contains(component), "the template never mentions {component}");
+        }
+    }
+
+    /// A typo in the shipped list would name a component GitHub does not publish, which shows up only
+    /// as one line in the log and a watch that never fires.
+    #[test]
+    fn every_shipped_component_is_one_github_publishes() {
+        for component in DEFAULT_STATUS_COMPONENTS {
+            assert!(
+                KNOWN_STATUS_COMPONENTS.contains(&component),
+                "{component} is shipped but is not a component GitHub publishes"
+            );
+        }
     }
 
     /// Every key the template writes must be one `load` actually reads. A key present in the file
@@ -783,13 +867,14 @@ mod tests {
 ").status_components, ["ISSUES"]);
     }
 
-    /// The written template names every component GitHub publishes, so trimming the list is a
-    /// deletion rather than research. This is the one place a stale list would show.
+    /// The written *value* is the short list, not every component. The rest are named in the comment
+    /// beside it — asserted by `the_comment_names_every_component_github_publishes` — so trimming and
+    /// extending are both edits rather than research. This is the one place a stale list would show.
     #[test]
-    fn the_generated_template_lists_every_known_component() {
+    fn the_generated_template_watches_the_shipped_list() {
         let template = default_config();
         let cfg = Config::from_values(&parse(&template));
-        assert_eq!(cfg.status_components, KNOWN_STATUS_COMPONENTS.to_vec());
+        assert_eq!(cfg.status_components, DEFAULT_STATUS_COMPONENTS.to_vec());
         assert!(cfg.status_components.contains(&"Pull Requests".to_string()));
     }
 
@@ -812,7 +897,9 @@ mod tests {
             .lines()
             .find(|l| l.starts_with(KEY_STATUS_COMPONENTS))
             .expect("the template must state the key");
-        assert!(line.contains("Codespaces"), "the whole list must fit on one line: {line}");
+        assert!(line.contains("Pages"), "the whole list must fit on one line: {line}");
+        // The comment's "Also available" roster is a separate line and must not leak into the value.
+        assert!(!line.contains("Codespaces"), "the comment's extras are not watched: {line}");
     }
 
     /// The three axes must map to three *distinct* keys. Duplicating one would silently tie two bars
@@ -928,3 +1015,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

@@ -520,7 +520,9 @@ mod tests {
     #[ignore = "needs network; queries the real GitHub status page"]
     fn every_component_named_in_the_default_config_still_exists() {
         let client = crate::github::build_client().expect("a client");
-        let watched = crate::config::default_status_components();
+        // Every component GitHub publishes, not just the ones a fresh config watches: the template's
+    // comment names all of them, so a rename breaks the comment as surely as it would the value.
+    let watched = crate::config::all_status_components();
         let report = check(&client, &watched).expect("could not read the live components");
         assert!(
             report.unmatched.is_empty(),
