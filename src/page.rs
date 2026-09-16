@@ -240,17 +240,17 @@ fn age_text(polled: Option<Duration>) -> String {
 
 /// The cards, or whichever empty state applies. Shared by the page and the refresh fragment, so the
 /// two can never render the list differently.
-fn items(entries: Option<&[PrEntry]>, now_unix: u64, fallback_url: &str) -> String {
+fn items(entries: Option<&[PrEntry]>, now_unix: u64) -> String {
     match entries {
-        // No confirmed list. Say that, and offer the superset rather than a dead end.
+        // No confirmed list. Say that, and offer somewhere to go rather than a dead end.
         None => format!(
             "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
              no answer it still stands behind for this bar.</p><p>{}</p></div>\n",
-            github_link(fallback_url, "See GitHub's own search instead")
+            github_link(crate::state::PR_INBOX_URL, "Open your pull requests on GitHub")
         ),
         Some([]) => format!(
             "<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n",
-            github_link(fallback_url, "See GitHub's own search")
+            github_link(crate::state::PR_INBOX_URL, "Open your pull requests on GitHub")
         ),
         Some(list) => newest_first(list).into_iter().map(|e| card(e, now_unix)).collect(),
     }
@@ -265,14 +265,13 @@ pub fn items_json(
     entries: Option<&[PrEntry]>,
     polled: Option<Duration>,
     now_unix: u64,
-    fallback_url: &str,
 ) -> String {
     serde_json::json!({
         // How old the data was *at this instant*, not a rendered age. The page anchors its own clock
         // to it, so the line keeps counting between polls without asking again.
         "age": polled.map(|d| d.as_secs()),
         "count": count_text(entries),
-        "items": items(entries, now_unix, fallback_url),
+        "items": items(entries, now_unix),
     })
     .to_string()
 }
@@ -283,7 +282,6 @@ pub fn axis_page(
     polled: Option<Duration>,
     token: &str,
     now_unix: u64,
-    fallback_url: &str,
     nonce: &str,
 ) -> String {
     let mut h = String::with_capacity(4096);
@@ -313,12 +311,12 @@ pub fn axis_page(
         esc(&age_text(polled))
     ));
     h.push_str("<div class=\"rule\"></div>\n");
-    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(entries, now_unix, fallback_url)));
+    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(entries, now_unix)));
 
     h.push_str(&format!(
         "<footer>Rendered locally by GitHoot from its last poll, and kept current without a \
          reload. · {}</footer>\n",
-        github_link(fallback_url, "the same query on GitHub")
+        github_link(crate::state::PR_INBOX_URL, "Your pull requests on GitHub")
     ));
     h.push_str(&format!(
         "<script nonce=\"{}\">{}</script>\n",
@@ -603,7 +601,7 @@ mod tests {
     }
 
     fn page(entries: Option<&[PrEntry]>) -> String {
-        axis_page(PrAxis::ChangesRequested, entries, Some(Duration::from_secs(47)), "deadbeef", NOW, "https://github.com/pulls?q=x", "cafebabe")
+        axis_page(PrAxis::ChangesRequested, entries, Some(Duration::from_secs(47)), "deadbeef", NOW, "cafebabe")
     }
 
     // ── Escaping: the security surface ────────────────────────────────────────
@@ -693,6 +691,19 @@ mod tests {
 
     /// Without this the first click through to github.com hands GitHub the page's own URL, token and
     /// all, in the `Referer` header.
+    /// The footer used to offer "the same query on GitHub", built from the axis's own search string.
+    /// It was not the same query — two of the three bars narrow their hits client-side, so no search
+    /// page can match them — and the URL did not work either. The inbox is honest and always does.
+    #[test]
+    fn every_outbound_link_goes_to_the_pr_inbox() {
+        for entries in [None, Some(&[][..])] {
+            let html = page(entries);
+            assert!(html.contains(crate::state::PR_INBOX_URL), "got {html}");
+            assert!(!html.contains("github.com/pulls?q="), "no hand-built search URL: {html}");
+            assert!(!html.contains("same query"), "and no claim to be one: {html}");
+        }
+    }
+
     #[test]
     fn every_outbound_link_is_noreferrer() {
         let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
@@ -846,7 +857,7 @@ mod tests {
             (PrAxis::ReadyToMerge, icons::MERGE_DOT_COLOR),
             (PrAxis::ChangesRequested, icons::CHANGES_DOT_COLOR),
         ] {
-            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "https://github.com/pulls", "n");
+            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "n");
             assert!(html.contains(&icons::css_hex(color)), "{axis:?} should wear its own colour");
         }
     }
@@ -859,7 +870,7 @@ mod tests {
     #[test]
     fn the_axis_accent_is_the_only_definition_and_comes_last() {
         assert!(!STYLESHEET.contains("--accent:"), "the sheet must not define the accent");
-        let html = axis_page(PrAxis::ReadyToMerge, Some(&[]), None, "t", NOW, "https://github.com/p", "n");
+        let html = axis_page(PrAxis::ReadyToMerge, Some(&[]), None, "t", NOW, "n");
         let hex = icons::css_hex(icons::MERGE_DOT_COLOR);
         assert_eq!(html.matches("--accent:").count(), 1, "exactly one definition");
         let accent_at = html.find(&format!("--accent:{hex}")).expect("the axis colour");
@@ -870,7 +881,7 @@ mod tests {
     #[test]
     fn every_axis_renders_and_names_only_itself() {
         for axis in PrAxis::ALL {
-            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "https://github.com/pulls", "n");
+            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "n");
             assert!(html.contains(heading(axis)), "{axis:?} should name itself");
             for other in PrAxis::ALL.into_iter().filter(|o| *o != axis) {
                 assert!(!html.contains(heading(other)), "{axis:?} must not name {other:?}");
@@ -894,7 +905,7 @@ mod tests {
     // ── Live refresh ──────────────────────────────────────────────────────────
 
     fn live(entries: Option<&[PrEntry]>) -> String {
-        items_json(entries, Some(Duration::from_secs(47)), NOW, "https://github.com/pulls?q=x")
+        items_json(entries, Some(Duration::from_secs(47)), NOW)
     }
 
     /// The fragment must render the *same* cards the page does, or a refresh would quietly swap the
@@ -937,7 +948,7 @@ mod tests {
     /// A poll that never happened says so with a null rather than a zero age.
     #[test]
     fn an_unpolled_fragment_sends_a_null_age() {
-        let json = items_json(None, None, NOW, "https://github.com/pulls");
+        let json = items_json(None, None, NOW);
         assert!(json.contains(r#""age":null"#), "got {json}");
     }
 

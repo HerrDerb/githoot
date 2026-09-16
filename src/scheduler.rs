@@ -102,10 +102,6 @@ const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:fals
 /// a semantic change and a poll-loop refactor do not land in the same commit.
 const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
 
-/// Sort order for the browser view only. Meaningless to the API, but it is what makes GitHub's own
-/// search page useful to look at when it stands in as a fallback.
-const REVIEW_UI_SORT: &str = "sort:updated-desc";
-
 /// The search query behind `axis`'s dot. `PrAxis` itself doesn't know about queries — issuing
 /// HTTP requests is this module's job, not `state`'s — so the mapping lives here.
 fn pr_query(axis: PrAxis) -> &'static str {
@@ -166,23 +162,6 @@ fn poll_pr(
     }
 }
 
-/// The GitHub search page for `axis`'s query.
-///
-/// Built from the same query the search itself uses, so the page cannot drift from the icon the
-/// way a hand-written URL would the moment a query changes.
-///
-/// It is a *fallback*, never the first choice: for `ReviewRequested` the page and the count agree
-/// exactly, but the other two narrow their hits client-side with rules Search has no qualifier for,
-/// so for them this page is a superset — every open non-draft PR of yours, for both. A page listing
-/// more than the dot beats one missing PRs the dot claims, which is why it is still worth opening
-/// when there is no confirmed list to show.
-pub fn pr_list_url(axis: PrAxis) -> String {
-    format!(
-        "https://github.com/pulls?q={}",
-        percent_encode(&format!("{} {REVIEW_UI_SORT}", pr_query(axis)))
-    )
-}
-
 /// The last pull requests each axis's poll confirmed, indexed by `PrAxis::index`.
 ///
 /// A `static` for the same reason `UPDATE_IN_FLIGHT` is: the writer is the poll thread and the
@@ -224,23 +203,6 @@ pub fn pr_snapshot(
         snapshot.polled_at.map(|at| at.elapsed()),
         snapshot.version,
     )
-}
-
-/// Percent-encodes a query for use in a URL.
-///
-/// Escapes everything outside the RFC 3986 unreserved set — stricter than required, but never
-/// wrong, and it avoids taking a dependency on `url` just for this.
-fn percent_encode(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() * 3);
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(char::from(byte))
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 /// Reason the poll loop was woken early.
@@ -1172,72 +1134,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn percent_encoding_escapes_query_syntax() {
-        assert_eq!(percent_encode("is:pr -label:deps"), "is%3Apr%20-label%3Adeps");
-        assert_eq!(percent_encode("a~b_c.d-e"), "a~b_c.d-e", "unreserved chars pass through");
-        assert_eq!(percent_encode("@me"), "%40me");
-    }
-
-    /// The browser view must show exactly what the dot counts, so the URL has to carry every
-    /// qualifier from the API query — including the bot exclusions.
-    #[test]
-    fn review_url_carries_the_same_filters_as_the_api_query() {
-        let url = pr_list_url(PrAxis::ReviewRequested);
-        assert!(url.starts_with("https://github.com/pulls?q="), "got {url}");
-        for qualifier in [
-            "review-requested%3A%40me",
-            "state%3Aopen",
-            "draft%3Afalse",
-            "archived%3Afalse",
-            "-label%3Adependencies",
-            "-author%3Aapp%2Fdependabot",
-            "-author%3Aapp%2Frenovate",
-            "sort%3Aupdated-desc",
-        ] {
-            assert!(url.contains(qualifier), "{qualifier} missing from {url}");
-        }
-        assert!(!url.contains(' '), "spaces must be encoded");
-    }
-
-    /// The two new PR axes get the same "URL matches the API query" guarantee the review axis
-    /// already had — a dot claiming a count that the linked page doesn't show is the one thing
-    /// this pairing exists to prevent.
-    #[test]
-    fn merge_url_carries_the_same_filters_as_the_api_query() {
-        let url = pr_list_url(PrAxis::ReadyToMerge);
-        assert!(url.starts_with("https://github.com/pulls?q="), "got {url}");
-        for qualifier in [
-            "author%3A%40me",
-            "state%3Aopen",
-            "draft%3Afalse",
-            "archived%3Afalse",
-            "sort%3Aupdated-desc",
-        ] {
-            assert!(url.contains(qualifier), "{qualifier} missing from {url}");
-        }
-        // The fallback page is a superset on purpose; `review:approved` would make it miss the very
-        // PRs the bar exists to show.
-        assert!(!url.contains("review%3A"), "got {url}");
-    }
-
-
-    #[test]
-    fn changes_url_carries_the_same_filters_as_the_api_query() {
-        let url = pr_list_url(PrAxis::ChangesRequested);
-        assert!(url.starts_with("https://github.com/pulls?q="), "got {url}");
-        for qualifier in [
-            "author%3A%40me",
-            "state%3Aopen",
-            "draft%3Afalse",
-            "archived%3Afalse",
-            "sort%3Aupdated-desc",
-        ] {
-            assert!(url.contains(qualifier), "{qualifier} missing from {url}");
-        }
-        // The fallback page has to be a *superset* of what the bar counts, never a subset. Since the
-        // bar also counts merge conflicts, which carry no changes-requested review, this qualifier
-        // would now hide half of them.
-        assert!(!url.contains("review%3A"), "got {url}");
-    }
 }

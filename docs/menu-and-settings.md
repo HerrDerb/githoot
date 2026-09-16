@@ -36,8 +36,8 @@ below). The page shows the exact pull requests the bar counted, with the check s
 verdicts GitHub's list cannot show.
 
 The page says so plainly when a bar has no confirmed list — before the first answer, or after the axis
-has lost track — rather than rendering a zero, and links to GitHub's own search from there. If the local
-listener cannot start at all, the entries fall back to that search page directly.
+has lost track — rather than rendering a zero, and offers GitHub's own pull-request inbox from there.
+If the local listener cannot start at all, the entries open that inbox directly.
 
 
 ---

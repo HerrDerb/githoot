@@ -530,7 +530,9 @@ static SERVER: OnceLock<Option<Server>> = OnceLock::new();
 /// Windows and macOS — and a behaviour that lives in both copies is a behaviour that will differ in
 /// them eventually.
 pub fn open_axis_page(axis: PrAxis) {
-    open_url(url_for(axis).unwrap_or_else(|| scheduler::pr_list_url(axis)));
+    // The PR inbox when there is no listener: GitHub's own search cannot express what two of the
+    // three bars count, and the URL that tried to say otherwise did not work either.
+    open_url(url_for(axis).unwrap_or_else(|| crate::state::PR_INBOX_URL.to_string()));
 }
 
 /// Opens the settings page, or falls back to the settings *file* when there is no listener.
@@ -675,7 +677,6 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 entries.as_deref(),
                 polled,
                 unix_now(),
-                &scheduler::pr_list_url(axis),
             );
             respond_as(
                 &mut stream,
@@ -698,7 +699,6 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 polled,
                 token,
                 unix_now(),
-                &scheduler::pr_list_url(axis),
                 &nonce,
             );
             respond_as(

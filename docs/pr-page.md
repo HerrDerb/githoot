@@ -7,7 +7,10 @@ They used to open GitHub. That worked for one of the three and not the other two
 search URL can express what those bars count** — `review:approved` misses every approval in a
 repository that requires no reviews, and `review:changes_requested` keeps matching a pull request you
 have already handed back (→ [PR status](pr-status.md)). So those two entries opened **one browser tab
-per pull request** instead, and fell back to a search page listing more than the bar claimed.
+per pull request** instead, and fell back to a hand-built search URL that claimed to be "the same
+query" — which it was not, since the bars narrow their hits after the search, and which did not work
+anyway. Every link out now goes to GitHub's own pull-request inbox, which is honest about being a
+different view and is always reachable.
 
 The page shows what the bar counted and what GitHub's list could not: the check rollup, and every
 reviewer's standing verdict.
@@ -122,7 +125,7 @@ client that connects and says nothing cannot wedge the listener.
 ## When it cannot start
 
 If the loopback bind fails — a hardened container, a sandbox, a machine with no loopback — the menu
-entries fall back to what they did before: GitHub's search page for that bar. The failure is logged
+entries open GitHub's own pull-request inbox instead. The failure is logged
 once, with the operating system's own error, and not retried, since nothing that causes it clears
 between two clicks.
 
