@@ -14,7 +14,7 @@ reviewer's standing verdict.
 
 | | |
 |---|---|
-| Address | `http://githoot.localhost:<port>/<token>/<bar>`, and `/settings` |
+| Address | `http://githoot.localhost:<port>/<token>/<bar>`, plus `/items` and `/settings` |
 | Bound | On the first click, never at startup |
 | Port and token | New on every run |
 | Contents | Title, repo, number, author, age, draft, checks, merge conflict, open Copilot comments, per-reviewer verdicts |
@@ -27,9 +27,24 @@ shuffle under you between reloads. A pull request GitHub gave no date sorts last
 **Links open in the same window.** Opening a tab per click is the habit this page exists to get away
 from; the back button is the way back to the list.
 
-**Reloading re-renders.** Each request is answered from the latest poll, so the tab stays useful
-without going back to the tray. The header says how old the data is. The page never refreshes itself:
-a tab you forgot about would re-render for ever, and the "as of" line makes staleness visible instead.
+**It refreshes itself every 30 seconds**, without a reload and without touching GitHub — it re-reads
+what the tray last polled, so a change is on screen within about half a poll cycle. The "as of" line
+says how old the data is either way.
+
+The refresh is deliberately narrow. It fetches `/<token>/<bar>/items`, which returns the age line and
+the list as two separate values, and **only the list that changed is replaced**. Rebuilding the cards
+every 30 seconds would drop hover, focus and any text selection inside them, for a set of rows that
+usually have not moved.
+
+Three things keep a forgotten tab cheap: it pauses while the tab is hidden and catches up the moment
+it is shown, it never reaches GitHub, and it **stops after five consecutive failures** and says
+*GitHoot is not running* — otherwise a tab left open would poll a dead port for as long as it lived.
+
+This is the one place GitHoot serves anything executable. The script is a dozen lines, and the page's
+CSP names it by **nonce** rather than allowing inline script at large: a fresh random value per
+response, so only that exact `<script>` may run and anything injected into the page cannot borrow the
+permission. `connect-src 'self'` is opened alongside it, because `default-src 'none'` would otherwise
+block the fetch. Everything else GitHoot serves still runs nothing at all.
 
 **It never shows a zero it cannot stand behind.** A bar whose poll failed, or that has not answered
 yet, gets a page saying the list is *not known* — not an empty one. The same refusal the tray makes
@@ -89,9 +104,9 @@ Two more things about what leaves the page:
   serialized as `null`, so the page could not tell us it had submitted its own form and every save was
   refused. `same-origin` still sends nothing to another site — the token is exactly as protected —
   while keeping a real `Origin` on a request back to us.
-- **`Content-Security-Policy: default-src 'none'`**. The page runs no script at all. Pull request
-  titles come from whoever opened them, so they are escaped as hostile text; the CSP is the backstop
-  behind that, not the control.
+- **`Content-Security-Policy: default-src 'none'`**, with `script-src 'nonce-…'` on the PR pages and
+  nothing at all elsewhere. Pull request titles come from whoever opened them, so they are escaped as
+  hostile text; the CSP is the backstop behind that, not the control.
 
 Only `GET`, `HEAD` and — on the settings route alone — `POST` are answered. There is no keep-alive, the
 request head is capped at 8 KiB and a form body at 64 KiB, and both have a five-second timeout, so a

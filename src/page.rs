@@ -190,6 +190,78 @@ code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}";
 ///
 /// `now_unix` is injected rather than read from the clock, the same trick `github::classify_with`
 /// uses, so every age string on the page is assertable.
+/// How often the page asks for a fresh list, in milliseconds.
+///
+/// Half the poll loop's own 60s floor, so a change is on screen within about half a cycle of the
+/// poll that found it. Shorter would only re-fetch the same snapshot: this reads what the poll last
+/// stored and never reaches GitHub itself.
+const REFRESH_MS: u32 = 30_000;
+
+/// The one script on the page.
+///
+/// Deliberately small enough to read in full, because it is the only executable thing GitHoot serves
+/// and it runs under a CSP that names it by nonce. It fetches, compares, and swaps — no framework,
+/// no dependencies, no state beyond the last items it saw.
+///
+/// Three things in it are not obvious:
+///
+/// - **The age line and the list are updated separately.** Rebuilding the list every 30 seconds
+///   would drop hover, focus and any text selection inside it, for a set of cards that usually have
+///   not changed. The age changes every tick; the cards rarely do.
+/// - **It stops after a run of failures.** When GitHoot quits, this tab would otherwise poll a dead
+///   port for as long as it stays open.
+/// - **It pauses while the tab is hidden**, and catches up the moment it is shown again, so a
+///   forgotten tab costs nothing.
+const REFRESH_SCRIPT: &str = "(function(){var asof=document.getElementById('asof'),items=document.getElementById('items');var url=location.pathname.replace(/\\/$/,'')+'/items',last=items.innerHTML,fails=0,timer;function tick(){if(document.hidden)return;fetch(url,{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(j){fails=0;asof.textContent=j.asof;if(j.items!==last){last=j.items;items.innerHTML=j.items;}}).catch(function(){if(++fails>=5){clearInterval(timer);asof.textContent='GitHoot is not running';}});}timer=setInterval(tick,REFRESH_MS);document.addEventListener('visibilitychange',function(){if(!document.hidden)tick();});})();";
+
+/// The age line's text, as plain text rather than markup — the script sets it with `textContent`.
+fn summary(entries: Option<&[PrEntry]>, polled: Option<Duration>) -> String {
+    let freshness = match polled {
+        Some(d) => format!("as of {} ago", age_of(d)),
+        None => "not polled yet".to_string(),
+    };
+    match entries {
+        Some(list) => format!("{} pull request(s) · {}", list.len(), freshness),
+        None => freshness,
+    }
+}
+
+/// The cards, or whichever empty state applies. Shared by the page and the refresh fragment, so the
+/// two can never render the list differently.
+fn items(entries: Option<&[PrEntry]>, now_unix: u64, fallback_url: &str) -> String {
+    match entries {
+        // No confirmed list. Say that, and offer the superset rather than a dead end.
+        None => format!(
+            "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
+             no answer it still stands behind for this bar.</p><p>{}</p></div>\n",
+            github_link(fallback_url, "See GitHub's own search instead")
+        ),
+        Some([]) => format!(
+            "<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n",
+            github_link(fallback_url, "See GitHub's own search")
+        ),
+        Some(list) => newest_first(list).into_iter().map(|e| card(e, now_unix)).collect(),
+    }
+}
+
+/// What the refresh fetches: the age line and the list, kept apart so only what changed is replaced.
+///
+/// JSON rather than a bare HTML fragment precisely so the two can travel separately. `serde_json`
+/// does the escaping, which is what makes it safe to build by hand from strings that already contain
+/// markup.
+pub fn items_json(
+    entries: Option<&[PrEntry]>,
+    polled: Option<Duration>,
+    now_unix: u64,
+    fallback_url: &str,
+) -> String {
+    serde_json::json!({
+        "asof": summary(entries, polled),
+        "items": items(entries, now_unix, fallback_url),
+    })
+    .to_string()
+}
+
 pub fn axis_page(
     axis: PrAxis,
     entries: Option<&[PrEntry]>,
@@ -197,6 +269,7 @@ pub fn axis_page(
     token: &str,
     now_unix: u64,
     fallback_url: &str,
+    nonce: &str,
 ) -> String {
     let mut h = String::with_capacity(4096);
     let title = heading(axis);
@@ -219,37 +292,22 @@ pub fn axis_page(
         esc(title)
     ));
 
-    let freshness = match polled {
-        Some(d) => format!("as of {} ago", age_of(d)),
-        None => "not polled yet".to_string(),
-    };
-    h.push_str(&match entries {
-        Some(list) => format!("<p class=\"sub\">{} pull request(s) · {}</p>\n", list.len(), esc(&freshness)),
-        None => format!("<p class=\"sub\">{}</p>\n", esc(&freshness)),
-    });
+    h.push_str(&format!(
+        "<p class=\"sub\" id=\"asof\">{}</p>\n",
+        esc(&summary(entries, polled))
+    ));
     h.push_str("<div class=\"rule\"></div>\n");
-
-    match entries {
-        // No confirmed list. Say that, and offer the superset rather than a dead end.
-        None => h.push_str(&format!(
-            "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
-             no answer it still stands behind for this bar.</p><p>{}</p></div>\n",
-            github_link(fallback_url, "See GitHub's own search instead")
-        )),
-        Some([]) => h.push_str(&format!(
-            "<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n",
-            github_link(fallback_url, "See GitHub's own search")
-        )),
-        Some(list) => {
-            for e in newest_first(list) {
-                h.push_str(&card(e, now_unix));
-            }
-        }
-    }
+    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(entries, now_unix, fallback_url)));
 
     h.push_str(&format!(
-        "<footer>Rendered locally by GitHoot from its last poll. Reload to re-read it. · {}</footer>\n",
+        "<footer>Rendered locally by GitHoot from its last poll, refreshed every {} seconds. · {}</footer>\n",
+        REFRESH_MS / 1000,
         github_link(fallback_url, "the same query on GitHub")
+    ));
+    h.push_str(&format!(
+        "<script nonce=\"{}\">{}</script>\n",
+        esc(nonce),
+        REFRESH_SCRIPT.replace("REFRESH_MS", &REFRESH_MS.to_string())
     ));
     h.push_str("</main>\n</body>\n</html>\n");
     h
@@ -529,7 +587,7 @@ mod tests {
     }
 
     fn page(entries: Option<&[PrEntry]>) -> String {
-        axis_page(PrAxis::ChangesRequested, entries, Some(Duration::from_secs(47)), "deadbeef", NOW, "https://github.com/pulls?q=x")
+        axis_page(PrAxis::ChangesRequested, entries, Some(Duration::from_secs(47)), "deadbeef", NOW, "https://github.com/pulls?q=x", "cafebabe")
     }
 
     // ── Escaping: the security surface ────────────────────────────────────────
@@ -592,12 +650,29 @@ mod tests {
         assert!(!html.contains("href=\"j"));
     }
 
-    /// The page runs nothing. The CSP says so too, but the CSP is the backstop and this is the rule.
+    /// **Exactly one script, and it is ours.**
+    ///
+    /// The page ran nothing at all until the live refresh arrived. It now runs one small script, so
+    /// the rule changed from "none" to "one, named by nonce" — and that is the property worth
+    /// holding: a second `<script>` appearing here would be one nobody wrote on purpose, and the CSP
+    /// would refuse it anyway for want of the nonce.
     #[test]
-    fn no_script_element_is_emitted() {
+    fn exactly_one_script_is_emitted_and_it_carries_the_nonce() {
         for entries in [None, Some(&[][..]), Some(&[entry("https://github.com/o/r/pull/1")][..])] {
-            assert!(!page(entries).contains("<script"));
+            let html = page(entries);
+            assert_eq!(html.matches("<script").count(), 1, "got {html}");
+            assert_eq!(html.matches(r#"<script nonce="cafebabe">"#).count(), 1);
         }
+    }
+
+    /// And hostile content still cannot become one. Escaping is the rule; the nonce is the backstop.
+    #[test]
+    fn a_title_cannot_introduce_a_script() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.title = Some("</script><script>alert(1)</script>".to_string());
+        let html = page(Some(&[e]));
+        assert_eq!(html.matches("<script").count(), 1, "only ours survives");
+        assert!(html.contains("&lt;/script&gt;"));
     }
 
     /// Without this the first click through to github.com hands GitHub the page's own URL, token and
@@ -755,7 +830,7 @@ mod tests {
             (PrAxis::ReadyToMerge, icons::MERGE_DOT_COLOR),
             (PrAxis::ChangesRequested, icons::CHANGES_DOT_COLOR),
         ] {
-            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "https://github.com/pulls");
+            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "https://github.com/pulls", "n");
             assert!(html.contains(&icons::css_hex(color)), "{axis:?} should wear its own colour");
         }
     }
@@ -768,7 +843,7 @@ mod tests {
     #[test]
     fn the_axis_accent_is_the_only_definition_and_comes_last() {
         assert!(!STYLESHEET.contains("--accent:"), "the sheet must not define the accent");
-        let html = axis_page(PrAxis::ReadyToMerge, Some(&[]), None, "t", NOW, "https://github.com/p");
+        let html = axis_page(PrAxis::ReadyToMerge, Some(&[]), None, "t", NOW, "https://github.com/p", "n");
         let hex = icons::css_hex(icons::MERGE_DOT_COLOR);
         assert_eq!(html.matches("--accent:").count(), 1, "exactly one definition");
         let accent_at = html.find(&format!("--accent:{hex}")).expect("the axis colour");
@@ -779,7 +854,7 @@ mod tests {
     #[test]
     fn every_axis_renders_and_names_only_itself() {
         for axis in PrAxis::ALL {
-            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "https://github.com/pulls");
+            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "https://github.com/pulls", "n");
             assert!(html.contains(heading(axis)), "{axis:?} should name itself");
             for other in PrAxis::ALL.into_iter().filter(|o| *o != axis) {
                 assert!(!html.contains(heading(other)), "{axis:?} must not name {other:?}");
@@ -798,6 +873,62 @@ mod tests {
     #[test]
     fn the_logo_is_fetched_from_our_own_token_path() {
         assert!(page(Some(&[])).contains(r#"src="/deadbeef/owl.png""#));
+    }
+
+    // ── Live refresh ──────────────────────────────────────────────────────────
+
+    fn live(entries: Option<&[PrEntry]>) -> String {
+        items_json(entries, Some(Duration::from_secs(47)), NOW, "https://github.com/pulls?q=x")
+    }
+
+    /// The fragment must render the *same* cards the page does, or a refresh would quietly swap the
+    /// list for a second renderer's idea of it. One function, used by both.
+    #[test]
+    fn the_fragment_renders_exactly_what_the_page_does() {
+        let e = entry("https://github.com/o/r/pull/1");
+        let page_html = page(Some(std::slice::from_ref(&e)));
+        let fragment = live(Some(&[e]));
+        let items = fragment
+            .split(r#""items":"#)
+            .nth(1)
+            .expect("an items field")
+            .trim_end_matches('}');
+        // The JSON string is escaped; the card markup still has to be in the page verbatim.
+        let unescaped = items.trim_matches('"').replace("\\\"", "\"").replace("\\n", "\n");
+        assert!(page_html.contains(&unescaped), "fragment:\n{unescaped}\n\npage:\n{page_html}");
+    }
+
+    /// The two halves are separate so a refresh can touch the age line without rebuilding the list —
+    /// replacing the cards every 30 seconds would drop hover, focus and any text selection in them.
+    #[test]
+    fn the_fragment_separates_the_age_line_from_the_items() {
+        let json = live(Some(&[entry("https://github.com/o/r/pull/1")]));
+        assert!(json.contains(r#""asof":"#), "got {json}");
+        assert!(json.contains(r#""items":"#), "got {json}");
+        assert!(json.starts_with('{') && json.ends_with('}'));
+    }
+
+    /// The items must not carry the age, or every tick would look like a change and rebuild the list.
+    #[test]
+    fn the_items_do_not_carry_the_age() {
+        let json = live(Some(&[entry("https://github.com/o/r/pull/1")]));
+        let items = json.split(r#""items":"#).nth(1).expect("items");
+        assert!(!items.contains("as of"), "the age belongs to asof alone: {items}");
+    }
+
+    #[test]
+    fn the_page_wires_up_the_live_region_and_the_script() {
+        let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
+        assert!(html.contains(r#"id="asof""#));
+        assert!(html.contains(r#"id="items""#));
+        assert!(html.contains(r#"nonce="cafebabe""#), "the script must carry its CSP nonce");
+        assert!(html.contains("/items"), "it has to know where to fetch from");
+    }
+
+    /// The settings page has a form and no list, so it gets no refresh loop.
+    #[test]
+    fn the_settings_page_has_no_refresh_script() {
+        assert!(!settings_page(&default_cfg(), "tok", &[]).contains("<script"));
     }
 
     // ── The settings page ─────────────────────────────────────────────────────

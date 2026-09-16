@@ -68,6 +68,8 @@ pub struct Request {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
     Page(PrAxis),
+    /// The refresh fragment behind a page: its age line and its list, as JSON.
+    Items(PrAxis),
     /// The settings form.
     Settings,
     /// Applying a submitted settings form.
@@ -266,11 +268,24 @@ pub fn route_for(
     }
 
     let mut segments = path.strip_prefix('/').unwrap_or_default().split('/');
-    let (Some(given), Some(leaf), None) = (segments.next(), segments.next(), segments.next()) else {
+    let (Some(given), Some(leaf), tail) = (segments.next(), segments.next(), segments.next()) else {
         return Route::NotFound;
     };
+    if segments.next().is_some() {
+        return Route::NotFound;
+    }
     if !constant_time_eq(given, token) {
         return Route::NotFound;
+    }
+
+    // The one three-segment route: a page's own refresh fragment, behind the same token and the same
+    // `Host` check as the page it belongs to.
+    if let Some(tail) = tail {
+        return match (PrAxis::from_slug(leaf), tail, method) {
+            (Some(_), "items", Method::Post) => Route::MethodNotAllowed,
+            (Some(axis), "items", _) => Route::Items(axis),
+            _ => Route::NotFound,
+        };
     }
 
     match (leaf, method) {
@@ -336,7 +351,13 @@ impl Referrer {
     }
 }
 
-pub fn response_head(status: u16, content_type: &str, len: usize, referrer: Referrer) -> String {
+pub fn response_head(
+    status: u16,
+    content_type: &str,
+    len: usize,
+    referrer: Referrer,
+    script_nonce: Option<&str>,
+) -> String {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -354,9 +375,16 @@ pub fn response_head(status: u16, content_type: &str, len: usize, referrer: Refe
          X-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: {}\r\n\
          Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
-         form-action 'self'; base-uri 'none'\r\n\
+         connect-src 'self'; form-action 'self'; base-uri 'none'{}\r\n\
          \r\n",
-        referrer.header_value()
+        referrer.header_value(),
+        // Named, not blanket-allowed. `'unsafe-inline'` would let anything injected into the page run
+        // too; a nonce permits exactly the one `<script>` this response carries. Omitted entirely
+        // where there is no script, so `default-src 'none'` keeps covering it.
+        match script_nonce {
+            Some(nonce) => format!("; script-src 'nonce-{nonce}'"),
+            None => String::new(),
+        }
     )
 }
 
@@ -563,6 +591,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 html.as_bytes(),
                 request.body_wanted,
                 Referrer::SameOrigin,
+                None,
             )
         }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
@@ -572,8 +601,22 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
         Route::Owl => {
             respond(&mut stream, 200, "image/png", icons::TRAY_ICON, request.body_wanted)
         }
+        Route::Items(axis) => {
+            let (entries, polled) = scheduler::pr_snapshot(axis);
+            let json = page::items_json(
+                entries.as_deref(),
+                polled,
+                unix_now(),
+                &scheduler::pr_list_url(axis),
+            );
+            respond(&mut stream, 200, "application/json; charset=utf-8", json.as_bytes(), request.body_wanted)
+        }
         Route::Page(axis) => {
             let (entries, polled) = scheduler::pr_snapshot(axis);
+            // A fresh nonce per response, which is what a nonce is for: it names *this* page's script
+            // in *this* response's CSP. Failing to get one drops the script rather than widening the
+            // policy — the page still works, it just stops refreshing itself.
+            let nonce = new_token().unwrap_or_default();
             let html = page::axis_page(
                 axis,
                 entries.as_deref(),
@@ -581,8 +624,17 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 token,
                 unix_now(),
                 &scheduler::pr_list_url(axis),
+                &nonce,
             );
-            respond(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted)
+            respond_as(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                html.as_bytes(),
+                request.body_wanted,
+                Referrer::None,
+                (!nonce.is_empty()).then_some(nonce.as_str()),
+            )
         }
         Route::Forbidden => {
             respond(&mut stream, 403, "text/plain; charset=utf-8", b"Forbidden", request.body_wanted)
@@ -638,7 +690,7 @@ fn redirect(stream: &mut TcpStream, location: &str) {
 }
 
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8], with_body: bool) {
-    respond_as(stream, status, content_type, body, with_body, Referrer::None)
+    respond_as(stream, status, content_type, body, with_body, Referrer::None, None)
 }
 
 fn respond_as(
@@ -648,8 +700,9 @@ fn respond_as(
     body: &[u8],
     with_body: bool,
     referrer: Referrer,
+    script_nonce: Option<&str>,
 ) {
-    let head = response_head(status, content_type, body.len(), referrer);
+    let head = response_head(status, content_type, body.len(), referrer, script_nonce);
     let _ = stream.write_all(head.as_bytes());
     if with_body {
         let _ = stream.write_all(body);
@@ -1045,7 +1098,7 @@ mod tests {
     #[test]
     fn every_response_closes_the_connection_and_forbids_caching() {
         for status in [200, 403, 404, 405, 431] {
-            let h = response_head(status, "text/html; charset=utf-8", 3, Referrer::None);
+            let h = response_head(status, "text/html; charset=utf-8", 3, Referrer::None, None);
             assert!(h.starts_with(&format!("HTTP/1.1 {status} ")), "{h}");
             assert!(h.contains("Connection: close"), "{h}");
             assert!(h.contains("Cache-Control: no-store"), "{h}");
@@ -1059,7 +1112,7 @@ mod tests {
     #[test]
     fn no_cors_header_is_ever_sent() {
         for status in [200, 403, 404, 405, 431] {
-            let h = response_head(status, "text/html", 0, Referrer::None).to_lowercase();
+            let h = response_head(status, "text/html", 0, Referrer::None, None).to_lowercase();
             assert!(!h.contains("access-control-"), "{h}");
         }
     }
@@ -1076,11 +1129,11 @@ mod tests {
     /// really do link out to github.com, keep `no-referrer`.
     #[test]
     fn the_settings_page_keeps_an_origin_the_browser_will_send() {
-        let settings = response_head(200, "text/html", 0, Referrer::SameOrigin);
+        let settings = response_head(200, "text/html", 0, Referrer::SameOrigin, None);
         assert!(settings.contains("Referrer-Policy: same-origin"), "{settings}");
         assert!(!settings.contains("no-referrer"), "no-referrer nulls the Origin on a POST");
 
-        let pr_page = response_head(200, "text/html", 0, Referrer::None);
+        let pr_page = response_head(200, "text/html", 0, Referrer::None, None);
         assert!(pr_page.contains("Referrer-Policy: no-referrer"), "{pr_page}");
     }
 
@@ -1094,9 +1147,53 @@ mod tests {
         assert!(!html.contains("no-referrer"));
     }
 
+    /// The refresh fragment, behind the same token and `Host` check as the page it belongs to.
+    #[test]
+    fn a_page_can_fetch_its_own_items() {
+        for axis in PrAxis::ALL {
+            let path = format!("/{TOKEN}/{}/items", axis.slug());
+            assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::Items(axis));
+        }
+    }
+
+    #[test]
+    fn the_items_route_is_a_read_only() {
+        assert_eq!(route_write(&format!("/{TOKEN}/approved/items"), Method::Post), Route::MethodNotAllowed);
+    }
+
+    /// Three segments is the *only* extra shape allowed, and only for `items`. A fourth, or any other
+    /// tail, is not a path this server has.
+    #[test]
+    fn no_other_deep_path_resolves() {
+        for path in [
+            format!("/{TOKEN}/approved/nope"),
+            format!("/{TOKEN}/approved/items/more"),
+            format!("/{TOKEN}/settings/items"),
+            format!("/{TOKEN}/owl.png/items"),
+        ] {
+            assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound, "{path}");
+        }
+    }
+
+    /// The script is named by nonce, not allowed by `'unsafe-inline'`: only the exact `<script>` this
+    /// response carries may run, and anything injected into the page cannot borrow the permission.
+    #[test]
+    fn a_script_is_allowed_only_by_its_nonce() {
+        let with = response_head(200, "text/html", 0, Referrer::None, Some("cafebabe"));
+        assert!(with.contains("script-src 'nonce-cafebabe'"), "{with}");
+        assert!(!with.contains("unsafe-inline'; script"), "never blanket-inline for scripts");
+        // The refresh has to be able to fetch, and `default-src 'none'` would block it.
+        assert!(with.contains("connect-src 'self'"), "{with}");
+
+        // Everything else still runs nothing at all.
+        let without = response_head(200, "application/json", 0, Referrer::None, None);
+        assert!(!without.contains("script-src"), "{without}");
+        assert!(without.contains("default-src 'none'"));
+    }
+
     #[test]
     fn the_csp_forbids_script_and_allows_only_our_own_images() {
-        let h = response_head(200, "text/html", 0, Referrer::None);
+        let h = response_head(200, "text/html", 0, Referrer::None, None);
         assert!(h.contains("default-src 'none'"));
         assert!(h.contains("img-src 'self'"));
         // Opened for the settings form, and no wider: `'self'` is this origin, so a form on the page
@@ -1224,6 +1321,7 @@ mod tests {
         assert_eq!(PrAxis::from_slug("nope"), None);
     }
 }
+
 
 
 
