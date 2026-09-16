@@ -590,7 +590,6 @@ mod tests {
             number: Some(2204),
             author: Some("octocat".to_string()),
             updated_at: Some("2026-09-15T09:12:33Z".to_string()),
-            activity: None,
             is_draft: false,
             conflicting: false,
             copilot_unresolved: 0,

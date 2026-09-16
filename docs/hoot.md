@@ -4,9 +4,8 @@ Whenever a **pull request you have not been told about** turns up, the app plays
 the three axes hoots for itself: reviews requested of you, your PRs that were approved, your PRs needing
 work.
 
-A PR is news when it is one the axis has not seen, when it comes back with something new on it, or when
-a merge conflict has appeared on it. Several at once is still one hoot, not one each: overlapping plays
-of the same clip are a noise rather than a notification.
+A PR is news when its id is one the axis has not seen before. Several at once is still one hoot, not
+one each: overlapping plays of the same clip are a noise rather than a notification.
 
 Work *leaving* is silent. That is what you wanted, and it needs no sound.
 
@@ -26,19 +25,20 @@ request you had already been told about. Annoying, and worse, confusing: nothing
 Counting also missed news in the other direction. One PR closing and another arriving in the same cycle
 leaves the count flat, and the count rule said nothing at all.
 
-So each axis keeps a short ledger of the pull requests it has already hooted for, and a returning one is
-judged on whether it actually **changed**:
+So each axis keeps a short ledger of the pull-request ids it has already hooted for, and a hit is news
+exactly when its id is not in it. **Nothing else about a pull request makes a sound.** A comment, a push,
+a new review, a merge conflict appearing or a Copilot thread opening on a pull request that is already
+on the list changes nothing you can see on the tray, and it stays silent. The first version of this
+ledger did hoot for those, and the result was a tray that sounded several times an hour with no visible
+change; that was 2.0.0 to 2.0.2.
 
-- **`activity`** — the later of the PR's own `updatedAt` and its newest review's `submittedAt`. GitHub
-  does not document which events bump `updatedAt`, and a review carries only `submittedAt` with no
-  update stamp of its own, so taking the later of the two settles it by construction: if a submitted
-  review does not move one, it moves the other.
-- **strictly newer, not merely different.** An index that hides a pull request can also serve a stale
-  copy of it, and treating an *older* timestamp as a change would bring the false hoot straight back.
-  A timestamp only moves forward, so the comparison does too.
-- **a conflict appearing** counts even though no timestamp moved. A conflict arriving because somebody
-  else merged to main touches nothing on your pull request, so nothing is dated — but it is still work
-  landing on you.
+A pull request that lands *on* a list because of one of those events — a conflict that puts it on the
+amber bar — is a new id there, and hoots for that reason alone. And one pull request leaving while
+another arrives in the same poll, which leaves the count flat, still hoots for the new arrival.
+
+A known id coming back after an absence is not news, whatever happened to it while it was away. That
+is what silences the index blip, and it is a deliberate trade: a review re-requested on a pull request
+you have already been told about will not sound again.
 
 The ledger holds 200 pull requests per axis and drops the least recently seen. That bound is deliberately
 far out of reach of a blip: an axis shows at most 100 at once, so a PR must sit absent while a further

@@ -370,24 +370,21 @@ impl PrAxis {
 /// churn past before it is dropped. That is far more real activity than the eventual-consistency blip
 /// this ledger exists to absorb.
 ///
-/// Bounded by size rather than by age on purpose. Eviction is pure housekeeping here — a returning
-/// pull request is judged by its `activity`, however long it has been gone — and it is the only thing
-/// that can bring the false hoot back, since a key forgotten while the index was hiding it would
-/// sound on its return. So the bound is set where it cannot plausibly be reached by a blip, and
+/// Bounded by size rather than by age on purpose. Eviction is the only thing that can bring the false
+/// hoot back: a key forgotten while the index was hiding its pull request would read as new on its
+/// return and sound. Nothing else needs the key to age out — a returning id is simply not news. So the bound is set where it cannot plausibly be reached by a blip, and
 /// entries are dropped least-recently-present first.
 const LEDGER_CAP: usize = 200;
 
-/// What the ledger remembers about one pull request.
+/// What the ledger remembers about one pull request: that it was here, and when it was last here.
+///
+/// Nothing about its *state*. It used to carry the pull request's `activity` timestamp, its conflict
+/// flag and its open Copilot count, and hoot when any of them moved — which meant a comment, a label
+/// or a push on a pull request already on the list sounded the tray with nothing visible changing.
+/// The rule is a new id appearing, so an id is all that is kept.
 #[derive(Clone, Debug)]
 struct Seen {
-    /// `PrEntry::activity` as of the last time this pull request was counted.
-    activity: Option<String>,
-    conflicting: bool,
-    /// Carried for the same reason `conflicting` is: Copilot's review is a `COMMENTED` one, which
-    /// `latestOpinionatedReviews` drops, so a fresh batch of its comments may move no timestamp this
-    /// ledger can see.
-    copilot_unresolved: u32,
-    /// Which poll last saw it, for eviction order.
+    /// Which poll last saw it, for eviction order and for spotting a blip.
     last_seen: u64,
 }
 
@@ -431,36 +428,29 @@ struct Track {
 impl Track {
     /// Files this poll's pull requests and answers whether any of them is news.
     ///
-    /// News is a key the ledger has never seen, an `activity` strictly newer than the one recorded,
-    /// or a conflict that was not there before.
+    /// News is **an id this axis has not seen before**. That is the whole rule, and it is deliberately
+    /// blind to everything else about a pull request: a comment, a push, a new review, a conflict
+    /// appearing or a Copilot thread opening on a pull request *already on the list* changes nothing
+    /// the user can see on the tray, so it makes no sound. A pull request that appears on the list
+    /// *because* of one of those — a conflict that puts it on the amber bar — is a new id here, and
+    /// hoots for that reason alone.
     ///
-    /// **Strictly newer, not merely different.** The index that hides a pull request can also serve a
-    /// stale copy of it, and `!=` would read that older timestamp as a change and sound — the bug
-    /// this exists to fix, back by another door. A timestamp only moves forward, so the test does too.
+    /// It also answers the case a count could never see: one pull request leaving and another arriving
+    /// in the same poll leaves the number flat, and the arriving id is still new.
     ///
-    /// `conflicting` and `copilot_unresolved` are carried beside it because both can change without
-    /// moving any timestamp this can see: a conflict arriving from somebody else's merge touches
-    /// nothing on the pull request, and Copilot's review is a `COMMENTED` one, which
-    /// `latestOpinionatedReviews` drops before `activity` ever sees it. Both are work landing.
+    /// A known id returning after an absence is *not* news, whatever happened to it while it was away.
+    /// That is what silences GitHub's search index dropping and re-serving the same pull request, and
+    /// it is a deliberate trade: a review re-requested on a pull request you have already been told
+    /// about will not sound again.
     fn note(&mut self, prs: &[PrEntry]) -> bool {
         self.polls = self.polls.saturating_add(1);
         let mut news = false;
         for pr in prs {
-            let entry = Seen {
-                activity: pr.activity.clone(),
-                conflicting: pr.conflicting,
-                copilot_unresolved: pr.copilot_unresolved,
-                last_seen: self.polls,
-            };
+            let entry = Seen { last_seen: self.polls };
             match self.seen.get(pr.key()) {
                 None => news = true,
                 Some(before) => {
-                    if pr.activity > before.activity
-                        || (pr.conflicting && !before.conflicting)
-                        || pr.copilot_unresolved > before.copilot_unresolved
-                    {
-                        news = true;
-                    } else if before.last_seen < self.polls - 1 {
+                    if before.last_seen < self.polls - 1 {
                         // The blip, caught in the act. Logged because "GitHub sometimes omits a PR"
                         // was an observation before it was a fix, and this is the line that says how
                         // often it really happens — and whether it is the index or our own 100-hit
@@ -825,12 +815,12 @@ impl PollState {
     ///
     /// ## Which transitions count
     ///
-    /// **A pull request the axis has not already told you about** — see `Track::note`. A key it has
-    /// never seen, one whose `activity` is strictly newer than the one on file, or one that has grown
-    /// a merge conflict. Three landing at once is three pieces of news and one sound.
+    /// **A pull-request id the axis has not seen before** — see `Track::note`, and nothing else: a
+    /// pull request already on the list can be commented on, pushed to, conflicted or reviewed and it
+    /// makes no sound, because nothing on the tray changed. Three new ids landing at once is three
+    /// pieces of news and one sound.
     ///
-    /// The other direction is silent: a pull request leaving is work leaving, and `NotModified`
-    /// cannot be news by construction.
+    /// The other direction is silent: a pull request leaving is work leaving.
     ///
     /// Everything the old count rule got right falls out of the ledger for free:
     ///
@@ -2071,10 +2061,9 @@ mod tests {
     // ─── The hoot ledger ──────────────────────────────────────────────────────
 
     /// One pull request, with the two things the ledger compares.
-    fn pr(key: &str, activity: &str, conflicting: bool) -> PrEntry {
+    fn pr(key: &str, conflicting: bool) -> PrEntry {
         let mut e = PrEntry::stub(&format!("https://github.com/o/r/pull/{key}"));
         e.id = Some(key.to_string());
-        e.activity = Some(activity.to_string());
         e.conflicting = conflicting;
         e
     }
@@ -2101,9 +2090,9 @@ mod tests {
     #[test]
     fn a_pr_that_vanishes_and_returns_unchanged_does_not_hoot() {
         let (a, b, c) = (
-            pr("a", "2026-09-01T00:00:00Z", false),
-            pr("b", "2026-09-01T00:00:00Z", false),
-            pr("c", "2026-09-01T00:00:00Z", false),
+            pr("a", false),
+            pr("b", false),
+            pr("c", false),
         );
         let mut state = ledger_state();
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[a.clone(), b.clone(), c.clone()]));
@@ -2116,72 +2105,82 @@ mod tests {
         assert!(!hooted(&mut state), "the same PR in the same state is not new");
     }
 
+    /// **The reported bug: hoots with no visible change.** A pull request already on the list gets a
+    /// comment, a label, a push — anything that moves its `updatedAt` — and the ledger called that
+    /// news. The count did not change, the list did not change, the tray did not flicker, and it
+    /// hooted. The rule is a *new id appearing*, and this id was already here.
+    #[test]
+    fn activity_on_a_pull_request_already_listed_does_not_hoot() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        assert!(hooted(&mut state), "the first sighting is news");
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        assert!(!hooted(&mut state), "still the same pull request, however much it is discussed");
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        assert!(!hooted(&mut state));
+    }
+
+    /// The case the count rule could never see: one leaves and one arrives in the same answer. The
+    /// count is flat; the *id* is new; that hoots.
+    #[test]
+    fn a_swap_that_leaves_the_count_flat_hoots_for_the_new_id() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        let _ = hooted(&mut state);
+
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("b", false)]));
+        assert!(hooted(&mut state), "b has never been seen on this axis");
+    }
+
     /// The thing the ledger must not break.
     #[test]
     fn a_genuinely_new_pr_still_hoots() {
-        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let a = pr("a", false);
         let mut state = ledger_state();
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
         assert!(hooted(&mut state));
 
         state.apply_pr(
             PrAxis::ReviewRequested,
-            fresh_prs(&[a, pr("b", "2026-09-02T00:00:00Z", false)]),
+            fresh_prs(&[a, pr("b", false)]),
         );
         assert!(hooted(&mut state), "a key never seen before is news");
     }
 
-    /// A pull request coming back *changed* is news. Reviewed, pushed over, re-requested: something
-    /// happened, and `activity` is the later of the PR's own stamp and its newest review's.
+    /// A known id coming back is not news, whatever happened to it meanwhile. This is the trade the
+    /// rule makes on purpose: it is what silences a blip, and it costs the re-requested-review case.
     #[test]
-    fn a_returning_pr_with_newer_activity_hoots() {
+    fn a_known_pr_returning_does_not_hoot() {
         let mut state = ledger_state();
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", false)]));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
         assert!(hooted(&mut state));
-
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[]));
         assert!(!hooted(&mut state));
-
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-04T00:00:00Z", false)]));
-        assert!(hooted(&mut state), "it came back with something new on it");
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        assert!(!hooted(&mut state), "same id, already told about it");
     }
 
-    /// **Strictly newer, not merely different.** The index that drops a pull request can also serve a
-    /// stale copy of it, and an equality test would read that older stamp as a change and hoot — the
-    /// very bug, back again. A timestamp only goes forward, so the comparison should too.
+    /// A conflict appearing on a listed pull request changes nothing visible on the tray — same
+    /// count, same entry — so it makes no sound. One that puts a pull request *onto* the amber list
+    /// is a new id there, and hoots as such (see `a_genuinely_new_pr_still_hoots`).
     #[test]
-    fn a_stale_older_timestamp_does_not_hoot() {
+    fn a_conflict_appearing_on_a_listed_pr_does_not_hoot() {
         let mut state = ledger_state();
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-08T00:00:00Z", false)]));
-        assert!(hooted(&mut state));
-
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", "2026-09-02T00:00:00Z", false)]));
-        assert!(!hooted(&mut state), "the index went backwards; that is not news");
-    }
-
-    /// A conflict arriving because somebody else merged to main touches nothing on your pull request,
-    /// so no timestamp anywhere moves. It is still work landing on you.
-    #[test]
-    fn a_conflict_appearing_hoots_even_though_no_timestamp_moved() {
-        let mut state = ledger_state();
-        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", false)]));
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", false)]));
         let _ = state.take_pr_arrivals();
-
-        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", true)]));
-        assert!(
-            state.take_pr_arrivals()[PrAxis::ChangesRequested.index()],
-            "the conflict is new even though nothing was done to the PR"
-        );
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", true)]));
+        assert!(!state.take_pr_arrivals()[PrAxis::ChangesRequested.index()]);
     }
 
-    /// And the other way is not news: a conflict you resolved is work leaving.
+    /// And the other way is not news either: a conflict you resolved is work leaving.
     #[test]
     fn a_conflict_clearing_is_not_news() {
         let mut state = ledger_state();
-        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", true)]));
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", true)]));
         let _ = state.take_pr_arrivals();
 
-        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", "2026-09-01T00:00:00Z", false)]));
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr("a", false)]));
         assert!(!state.take_pr_arrivals()[PrAxis::ChangesRequested.index()]);
     }
 
@@ -2190,7 +2189,7 @@ mod tests {
     /// which never saw the failures at all.
     #[test]
     fn recovering_from_failures_on_the_same_prs_is_silent() {
-        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let a = pr("a", false);
         let mut state = ledger_state();
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
         assert!(hooted(&mut state));
@@ -2214,7 +2213,7 @@ mod tests {
     /// The ledger itself is left untouched, so it still recognises the pull request afterwards.
     #[test]
     fn an_unreadable_list_falls_back_to_the_count_and_keeps_the_ledger() {
-        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let a = pr("a", false);
         let mut state = ledger_state();
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
         assert!(hooted(&mut state));
@@ -2231,7 +2230,7 @@ mod tests {
     #[test]
     fn a_first_answer_on_a_busy_queue_hoots_once() {
         let mut state = ledger_state();
-        let prs = [pr("a", "2026-09-01T00:00:00Z", false), pr("b", "2026-09-01T00:00:00Z", false)];
+        let prs = [pr("a", false), pr("b", false)];
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&prs));
         assert!(hooted(&mut state));
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&prs));
@@ -2244,7 +2243,7 @@ mod tests {
     /// other pull requests churn past before it is dropped.
     #[test]
     fn a_key_survives_far_more_absence_than_any_index_blip() {
-        let a = pr("a", "2026-09-01T00:00:00Z", false);
+        let a = pr("a", false);
         let mut state = ledger_state();
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(std::slice::from_ref(&a)));
         assert!(hooted(&mut state));
@@ -2252,7 +2251,7 @@ mod tests {
         for i in 0..20 {
             state.apply_pr(
                 PrAxis::ReviewRequested,
-                fresh_prs(&[pr(&format!("x{i}"), "2026-09-01T00:00:00Z", false)]),
+                fresh_prs(&[pr(&format!("x{i}"), false)]),
             );
             let _ = state.take_pr_arrivals();
         }
@@ -2268,7 +2267,7 @@ mod tests {
         for i in 0..(LEDGER_CAP * 2) {
             state.apply_pr(
                 PrAxis::ReviewRequested,
-                fresh_prs(&[pr(&format!("x{i}"), "2026-09-01T00:00:00Z", false)]),
+                fresh_prs(&[pr(&format!("x{i}"), false)]),
             );
             let _ = state.take_pr_arrivals();
         }
