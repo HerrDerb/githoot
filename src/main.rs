@@ -1365,7 +1365,7 @@ fn main() {
                 // makes it worth keeping when the three that do need one are hidden.
                 (
                     &self.pr_inbox_item,
-                    state::shows_pr_inbox([wanted[1], wanted[2], wanted[3]], needs_auth),
+                    state::shows_pr_inbox(wanted, needs_auth),
                     "pr-inbox",
                 ),
                 // Unconditional, all three. Settings was missing from this list until now, which

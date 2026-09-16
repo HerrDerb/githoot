@@ -90,6 +90,24 @@ open githoot-tray.app
 The icon then appears in the menu bar with no Dock icon. It keeps its colour rather than using a macOS
 template image, which is drawn monochrome and would erase every bar.
 
+## Before you tag
+
+A published release cannot be re-cut, so the tag only ever goes onto a commit CI has already passed
+on all three platforms. Two checks are worth running before the push that triggers it, because both
+catch things a plain `cargo test` on Linux cannot:
+
+```
+cargo build --target x86_64-pc-windows-msvc --bin githoot-tray
+```
+
+**`cargo build`, not `cargo check`.** Roughly a third of this app is behind `#[cfg(windows)]` or
+`#[cfg(macos)]`, so a Linux build compiles none of it — but `check` does not run codegen either, and
+`unconditional_panic` (an out-of-bounds index the compiler can prove) is a *codegen* lint. It will
+report the error and then fail on the missing `link.exe`, which is expected and harmless: the
+compile errors come first. Everything Windows-specific except linking is covered.
+
+macOS has no equivalent here, so its `#[cfg]` arms are only ever proved by CI.
+
 ## Immutability
 
 Published releases are frozen: assets and the Git tag cannot be changed or deleted, and GitHub generates a
