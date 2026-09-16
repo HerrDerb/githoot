@@ -58,6 +58,8 @@ pub struct Request {
     pub origin: Option<String>,
     /// Everything after `?`, which only the settings page reads — see `restart_names`.
     pub query: Option<String>,
+    /// The version of the items payload the client already holds, if any.
+    pub if_none_match: Option<String>,
     /// How many body bytes still have to be read. `None` for a request with no body.
     pub content_length: Option<usize>,
     /// `HEAD` wants the headers and no body.
@@ -138,6 +140,7 @@ pub fn parse_request(head: &str) -> Result<Request, u16> {
         query,
         host: header("host"),
         origin: header("origin"),
+        if_none_match: header("if-none-match"),
         content_length,
         body_wanted,
     })
@@ -334,9 +337,10 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 /// keeping a real `Origin` on a request back to us. It is safe by construction rather than by luck:
 /// if an outbound link is ever added to the settings page, the policy still withholds the referrer
 /// from it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Referrer {
-    /// Nothing, ever. For pages that link out to github.com.
+    /// Nothing, ever. For pages that link out to github.com, and the safe default everywhere else.
+    #[default]
     None,
     /// Only to ourselves. For pages that submit a form back to us.
     SameOrigin,
@@ -351,13 +355,62 @@ impl Referrer {
     }
 }
 
-pub fn response_head(
-    status: u16,
-    content_type: &str,
-    len: usize,
-    referrer: Referrer,
-    script_nonce: Option<&str>,
-) -> String {
+/// Whether `given` is the client's way of saying it already holds version `version`.
+///
+/// Lenient about quoting: a browser echoes the tag back verbatim, but a hand-rolled client may not
+/// quote it, and a proxy may weaken it to `W/"n"`. All three mean the same version, and refusing the
+/// last two would only cost a redundant body.
+pub fn tag_matches(given: Option<&str>, version: u64) -> bool {
+    let Some(given) = given else { return false };
+    let bare = given.trim().trim_start_matches("W/").trim_matches('"');
+    !bare.is_empty() && bare == version.to_string()
+}
+
+/// The answer when the client's copy is already current.
+///
+/// **No `Content-Length`.** A `304` carries no body by definition, and a client that believed a
+/// length here would sit waiting for bytes that never arrive. The `ETag` is repeated so the client
+/// can keep using the one it has.
+pub fn not_modified_head(version: u64) -> String {
+    format!(
+        "HTTP/1.1 304 Not Modified\r\n\
+         ETag: \"{version}\"\r\n\
+         Connection: close\r\n\
+         Cache-Control: no-store\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         \r\n"
+    )
+}
+
+/// The parts of a response head that vary between routes.
+///
+/// A struct rather than three more parameters: `response_head` was up to eight, which is the point
+/// at which a call site stops saying which `None` means what.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Head<'a> {
+    pub referrer: Referrer,
+    /// Names the one `<script>` this response carries, if it carries one.
+    pub script_nonce: Option<&'a str>,
+    /// The snapshot version this body renders, for the conditional request next time.
+    pub etag: Option<u64>,
+}
+
+impl<'a> Head<'a> {
+    pub fn same_origin() -> Self {
+        Head { referrer: Referrer::SameOrigin, ..Head::default() }
+    }
+
+    pub fn with_nonce(nonce: &'a str) -> Self {
+        Head { script_nonce: Some(nonce), ..Head::default() }
+    }
+
+    pub fn tagged(version: u64) -> Self {
+        Head { etag: Some(version), ..Head::default() }
+    }
+}
+
+pub fn response_head(status: u16, content_type: &str, len: usize, head: Head) -> String {
+    let Head { referrer, script_nonce, etag } = head;
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -370,13 +423,19 @@ pub fn response_head(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {len}\r\n\
-         Connection: close\r\n\
+         {}Connection: close\r\n\
          Cache-Control: no-store\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: {}\r\n\
          Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
          connect-src 'self'; form-action 'self'; base-uri 'none'{}\r\n\
          \r\n",
+        // No leading whitespace: a header line that starts with a space is an obs-fold continuation
+        // of the one before it, not a header of its own.
+        match etag {
+            Some(version) => format!("ETag: \"{version}\"\r\n"),
+            None => String::new(),
+        },
         referrer.header_value(),
         // Named, not blanket-allowed. `'unsafe-inline'` would let anything injected into the page run
         // too; a nonce permits exactly the one `<script>` this response carries. Omitted entirely
@@ -590,8 +649,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 "text/html; charset=utf-8",
                 html.as_bytes(),
                 request.body_wanted,
-                Referrer::SameOrigin,
-                None,
+                Head::same_origin(),
             )
         }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
@@ -602,17 +660,34 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             respond(&mut stream, 200, "image/png", icons::TRAY_ICON, request.body_wanted)
         }
         Route::Items(axis) => {
-            let (entries, polled) = scheduler::pr_snapshot(axis);
+            let (entries, polled, version) = scheduler::pr_snapshot(axis);
+            // The client already holds this poll's answer, so there is nothing to send. Its age line
+            // keeps ticking on its own — see `page::REFRESH_SCRIPT` for why that is what makes a
+            // genuine `304` correct here rather than a lie about freshness.
+            if tag_matches(request.if_none_match.as_deref(), version) {
+                let head = not_modified_head(version);
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return;
+            }
             let json = page::items_json(
                 entries.as_deref(),
                 polled,
                 unix_now(),
                 &scheduler::pr_list_url(axis),
             );
-            respond(&mut stream, 200, "application/json; charset=utf-8", json.as_bytes(), request.body_wanted)
+            respond_as(
+                &mut stream,
+                200,
+                "application/json; charset=utf-8",
+                json.as_bytes(),
+                request.body_wanted,
+                Head::tagged(version),
+            )
         }
         Route::Page(axis) => {
-            let (entries, polled) = scheduler::pr_snapshot(axis);
+            let (entries, polled, _) = scheduler::pr_snapshot(axis);
             // A fresh nonce per response, which is what a nonce is for: it names *this* page's script
             // in *this* response's CSP. Failing to get one drops the script rather than widening the
             // policy — the page still works, it just stops refreshing itself.
@@ -632,8 +707,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 "text/html; charset=utf-8",
                 html.as_bytes(),
                 request.body_wanted,
-                Referrer::None,
-                (!nonce.is_empty()).then_some(nonce.as_str()),
+                if nonce.is_empty() { Head::default() } else { Head::with_nonce(&nonce) },
             )
         }
         Route::Forbidden => {
@@ -690,7 +764,7 @@ fn redirect(stream: &mut TcpStream, location: &str) {
 }
 
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8], with_body: bool) {
-    respond_as(stream, status, content_type, body, with_body, Referrer::None, None)
+    respond_as(stream, status, content_type, body, with_body, Head::default())
 }
 
 fn respond_as(
@@ -699,10 +773,9 @@ fn respond_as(
     content_type: &str,
     body: &[u8],
     with_body: bool,
-    referrer: Referrer,
-    script_nonce: Option<&str>,
+    head: Head,
 ) {
-    let head = response_head(status, content_type, body.len(), referrer, script_nonce);
+    let head = response_head(status, content_type, body.len(), head);
     let _ = stream.write_all(head.as_bytes());
     if with_body {
         let _ = stream.write_all(body);
@@ -1098,7 +1171,7 @@ mod tests {
     #[test]
     fn every_response_closes_the_connection_and_forbids_caching() {
         for status in [200, 403, 404, 405, 431] {
-            let h = response_head(status, "text/html; charset=utf-8", 3, Referrer::None, None);
+            let h = response_head(status, "text/html; charset=utf-8", 3, Head::default());
             assert!(h.starts_with(&format!("HTTP/1.1 {status} ")), "{h}");
             assert!(h.contains("Connection: close"), "{h}");
             assert!(h.contains("Cache-Control: no-store"), "{h}");
@@ -1112,7 +1185,7 @@ mod tests {
     #[test]
     fn no_cors_header_is_ever_sent() {
         for status in [200, 403, 404, 405, 431] {
-            let h = response_head(status, "text/html", 0, Referrer::None, None).to_lowercase();
+            let h = response_head(status, "text/html", 0, Head::default()).to_lowercase();
             assert!(!h.contains("access-control-"), "{h}");
         }
     }
@@ -1129,11 +1202,11 @@ mod tests {
     /// really do link out to github.com, keep `no-referrer`.
     #[test]
     fn the_settings_page_keeps_an_origin_the_browser_will_send() {
-        let settings = response_head(200, "text/html", 0, Referrer::SameOrigin, None);
+        let settings = response_head(200, "text/html", 0, Head::same_origin());
         assert!(settings.contains("Referrer-Policy: same-origin"), "{settings}");
         assert!(!settings.contains("no-referrer"), "no-referrer nulls the Origin on a POST");
 
-        let pr_page = response_head(200, "text/html", 0, Referrer::None, None);
+        let pr_page = response_head(200, "text/html", 0, Head::default());
         assert!(pr_page.contains("Referrer-Policy: no-referrer"), "{pr_page}");
     }
 
@@ -1175,25 +1248,69 @@ mod tests {
         }
     }
 
+    /// A payload nobody has seen yet is served in full, with its version as the `ETag`.
+    #[test]
+    fn a_first_fetch_of_the_items_gets_the_body_and_a_tag() {
+        let head = response_head(200, "application/json", 9, Head::tagged(7));
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("ETag: \"7\""), "{head}");
+        assert!(head.contains("Content-Length: 9"));
+    }
+
+    /// And one the client already holds is answered with nothing at all.
+    ///
+    /// A `304` carries no body by definition, so it must not claim a length either — a client that
+    /// believed a `Content-Length` here would sit waiting for bytes that never come.
+    #[test]
+    fn an_unchanged_payload_is_answered_with_304_and_no_body() {
+        let head = not_modified_head(7);
+        assert!(head.starts_with("HTTP/1.1 304 Not Modified"), "{head}");
+        assert!(head.contains("ETag: \"7\""), "{head}");
+        assert!(!head.contains("Content-Length"), "a 304 has no body to measure: {head}");
+        assert!(head.contains("Connection: close"));
+        assert!(head.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn the_conditional_header_is_read() {
+        let raw = format!(
+            "GET /{TOKEN}/approved/items HTTP/1.1\r\nHost: h\r\nIf-None-Match: \"12\"\r\n\r\n"
+        );
+        assert_eq!(parse_request(&raw).expect("parses").if_none_match.as_deref(), Some("\"12\""));
+    }
+
+    /// The tag the client sends back has to be recognised whatever the quoting, and a weak validator
+    /// is still the same version.
+    #[test]
+    fn a_tag_matches_its_version_however_it_is_quoted() {
+        for given in ["\"12\"", "12", "W/\"12\""] {
+            assert!(tag_matches(Some(given), 12), "{given}");
+        }
+        for given in ["\"13\"", "", "\"\"", "*"] {
+            assert!(!tag_matches(Some(given), 12), "{given}");
+        }
+        assert!(!tag_matches(None, 12), "no tag is not a match");
+    }
+
     /// The script is named by nonce, not allowed by `'unsafe-inline'`: only the exact `<script>` this
     /// response carries may run, and anything injected into the page cannot borrow the permission.
     #[test]
     fn a_script_is_allowed_only_by_its_nonce() {
-        let with = response_head(200, "text/html", 0, Referrer::None, Some("cafebabe"));
+        let with = response_head(200, "text/html", 0, Head::with_nonce("cafebabe"));
         assert!(with.contains("script-src 'nonce-cafebabe'"), "{with}");
         assert!(!with.contains("unsafe-inline'; script"), "never blanket-inline for scripts");
         // The refresh has to be able to fetch, and `default-src 'none'` would block it.
         assert!(with.contains("connect-src 'self'"), "{with}");
 
         // Everything else still runs nothing at all.
-        let without = response_head(200, "application/json", 0, Referrer::None, None);
+        let without = response_head(200, "application/json", 0, Head::default());
         assert!(!without.contains("script-src"), "{without}");
         assert!(without.contains("default-src 'none'"));
     }
 
     #[test]
     fn the_csp_forbids_script_and_allows_only_our_own_images() {
-        let h = response_head(200, "text/html", 0, Referrer::None, None);
+        let h = response_head(200, "text/html", 0, Head::default());
         assert!(h.contains("default-src 'none'"));
         assert!(h.contains("img-src 'self'"));
         // Opened for the settings form, and no wider: `'self'` is this origin, so a form on the page
@@ -1321,6 +1438,7 @@ mod tests {
         assert_eq!(PrAxis::from_slug("nope"), None);
     }
 }
+
 
 
 

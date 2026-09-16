@@ -191,7 +191,7 @@ pub fn pr_list_url(axis: PrAxis) -> String {
 /// `Some(vec![])`. All three axes fill their slot now; before 1.17.0 `ReviewRequested`'s stayed empty
 /// for life, because a `total_count` read has no hits to name.
 static PR_URLS: std::sync::Mutex<PrSnapshot> =
-    std::sync::Mutex::new(PrSnapshot { axes: [None, None, None], polled_at: None });
+    std::sync::Mutex::new(PrSnapshot { axes: [None, None, None], polled_at: None, version: 0 });
 
 /// What the poll thread last published, plus when.
 ///
@@ -201,6 +201,13 @@ static PR_URLS: std::sync::Mutex<PrSnapshot> =
 struct PrSnapshot {
     axes: [Option<Vec<github::PrEntry>>; 3],
     polled_at: Option<std::time::Instant>,
+    /// Bumped on every publish, and the PR page's `ETag`.
+    ///
+    /// A counter rather than a hash of the contents: the page needs to know whether it is looking at
+    /// *this* poll's answer, and a poll that found the same pull requests still moved the clock the
+    /// page's age line counts from. Cheap, monotonic, and it starts at zero so a client that has
+    /// somehow held a tag across a restart simply gets the body again.
+    version: u64,
 }
 
 /// The pull requests `axis` last confirmed, and how long ago that was.
@@ -208,9 +215,15 @@ struct PrSnapshot {
 /// `serve`'s listener thread is the caller, which is why this exists rather than the server reaching
 /// into `PollState`: that stays owned by the poll thread alone. This static was already the channel
 /// out of it, and the server is simply a third reader of one that already had two.
-pub fn pr_snapshot(axis: PrAxis) -> (Option<Vec<github::PrEntry>>, Option<std::time::Duration>) {
+pub fn pr_snapshot(
+    axis: PrAxis,
+) -> (Option<Vec<github::PrEntry>>, Option<std::time::Duration>, u64) {
     let snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
-    (snapshot.axes[axis.index()].clone(), snapshot.polled_at.map(|at| at.elapsed()))
+    (
+        snapshot.axes[axis.index()].clone(),
+        snapshot.polled_at.map(|at| at.elapsed()),
+        snapshot.version,
+    )
 }
 
 /// Percent-encodes a query for use in a URL.
@@ -473,10 +486,14 @@ fn run_poll_loop(
         // Published before `emit` for the same reason the outage check is: the menu entries the URLs
         // belong to are about to be relabeled with this cycle's counts, and a click between the two
         // writes must open what the new label claims, not what the old one did.
-        *PR_URLS.lock().expect("PR-URLs lock poisoned") = PrSnapshot {
-            axes: PrAxis::ALL.map(|axis| state.pr_entries(axis)),
-            polled_at: Some(std::time::Instant::now()),
-        };
+        {
+            let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+            *snapshot = PrSnapshot {
+                axes: PrAxis::ALL.map(|axis| state.pr_entries(axis)),
+                polled_at: Some(std::time::Instant::now()),
+                version: snapshot.version.saturating_add(1),
+            };
+        }
 
         // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
         // this cycle's responses, and taking them next to the code that produced them is what keeps a

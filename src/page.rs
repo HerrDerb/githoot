@@ -190,12 +190,12 @@ code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}";
 ///
 /// `now_unix` is injected rather than read from the clock, the same trick `github::classify_with`
 /// uses, so every age string on the page is assertable.
-/// How often the page asks for a fresh list, in milliseconds.
+/// How often the page asks whether anything has changed, in milliseconds.
 ///
-/// Half the poll loop's own 60s floor, so a change is on screen within about half a cycle of the
-/// poll that found it. Shorter would only re-fetch the same snapshot: this reads what the poll last
-/// stored and never reaches GitHub itself.
-const REFRESH_MS: u32 = 30_000;
+/// Short, because asking is nearly free: the request is conditional, so between polls the answer is
+/// a bodyless `304`. It never reaches GitHub — it reads what the poll loop last stored — so the only
+/// cost of asking often is a few bytes over loopback.
+const REFRESH_MS: u32 = 5_000;
 
 /// The one script on the page.
 ///
@@ -205,24 +205,36 @@ const REFRESH_MS: u32 = 30_000;
 ///
 /// Three things in it are not obvious:
 ///
-/// - **The age line and the list are updated separately.** Rebuilding the list every 30 seconds
-///   would drop hover, focus and any text selection inside it, for a set of cards that usually have
-///   not changed. The age changes every tick; the cards rarely do.
+/// - **The age is computed here, not sent.** That is what makes a real `304` honest: "as of 47 s
+///   ago" changes every second, so a response carrying it could never be unchanged, and the server
+///   would have to resend the whole list every few seconds to keep one line current. Instead the
+///   server sends how old the data was *when it answered*, the page anchors a local clock to that,
+///   and the age ticks on with no request at all.
+/// - **The list is replaced only when the server actually sends a new one.** Rebuilding it would
+///   drop hover, focus and any text selection inside, for cards that usually have not moved.
 /// - **It stops after a run of failures.** When GitHoot quits, this tab would otherwise poll a dead
 ///   port for as long as it stays open.
 /// - **It pauses while the tab is hidden**, and catches up the moment it is shown again, so a
 ///   forgotten tab costs nothing.
-const REFRESH_SCRIPT: &str = "(function(){var asof=document.getElementById('asof'),items=document.getElementById('items');var url=location.pathname.replace(/\\/$/,'')+'/items',last=items.innerHTML,fails=0,timer;function tick(){if(document.hidden)return;fetch(url,{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(j){fails=0;asof.textContent=j.asof;if(j.items!==last){last=j.items;items.innerHTML=j.items;}}).catch(function(){if(++fails>=5){clearInterval(timer);asof.textContent='GitHoot is not running';}});}timer=setInterval(tick,REFRESH_MS);document.addEventListener('visibilitychange',function(){if(!document.hidden)tick();});})();";
+const REFRESH_SCRIPT: &str = "(function(){var asof=document.getElementById('asof'),count=document.getElementById('count'),items=document.getElementById('items');var url=location.pathname.replace(/\\/$/,'')+'/items',tag=null,base=null,fails=0,timer;function ago(s){return s<60?s+' s':s<3600?((s/60)|0)+' m':s<86400?((s/3600)|0)+' h':((s/86400)|0)+' d';}function paint(){asof.textContent=base===null?'not polled yet':'as of '+ago(Math.max(0,(Date.now()-base)/1000|0))+' ago';}function tick(){if(document.hidden)return;fetch(url,{cache:'no-store',headers:tag?{'If-None-Match':tag}:{}}).then(function(r){if(r.status===304){paint();return null;}if(!r.ok)throw 0;tag=r.headers.get('ETag');return r.json();}).then(function(j){fails=0;if(!j)return;base=j.age===null?null:Date.now()-j.age*1000;count.textContent=j.count;items.innerHTML=j.items;paint();}).catch(function(){if(++fails>=5){clearInterval(timer);asof.textContent='GitHoot is not running';}});}timer=setInterval(tick,REFRESH_MS);document.addEventListener('visibilitychange',function(){if(!document.hidden)tick();});tick();})();";
 
-/// The age line's text, as plain text rather than markup — the script sets it with `textContent`.
-fn summary(entries: Option<&[PrEntry]>, polled: Option<Duration>) -> String {
-    let freshness = match polled {
+/// The count half of the summary line, as plain text — the script sets it with `textContent`.
+///
+/// Separate from the age because the two change on different clocks: the count only when a poll
+/// publishes, the age every second. Keeping them apart is what lets the age tick locally while the
+/// server answers `304`.
+fn count_text(entries: Option<&[PrEntry]>) -> String {
+    match entries {
+        Some(list) => format!("{} pull request(s) · ", list.len()),
+        None => String::new(),
+    }
+}
+
+/// The age half, rendered server-side for the first paint. The script takes over after that.
+fn age_text(polled: Option<Duration>) -> String {
+    match polled {
         Some(d) => format!("as of {} ago", age_of(d)),
         None => "not polled yet".to_string(),
-    };
-    match entries {
-        Some(list) => format!("{} pull request(s) · {}", list.len(), freshness),
-        None => freshness,
     }
 }
 
@@ -256,7 +268,10 @@ pub fn items_json(
     fallback_url: &str,
 ) -> String {
     serde_json::json!({
-        "asof": summary(entries, polled),
+        // How old the data was *at this instant*, not a rendered age. The page anchors its own clock
+        // to it, so the line keeps counting between polls without asking again.
+        "age": polled.map(|d| d.as_secs()),
+        "count": count_text(entries),
         "items": items(entries, now_unix, fallback_url),
     })
     .to_string()
@@ -293,15 +308,16 @@ pub fn axis_page(
     ));
 
     h.push_str(&format!(
-        "<p class=\"sub\" id=\"asof\">{}</p>\n",
-        esc(&summary(entries, polled))
+        "<p class=\"sub\"><span id=\"count\">{}</span><span id=\"asof\">{}</span></p>\n",
+        esc(&count_text(entries)),
+        esc(&age_text(polled))
     ));
     h.push_str("<div class=\"rule\"></div>\n");
     h.push_str(&format!("<div id=\"items\">{}</div>\n", items(entries, now_unix, fallback_url)));
 
     h.push_str(&format!(
-        "<footer>Rendered locally by GitHoot from its last poll, refreshed every {} seconds. · {}</footer>\n",
-        REFRESH_MS / 1000,
+        "<footer>Rendered locally by GitHoot from its last poll, and kept current without a \
+         reload. · {}</footer>\n",
         github_link(fallback_url, "the same query on GitHub")
     ));
     h.push_str(&format!(
@@ -898,22 +914,31 @@ mod tests {
         assert!(page_html.contains(&unescaped), "fragment:\n{unescaped}\n\npage:\n{page_html}");
     }
 
-    /// The two halves are separate so a refresh can touch the age line without rebuilding the list —
-    /// replacing the cards every 30 seconds would drop hover, focus and any text selection in them.
+    /// Three fields, on purpose. The **age is a number of seconds, never a rendered string** — that
+    /// is what lets the page tick it locally and the server answer `304` while it does.
     #[test]
-    fn the_fragment_separates_the_age_line_from_the_items() {
+    fn the_fragment_sends_an_age_a_count_and_the_items() {
         let json = live(Some(&[entry("https://github.com/o/r/pull/1")]));
-        assert!(json.contains(r#""asof":"#), "got {json}");
+        assert!(json.contains(r#""age":47"#), "got {json}");
+        assert!(json.contains(r#""count":"1 pull request(s) · ""#), "got {json}");
         assert!(json.contains(r#""items":"#), "got {json}");
         assert!(json.starts_with('{') && json.ends_with('}'));
     }
 
-    /// The items must not carry the age, or every tick would look like a change and rebuild the list.
+    /// Nothing in the payload may carry a rendered age, or it would change every second and no
+    /// response could ever be unchanged — which is the whole premise of the conditional request.
     #[test]
-    fn the_items_do_not_carry_the_age() {
+    fn nothing_in_the_fragment_carries_a_rendered_age() {
         let json = live(Some(&[entry("https://github.com/o/r/pull/1")]));
-        let items = json.split(r#""items":"#).nth(1).expect("items");
-        assert!(!items.contains("as of"), "the age belongs to asof alone: {items}");
+        assert!(!json.contains("as of"), "got {json}");
+        assert!(!json.contains("ago"), "got {json}");
+    }
+
+    /// A poll that never happened says so with a null rather than a zero age.
+    #[test]
+    fn an_unpolled_fragment_sends_a_null_age() {
+        let json = items_json(None, None, NOW, "https://github.com/pulls");
+        assert!(json.contains(r#""age":null"#), "got {json}");
     }
 
     #[test]

@@ -27,14 +27,21 @@ shuffle under you between reloads. A pull request GitHub gave no date sorts last
 **Links open in the same window.** Opening a tab per click is the habit this page exists to get away
 from; the back button is the way back to the list.
 
-**It refreshes itself every 30 seconds**, without a reload and without touching GitHub — it re-reads
-what the tray last polled, so a change is on screen within about half a poll cycle. The "as of" line
-says how old the data is either way.
+**It keeps itself current**, without a reload and without touching GitHub — so a change is on screen
+within about five seconds of the poll that found it.
 
-The refresh is deliberately narrow. It fetches `/<token>/<bar>/items`, which returns the age line and
-the list as two separate values, and **only the list that changed is replaced**. Rebuilding the cards
-every 30 seconds would drop hover, focus and any text selection inside them, for a set of rows that
-usually have not moved.
+Every five seconds the page asks `/<token>/<bar>/items` whether anything has moved, as a **conditional
+request**. Each answer carries an `ETag` — the version of the snapshot the poll loop last published —
+and the page sends it back as `If-None-Match`. Between polls the reply is a bodyless `304`, which is a
+few dozen bytes; only a poll that actually published something returns a list, and only then is the
+list on screen replaced. Rebuilding it otherwise would drop hover, focus and any text selection inside
+it, for rows that have not moved.
+
+**The age is computed by the page, not sent by the server**, and that is what makes the `304` honest.
+"as of 47 s ago" changes every second, so a response carrying it could never be unchanged and the
+server would have to resend the whole list every few seconds to keep one line current. Instead each
+answer says how old the data was at that instant, the page anchors a local clock to it, and the line
+ticks on with no request at all.
 
 Three things keep a forgotten tab cheap: it pauses while the tab is hidden and catches up the moment
 it is shown, it never reaches GitHub, and it **stops after five consecutive failures** and says
