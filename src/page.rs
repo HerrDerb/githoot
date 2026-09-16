@@ -173,7 +173,7 @@ vertical-align:baseline}\
 text-align:center;color:var(--dim)}\
 footer{margin-top:2rem;color:var(--dim);font-size:.78rem;text-align:center}\
 footer a,.empty a{color:var(--dim)}\
-h2{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
+.section{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
 margin:1.5rem 0 .5rem;font-weight:600}\
 .row{display:flex;align-items:center;gap:.6rem;padding:.35rem 0;cursor:pointer}\
 .row input{width:1rem;height:1rem;accent-color:var(--accent);flex:none}\
@@ -381,7 +381,7 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
 
     h.push_str(&format!("<form method=\"post\" action=\"/{}/settings\">\n", esc(token)));
 
-    h.push_str("<h2>Pull request signals</h2><div class=\"card\">");
+    h.push_str("<h2 class=\"section\">Pull request signals</h2><div class=\"card\">");
     for (axis, what) in [
         (PrAxis::ReviewRequested, "Somebody wants your review"),
         (PrAxis::ReadyToMerge, "Your pull request was approved"),
@@ -391,13 +391,13 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
     }
     h.push_str("</div>\n");
 
-    h.push_str("<h2>Behaviour</h2><div class=\"card\">");
+    h.push_str("<h2 class=\"section\">Behaviour</h2><div class=\"card\">");
     h.push_str(&checkbox("copilotReviews", "Count Copilot's unresolved comments as work", cfg.copilot_reviews));
     h.push_str(&checkbox("sound", "Hoot when a pull request needs you", cfg.sound));
     h.push_str(&checkbox("updateCheck", "Check for a newer release", cfg.update_check));
     h.push_str("</div>\n");
 
-    h.push_str("<h2>Log detail</h2><div class=\"card\">");
+    h.push_str("<h2 class=\"section\">Log detail</h2><div class=\"card\">");
     for (value, what) in [
         ("error", "Failures only"),
         ("info", "Add lifecycle detail, for diagnosing"),
@@ -411,7 +411,7 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
     h.push_str("</div>\n");
 
     h.push_str(
-        "<h2>Which parts of GitHub count as an outage</h2>\n\
+        "<h2 class=\"section\">Which parts of GitHub count as an outage</h2>\n\
          <p class=\"sub\">GitHub's page-wide verdict says \"degraded\" whenever any single component \
          is, including the ones a pull-request tray never touches. Tick nothing to watch the whole \
          page.</p><div class=\"card\">",
@@ -812,6 +812,24 @@ mod tests {
     #[test]
     fn no_copilot_comments_says_nothing() {
         assert!(!page(Some(&[entry("https://github.com/o/r/pull/1")])).contains("Copilot"));
+    }
+
+    /// The settings page's section headings are small uppercase labels. That style was added as a
+    /// bare `h2` rule, and a PR title is also an `h2` — so every title on the PR pages rendered in
+    /// capitals, from 2.0.0 to 2.0.3. The rule is class-scoped now, and this pins the selector.
+    #[test]
+    fn only_settings_section_headings_are_uppercased() {
+        let uppercased: Vec<&str> = STYLESHEET
+            .split('}')
+            .filter(|rule| rule.contains("text-transform:uppercase"))
+            .map(|rule| rule.split('{').next().unwrap_or("").trim())
+            .collect();
+        assert_eq!(uppercased, [".section"], "uppercase must be opt-in by class, never by element");
+
+        let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
+        assert!(html.contains("<h2><a "), "a PR title is a plain h2 with a link in it");
+        assert!(!html.contains("class=\"section\""), "and the PR page has no section headings");
+        assert!(settings(&default_cfg()).contains("<h2 class=\"section\">"));
     }
 
     #[test]
