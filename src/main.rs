@@ -516,6 +516,14 @@ fn main() {
     update_item.set_visible(false);
     status_item.set_visible(false);
     top_separator.set_visible(false);
+    // The three PR entries too. Each is shown only on a *confirmed* count above zero, and before the
+    // first answer there is no such thing — an entry opening an empty list is a dead end, and one
+    // opening a list nobody has fetched yet is the same dead end a second earlier. They used to start
+    // visible so the menu was never empty; the PR-inbox entry now stands in for exactly that, and
+    // `shows_pr_inbox` puts it up whenever these three are down.
+    reviews_item.set_visible(false);
+    ready_to_merge_item.set_visible(false);
+    changes_requested_item.set_visible(false);
 
     // The closest Linux equivalent of clicking the icon: the menu being popped up. Connected after
     // `show_all` so the initial layout pass is not mistaken for a click.
@@ -877,16 +885,14 @@ fn main() {
         let quit_item = MenuItem::new("Quit", true, None);
         let quit_item_id = quit_item.id().clone();
         let menu = Menu::new();
-        // Authenticate is the one entry that starts *absent*, unlike the four above. They start
-        // present because nothing has been polled yet and an empty menu would offer no way to reach
-        // GitHub in the app's first moments; this one starts absent because offering to authorize
-        // something that may already be authorized is the misleading direction. The first update
-        // arrives within a second and puts it in if it is needed.
+        // Every conditional entry starts *absent*, and `rebuild_menu` puts each in when its condition
+        // holds. The three PR entries used to start present, so the menu was never empty before the
+        // first poll; the PR-inbox entry is that fallback now, and an entry offering a list nobody has
+        // fetched yet is a dead end whether the count turns out to be zero or not. Authenticate starts
+        // absent for its own reason: offering to authorize something that may already be authorized
+        // is the misleading direction. The first update arrives within a second either way.
         for (item, what) in [
-            (&reviews_item as &dyn tray_icon::menu::IsMenuItem, "reviews"),
-            (&ready_to_merge_item, "ready to merge"),
-            (&changes_requested_item, "work required"),
-            (&pr_inbox_item, "PR inbox"),
+            (&pr_inbox_item as &dyn tray_icon::menu::IsMenuItem, "PR inbox"),
             (&settings_menu, "settings"),
             (&quit_item, "quit"),
         ] {
@@ -949,10 +955,11 @@ fn main() {
             applied_update: None,
             applied_update_label: None,
             applied_labels: [None, None, None],
-            // The menu was built with the four signal entries present and every conditional entry
-            // absent, and that much we did do, so it is recorded as such.
+            // The menu was built with every conditional entry absent and only the inbox, Settings and
+            // Quit present, and that much we did do, so it is recorded as such — the first `apply` then
+            // only rebuilds if something is actually confirmed.
             applied_menu: Some(MenuShape {
-                wanted: [true; 3],
+                wanted: [false; 3],
                 needs_auth: false,
                 status_degraded: false,
                 update: false,

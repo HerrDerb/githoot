@@ -23,8 +23,9 @@ The upper separator appears only when there is something above it. A rule with n
 stray line, which reads as a rendering fault rather than a grouping — and below it there is now always
 something, because **Open PR inbox** stands in whenever the three PR entries have nothing to open.
 
-That fallback exists because every other PR entry hides itself when its count is zero: an entry opening an
-empty list is a dead end. On a quiet day that left no way into your pull requests at all. Being a plain
+That fallback exists because every other PR entry hides itself when its count is zero — and before the
+first answer has arrived, which is the same dead end a second earlier: an entry opening an empty list, or
+a list nobody has fetched yet, goes nowhere. They appear only on a confirmed count above zero. On a quiet day that left no way into your pull requests at all. Being a plain
 URL rather than a search of ours, it also needs no credential, so it stays while the app is waiting to be
 authorized and the three entries that do need one are hidden.
 
