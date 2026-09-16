@@ -1351,6 +1351,9 @@ fn main() {
             // fault. The PR-inbox entry appears exactly when the three PR entries do not, so there is
             // always something down there and the old `body_group` test was permanently true.
             let separate = top_group;
+            // The same rule Linux applies, from the same function, so the two cannot disagree about
+            // which entry an axis lights — see `state::pr_entry_visibility`.
+            let shown = state::pr_entry_visibility(wanted, needs_auth);
 
             let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 11] = [
                 // The top group: the app's own state and the service's, rather than anything about your
@@ -1364,9 +1367,9 @@ fn main() {
                 // have anything behind them until it is obtained. Gated on `needs_auth` only, *not* on
                 // the outage bit: an outage hides the bars because the icon has one exclamation to
                 // give, but these counts are the last known good ones and the lists still open.
-                (&self.reviews_item, !needs_auth && wanted[0], "review-requested"),
-                (&self.ready_to_merge_item, !needs_auth && wanted[1], "ready-to-merge"),
-                (&self.changes_requested_item, !needs_auth && wanted[2], "changes-requested"),
+                (&self.reviews_item, shown[0], "review-requested"),
+                (&self.ready_to_merge_item, shown[1], "ready-to-merge"),
+                (&self.changes_requested_item, shown[2], "changes-requested"),
                 // The fallback, in the slot the three above would have filled. Deliberately *not*
                 // gated on `needs_auth`: it is a plain URL that needs no credential, which is what
                 // makes it worth keeping when the three that do need one are hidden.

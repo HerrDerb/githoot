@@ -820,8 +820,9 @@ pub fn start_notification_scheduler(
     // closure runs on the GTK main thread, so the indicator can simply be owned by it.
     // (`glib::idle_add_once` would look tidier but demands `Send`, which `AppIndicator` is not.)
     let mut indicator = indicator;
-    // Index 0 is notifications; indices 1..4 are the PR axes at `PrAxis::index() + 1` — one array
-    // instead of four separate bools so the loop below does not have to hand-repeat itself.
+    // One slot per PR axis at `PrAxis::index()` — one array instead of three separate bools so the
+    // loop below does not have to hand-repeat itself. (A notifications slot used to sit at index 0;
+    // see `state::pr_entry_visibility` for what removing it without moving every reader cost.)
     let mut applied: Option<[bool; 3]> = None;
     let mut applied_labels: [Option<String>; 3] = [None, None, None];
     // Tracked separately from `applied` because it is not one of the four signals but a replacement
@@ -909,10 +910,7 @@ pub fn start_notification_scheduler(
                 // as it was rather than hiding an entry we simply could not ask about.
                 //
                 // The three PR entries are hidden outright while waiting to authorize, because none
-                // of them can have anything behind them. Notifications are *not*: that is a separate
-                // credential which may be working perfectly, and hiding a working entry because a
-                // different one needs attention would take away a feature that still functions. The
-                // icon cannot say both things at once, but the menu can.
+                // of them can have anything behind them.
                 //
                 // GTK has per-item visibility, so this is a flag rather than the remove-and-append
                 // dance the Windows side needs. `show_all` is called once during setup and never
@@ -921,8 +919,16 @@ pub fn start_notification_scheduler(
                 // icon has only one exclamation to give, but the counts behind these entries are the
                 // last known good ones and the lists still open. Hiding them would take away working
                 // links to punish GitHub for being slow.
-                for (item, &visible) in menu_items.pr_items().into_iter().zip(&wanted[1..]) {
-                    item.set_visible(!needs_auth && visible);
+                //
+                // Indexed by axis on both sides, not zipped. This used to be `.zip(&wanted[1..])`,
+                // skipping a notifications slot at index 0 — and when that slot was removed the slice
+                // stayed, so every entry showed its *neighbour's* bit: the reviews entry lit up for an
+                // approved PR with a bare label, and the changes entry never lit at all. Shipped that
+                // way in 2.0.0 and 2.0.1. One index for both arrays cannot drift apart like that.
+                let items = menu_items.pr_items();
+                let shown = crate::state::pr_entry_visibility(wanted, needs_auth);
+                for axis in PrAxis::ALL {
+                    items[axis.index()].set_visible(shown[axis.index()]);
                 }
                 // Deliberately *not* gated on `needs_auth`: a plain URL needs no credential, which is
                 // exactly what makes it worth keeping when the three that do need one are hidden.

@@ -168,6 +168,18 @@ pub const PR_INBOX_URL: &str = "https://github.com/pulls/inbox";
 /// `needs_auth` counts as showing nothing, because it hides all three PR entries whatever their counts.
 /// That is the case this matters most in: a plain URL needs no credential, so it is the one PR link that
 /// still works while the app is waiting to be authorized.
+/// Which of the three PR menu entries are shown, indexed by `PrAxis::index`.
+///
+/// Trivial on purpose — an entry is visible when its axis is lit and no credential is missing — and
+/// shared by both platforms for the reason `shows_pr_inbox` is. The value of having it as a function
+/// is not the logic but the **alignment**: the result is indexed by axis, so the caller indexes the
+/// menu items by the same axis and nothing is zipped. The Linux loop used to zip the items against
+/// `wanted[1..]`, a slice that skipped a notifications slot at index 0; when that slot was removed the
+/// slice stayed, and every entry showed its neighbour's bit. That shipped in 2.0.0 and 2.0.1.
+pub fn pr_entry_visibility(lit: [bool; 3], needs_auth: bool) -> [bool; 3] {
+    lit.map(|on| !needs_auth && on)
+}
+
 pub fn shows_pr_inbox(pr_entries: [bool; 3], needs_auth: bool) -> bool {
     needs_auth || !pr_entries.iter().any(|&on| on)
 }
@@ -2013,6 +2025,47 @@ mod tests {
 
         state.apply_pr(PrAxis::ReviewRequested, fresh_count(0));
         assert!(!state.icon().shows_exclamation(), "a recovered poll must take the mark down");
+    }
+
+    // ─── Menu entry visibility ────────────────────────────────────────────────
+
+    /// **The 2.0.0/2.0.1 regression, as reported.** Approved and changes-requested lit, reviews
+    /// not. The menu showed the *reviews* entry — with a bare label, because its count really was
+    /// zero — and the approved entry, and never the changes entry. Each entry was wearing the bit of
+    /// the axis after it.
+    #[test]
+    fn each_entry_shows_its_own_axis_and_not_its_neighbours() {
+        let lit = [false, true, true];
+        let shown = pr_entry_visibility(lit, false);
+        assert!(!shown[PrAxis::ReviewRequested.index()], "nothing awaits review, so no entry");
+        assert!(shown[PrAxis::ReadyToMerge.index()]);
+        assert!(shown[PrAxis::ChangesRequested.index()]);
+        // Stated the strong way too: the result *is* the input, slot for slot.
+        assert_eq!(shown, lit);
+    }
+
+    /// One axis at a time, so a shift by any amount in either direction fails on some axis.
+    #[test]
+    fn a_single_lit_axis_shows_exactly_its_own_entry() {
+        for axis in PrAxis::ALL {
+            let mut lit = [false; 3];
+            lit[axis.index()] = true;
+            let shown = pr_entry_visibility(lit, false);
+            for other in PrAxis::ALL {
+                assert_eq!(
+                    shown[other.index()],
+                    other == axis,
+                    "lighting {axis:?} must show only {axis:?}, but {other:?} was {}",
+                    shown[other.index()]
+                );
+            }
+        }
+    }
+
+    /// Waiting to authorize hides all three whatever their counts: none can have a list behind it.
+    #[test]
+    fn needs_auth_hides_every_entry() {
+        assert_eq!(pr_entry_visibility([true; 3], true), [false; 3]);
     }
 
     // ─── The hoot ledger ──────────────────────────────────────────────────────
