@@ -8,9 +8,9 @@
 //! buys three things at once: pacing that adapts to GitHub's `x-poll-interval`, an on-demand
 //! refresh when the user opens their notifications, and a clean exit when the UI goes away.
 
-use crate::portal::github::api as github;
+use crate::portal::github::api::build_client;
 use crate::portal::types::PrEntry;
-use crate::portal::github::auth::{AuthError, PrStatus, PrTokenStore, PR_NOT_INSTALLED};
+use crate::portal::{AuthError, CredentialState, Portal};
 use crate::update::{Available, RestartPlan};
 use crate::{errorln, infoln};
 use crate::state::{IconState, PollState, PrAxis, MENU_BURST, REFRESH_BURST};
@@ -146,16 +146,19 @@ pub struct Update {
 /// and the Linux one had reached nine parameters — at which point the order is the only thing telling
 /// two `bool`s apart. Naming them at the call site is worth a struct.
 pub struct PollInputs {
-    pub pr: PrStatus,
-    /// Held for the whole run because `Wake::Authenticate` can arrive at any time and
-    /// `PrTokenStore::authenticate` needs somewhere to save what it obtains.
+    /// Every configured portal with how far its credential got at startup (see
+    /// `main::build_portals`). Boxed trait objects because the loop is the one owner and never
+    /// needs to know which kind it holds; `CredentialState` travels beside rather than inside so
+    /// the adapter stays ignorant of how the loop words "not signed in".
+    pub portals: Vec<(Box<dyn Portal>, CredentialState)>,
+    /// Held for the whole run because `Wake::SettingsOpened` needs the config path.
     pub app_asset_path: PathBuf,
     /// Whether to look for newer releases at all. See `config::Config::update_check`.
     pub update_check: bool,
     /// Which PR signals the user wants, indexed by `PrAxis::index`.
     ///
     /// The **configuration only**, never ANDed with whether a credential exists. See
-    /// `PollState::new` for what folding those two together would break.
+    /// `PollState::for_portal` for what folding those two together would break.
     pub pr_enabled: [bool; 3],
     /// Whether an arriving PR plays the hoot. See `config::Config::sound`.
     ///
@@ -165,16 +168,6 @@ pub struct PollInputs {
     /// A shared switch rather than the `bool` it was, because the tray's Hoot checkbox changes it while
     /// this loop is running — see `config::Switch`. Read once per cycle, at the moment it matters.
     pub sound: crate::config::Switch,
-    /// Which parts of GitHub may raise the outage mark. Empty means the whole page — see
-    /// `config::Config::status_components`.
-    pub status_components: Vec<String>,
-    /// Whether Copilot's unresolved comments count as work. See `config::Config::copilot_reviews`.
-    ///
-    /// A `Switch` rather than a `bool`, for the reason `sound` is one: the tray has a checkbox for it
-    /// and a box that needs a restart to take effect is a broken box. Read at the top of each cycle,
-    /// so the next poll obeys the new answer — and since it also decides whether the two axes ask
-    /// GitHub for review threads at all, switching it off stops the cost immediately too.
-    pub copilot_reviews: crate::config::Switch,
 }
 
 // ─── Shared polling core ──────────────────────────────────────────────────────
@@ -199,8 +192,207 @@ fn spawn_poll_thread(
     });
 }
 
-/// `app_asset_path` is held for the whole run because `Wake::Authenticate` can arrive at any time,
-/// and `PrTokenStore::authenticate` needs somewhere to save what it obtains.
+/// One portal in the loop: the adapter, its state, and the bookkeeping that used to be loop locals
+/// back when there was only ever one of it.
+struct PortalRun {
+    portal: Box<dyn Portal>,
+    state: PollState,
+    /// Whether polls are issued at all. Off while waiting for a sign-in, or when the portal said
+    /// there is nothing to see; the state carries the reason for the tooltip either way.
+    live: bool,
+    last_reauth: Option<Instant>,
+    last_status_check: Option<Instant>,
+    /// Remembered so a permanent typo in `statusComponents` is said once rather than every five
+    /// minutes for as long as the app runs. `None` is "not asked yet", which is why the first
+    /// successful check always reports.
+    last_unmatched: Option<Vec<String>>,
+}
+
+impl PortalRun {
+    /// `pr_enabled` is the config, not `[credential is Ready; 3]`. Whether a credential exists is
+    /// said by the two calls below; folding it in here would make `require_pr_auth` a no-op on the
+    /// very path that exists to obtain one. See `PollState::for_portal`.
+    fn new(portal: Box<dyn Portal>, credential: CredentialState, pr_enabled: [bool; 3]) -> Self {
+        let mut state = PollState::for_portal(&portal.info().display_name, pr_enabled);
+        // Both non-live branches mean "no PR dots", and both are deliberately said differently: one
+        // has a menu item waiting to be clicked, the other has a reason clicking cannot address. The
+        // three axes share one credential, so whichever it is applies to all three at once.
+        let live = match credential {
+            CredentialState::Ready => true,
+            CredentialState::NeedsAuth => {
+                state.require_pr_auth();
+                false
+            }
+            CredentialState::Off(reason) => {
+                for axis in PrAxis::ALL {
+                    state.disable_pr(axis, reason.clone());
+                }
+                false
+            }
+        };
+        PortalRun {
+            portal,
+            state,
+            live,
+            last_reauth: None,
+            last_status_check: None,
+            last_unmatched: None,
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.portal.info().display_name
+    }
+
+    /// One cycle's worth of asking this portal: the axes in play, then, every few minutes, its
+    /// own view of its health.
+    fn cycle(&mut self) {
+        self.state.begin_cycle();
+
+        // Skipped before the request, not after: `apply_pr` would discard the answer for an axis
+        // that is not in play, and a poll is the most expensive thing this app does, so issuing it
+        // would be pure cost. The portal is told which axes are wanted and must not ask for the rest.
+        if self.live {
+            let axes = PrAxis::ALL.map(|axis| self.state.pr_in_play(axis));
+            if axes.iter().any(|&wanted| wanted) {
+                let outcome = self.portal.poll(axes);
+                for (axis, response) in PrAxis::ALL.into_iter().zip(outcome.axes) {
+                    if let Some(response) = response {
+                        self.state.apply_pr(axis, response);
+                    }
+                }
+            }
+        }
+
+        // Placed *before* the UI update, unlike the release check, and for the opposite reason. An
+        // available release is equally true a minute later, so that check is allowed to miss the
+        // cycle it runs in. An outage is the explanation for whatever else this cycle just found —
+        // stale counts, unknown axes, a failed poll — so showing the icon first and the reason
+        // second gets the order backwards. The cost is that a hanging status page can hold the icon
+        // back for the client's 10s cap; the request is 219 bytes, so that is a remote worst case.
+        //
+        // A failed check deliberately does **not** clear a known outage: see `portal::statuspage`.
+        // A portal with no status page answers `None` and is never asked again about it either way.
+        if self.last_status_check.is_none_or(|at| at.elapsed() >= STATUS_CHECK_INTERVAL) {
+            self.last_status_check = Some(Instant::now());
+            match self.portal.health() {
+                None => {}
+                Some(Ok(report)) => {
+                    // Only on a change, and the first answer always counts as one. A name that
+                    // matches nothing is a typo the user has to fix, and its only other symptom is a
+                    // mark that never appears — indistinguishable from the portal being well.
+                    if self.last_unmatched.as_deref() != Some(report.unmatched.as_slice()) {
+                        if !report.unmatched.is_empty() {
+                            errorln!(
+                                "config.txt names components {} does not publish, so they are \
+                                 never watched: {}",
+                                self.name(),
+                                report.unmatched.join(", ")
+                            );
+                        }
+                        self.last_unmatched = Some(report.unmatched);
+                    }
+                    match report.health {
+                        crate::portal::Health::Degraded { description } => {
+                            self.state.set_status_degraded(Some(description));
+                        }
+                        crate::portal::Health::Fine => self.state.set_status_degraded(None),
+                    }
+                }
+                Some(Err(e)) => errorln!("could not read {}'s status page: {e}", self.name()),
+            }
+        }
+    }
+
+    /// Renews the credential when a poll was rejected or expiry is near. `true` means a fresh
+    /// credential is worth retrying with at once.
+    ///
+    /// All three PR axes share one credential, so a rejection on any of them — or the credential
+    /// simply approaching its known expiry (see `Portal::needs_refresh`) — triggers one shared
+    /// renewal rather than three independent ones. `take_pr_reauth` is called for every axis
+    /// unconditionally (not through a short-circuiting `.any()`) so each axis's flag is consumed.
+    fn recover_credential(&mut self) -> bool {
+        let mut needs_reauth = false;
+        for axis in PrAxis::ALL {
+            if self.state.take_pr_reauth(axis) {
+                needs_reauth = true;
+            }
+        }
+        if self.live && self.portal.needs_refresh() {
+            needs_reauth = true;
+        }
+        if !(needs_reauth && self.live && may_retry(&mut self.last_reauth)) {
+            return false;
+        }
+        match self.portal.reauthenticate() {
+            // The silent refresh worked, so the new credential is worth retrying with at once.
+            // Nothing user-visible happened, which is the point.
+            Ok(()) => true,
+            // The portal cannot help without the user. Hand it over rather than opening a browser
+            // unannounced — the exclamation goes up and the Authenticate item appears, and
+            // `Wake::Authenticate` picks it up from there.
+            Err(AuthError::AuthorizationRequired) => {
+                infoln!("{} PR status needs authorization — waiting for the menu", self.name());
+                self.state.require_pr_auth();
+                self.live = false;
+                false
+            }
+            // Anything else is a failure to *ask*, not an answer. Most often the network is down.
+            // The credential is kept and the axes are left alone, so this retries on the next cycle
+            // instead of costing the user a click it did not need. `MIN_REAUTH_INTERVAL` is what
+            // stops that becoming a hot loop.
+            Err(e) => {
+                errorln!("{} credential renewal could not be attempted ({e}) — will retry", self.name());
+                false
+            }
+        }
+    }
+
+    /// The user picked Authenticate. Blocks for as long as they take, which is exactly why it runs
+    /// here and not in the click handler: the tray stays responsive throughout, and the only cost is
+    /// that polling pauses while a credential is being obtained — which it could not usefully do
+    /// anyway.
+    fn authenticate(&mut self) {
+        match self.portal.authenticate() {
+            Ok(CredentialState::Ready) => {
+                infoln!("{} PR status authorized", self.name());
+                self.state.clear_pr_auth();
+                self.live = true;
+            }
+            // Authorized, but there is nothing to see and another click cannot fix that, so the
+            // exclamation comes down and a stated reason replaces it. Same answer startup gives.
+            Ok(CredentialState::Off(reason)) => {
+                infoln!("{reason}");
+                self.state.clear_pr_auth();
+                for axis in PrAxis::ALL {
+                    self.state.disable_pr(axis, reason.clone());
+                }
+                self.live = false;
+            }
+            Ok(CredentialState::NeedsAuth) => {
+                errorln!("{} sign-in finished without a credential; try again", self.name());
+            }
+            // Denied, expired, or the network went away mid-flow. The state is left as it was, so
+            // the item is still on the menu to try again.
+            Err(e) => errorln!("authorization failed: {e}"),
+        }
+    }
+}
+
+/// Every portal's confirmed entries for `axis`, one list. `None` only when no portal has a
+/// confirmed list, so a confirmed empty on one portal and nothing known on another still opens the
+/// page rather than the fallback search.
+fn merged_entries(runs: &[PortalRun], axis: PrAxis) -> Option<Vec<PrEntry>> {
+    let mut merged: Option<Vec<PrEntry>> = None;
+    for run in runs {
+        if let Some(entries) = run.state.pr_entries(axis) {
+            merged.get_or_insert_with(Vec::new).extend(entries);
+        }
+    }
+    merged
+}
+
+/// `app_asset_path` is held for the whole run because `Wake::SettingsOpened` needs the config path.
 fn run_poll_loop(
     inputs: PollInputs,
     wake_rx: Receiver<Wake>,
@@ -208,53 +400,30 @@ fn run_poll_loop(
     restart: impl Fn(RestartPlan) + Send + Clone + 'static,
 ) {
     let PollInputs {
-        pr,
+        portals,
         app_asset_path,
         update_check: update_check_enabled,
         pr_enabled,
         sound: sound_enabled,
-        status_components,
-        copilot_reviews,
     } = inputs;
-    let client = match github::build_client() {
+    // The release check's client. Each portal owns its own; this one talks to GitHub Releases
+    // unauthenticated and has nothing to do with any portal.
+    let client = match build_client() {
         Ok(client) => client,
         Err(e) => {
             errorln!("fatal: could not build HTTP client: {e}");
             return;
         }
     };
-    let github_endpoints = crate::portal::github::Endpoints::github_com();
 
-    let (mut pr, pr_off, needs_auth) = match pr {
-        PrStatus::Ready(store) => (Some(store), None, false),
-        PrStatus::NeedsAuth => (None, None, true),
-        PrStatus::Off(reason) => (None, Some(reason), false),
-    };
+    let mut runs: Vec<PortalRun> = portals
+        .into_iter()
+        .map(|(portal, credential)| PortalRun::new(portal, credential, pr_enabled))
+        .collect();
 
-    // The config, not `[pr.is_some(); 3]`. Whether a credential exists is said by the two calls
-    // below; putting it here as well would make `require_pr_auth` a no-op on the very path that
-    // exists to obtain one. See `PollState::new`.
-    let mut state = PollState::for_portal("GitHub", pr_enabled);
-    // Both branches mean "no PR dots", and both are deliberately said differently: one has a menu
-    // item waiting to be clicked, the other has a reason clicking cannot address. The three axes
-    // share one credential, so whichever it is applies to all three at once.
-    if needs_auth {
-        state.require_pr_auth();
-    }
-    if let Some(reason) = pr_off {
-        for axis in PrAxis::ALL {
-            state.disable_pr(axis, reason.clone());
-        }
-    }
     let mut burst: VecDeque<Duration> = VecDeque::new();
-    let mut last_pr_reauth: Option<Instant> = None;
     // `None` means "never checked", which is what makes the first check happen immediately.
     let mut last_update_check: Option<Instant> = None;
-    // Remembered so a permanent typo in `statusComponents` is said once rather than every five
-    // minutes for as long as the app runs. `None` is "not asked yet", which is why the first
-    // successful check always reports.
-    let mut last_unmatched: Option<Vec<String>> = None;
-    let mut last_status_check: Option<Instant> = None;
     // The release the last check found, held so the menu click has something to install without
     // re-asking GitHub. Cleared when a check finds nothing newer.
     let mut pending_update: Option<Available> = None;
@@ -262,88 +431,9 @@ fn run_poll_loop(
     // not any portal's: see `overview`.
     let mut update_available: Option<String> = None;
 
-    // While a refresh burst is draining we send no `If-None-Match`. A conditional request can
-    // legitimately answer 304 from a cached view, which would leave a just-read icon stuck on
-    // "unread" — the exact symptom the burst exists to cure.
-
     loop {
-        state.begin_cycle();
-
-        // ── PR axes (serial, not concurrent: GitHub asks for serial requests) ─
-        // All three are GraphQL POSTs, which never answer 304, so this is always an unconditional
-        // request. What they draw on is a points budget rather than a request count, and what each
-        // query actually costs is logged by `parse_reviewed` from GitHub's own `rateLimit` field —
-        // measured rather than estimated, because the obvious arithmetic gets it wrong. All three
-        // axes share one credential (see `PrTokenStore`), whose
-        // access is granted by installing the GitHub App rather than by a scope, so there is no
-        // per-poll scope check here: whether it can see anything at all is checked once, at
-        // startup, in `main.rs`.
-        if let Some(store) = pr.as_ref() {
-            for axis in PrAxis::ALL {
-                // Skipped before the request, not after: `apply_pr` would discard the answer for an
-                // axis that is not in play, and a GraphQL document reading up to a hundred hits and
-                // their reviews is the most expensive call this app makes, so issuing it would be
-                // pure cost. Worth more now than when this was a 30-per-minute search budget.
-                //
-                // An `if` rather than `.filter()` on the iterator: the adaptor would hold `&state`
-                // across a body that needs `&mut state` for `apply_pr`.
-                if !state.pr_in_play(axis) {
-                    continue;
-                }
-                let response = crate::portal::github::poll_axis(
-                    &client,
-                    &github_endpoints,
-                    store.token(),
-                    axis,
-                    copilot_reviews.is_on(),
-                );
-                // Only a failed axis speaks up, and it says what actually failed — this is the line
-                // that would have shown the merge-ready `statusCheckRollup` FORBIDDEN outright.
-                if let Some(detail) = response.result.problem() {
-                    errorln!("{axis:?} PR poll: {detail}");
-                }
-                state.apply_pr(axis, response);
-            }
-        }
-
-        // Placed *before* `emit`, unlike the update check below, and for the opposite reason. An
-        // available release is equally true a minute later, so that check is allowed to miss the cycle
-        // it runs in. An outage is the explanation for whatever else this cycle just found — stale
-        // counts, unknown axes, a failed poll — so showing the icon first and the reason second gets
-        // the order backwards. The cost is that a hanging status page can hold the icon back for the
-        // client's 10s cap; the request is 219 bytes, so that is a remote worst case.
-        //
-        // A failed check deliberately does **not** clear a known outage: see `github_status`.
-        if last_status_check.is_none_or(|at| at.elapsed() >= STATUS_CHECK_INTERVAL) {
-            last_status_check = Some(Instant::now());
-            match crate::portal::statuspage::check(
-                &client,
-                crate::portal::statuspage::STATUS_PAGE_URL,
-                &status_components,
-            ) {
-                Ok(report) => {
-                    // Only on a change, and the first answer always counts as one. A name that
-                    // matches nothing is a typo the user has to fix, and its only other symptom is a
-                    // mark that never appears — indistinguishable from GitHub being well.
-                    if last_unmatched.as_deref() != Some(report.unmatched.as_slice()) {
-                        if !report.unmatched.is_empty() {
-                            errorln!(
-                                "config.txt names components GitHub does not publish, so they are \
-                                 never watched: {}",
-                                report.unmatched.join(", ")
-                            );
-                        }
-                        last_unmatched = Some(report.unmatched);
-                    }
-                    match report.health {
-                        crate::portal::Health::Degraded { description } => {
-                            state.set_status_degraded(Some(description));
-                        }
-                        crate::portal::Health::Fine => state.set_status_degraded(None),
-                    }
-                }
-                Err(e) => errorln!("could not read GitHub's status page: {e}"),
-            }
+        for run in &mut runs {
+            run.cycle();
         }
 
         // Published before `emit` for the same reason the outage check is: the menu entries the URLs
@@ -352,7 +442,7 @@ fn run_poll_loop(
         {
             let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
             *snapshot = PrSnapshot {
-                axes: PrAxis::ALL.map(|axis| state.pr_entries(axis)),
+                axes: PrAxis::ALL.map(|axis| merged_entries(&runs, axis)),
                 polled_at: Some(std::time::Instant::now()),
                 version: snapshot.version.saturating_add(1),
             };
@@ -366,27 +456,33 @@ fn run_poll_loop(
         // more now than it used to: the sound can be switched back on from the menu mid-run, and a
         // latch drained only while hooting was enabled would fire for every arrival missed while it
         // was off — one click, and a hoot for news the user has already seen.
-        let arrivals = crate::overview::arrivals(&[state.take_pr_arrivals()]);
+        let per_portal: Vec<[bool; 3]> = runs.iter_mut().map(|run| run.state.take_pr_arrivals()).collect();
+        let arrivals = crate::overview::arrivals(&per_portal);
 
-        let views = [crate::overview::PortalView { name: "GitHub", state: &state }];
-        let icon = crate::overview::icon(&views, update_available.is_some());
-        let tooltip = crate::overview::tooltip(&views, update_available.as_deref());
-        let pr_labels = std::array::from_fn(|i| {
-            let axis = PrAxis::ALL[i];
-            crate::overview::pr_menu_label(&views, axis)
-        });
+        let (icon, tooltip, pr_labels) = {
+            let views: Vec<crate::overview::PortalView> = runs
+                .iter()
+                .map(|run| crate::overview::PortalView { name: run.name(), state: &run.state })
+                .collect();
+            (
+                crate::overview::icon(&views, update_available.is_some()),
+                crate::overview::tooltip(&views, update_available.as_deref()),
+                PrAxis::ALL.map(|axis| crate::overview::pr_menu_label(&views, axis)),
+            )
+        };
 
         // Update the UI before anything else here can block.
         let update_label = crate::overview::update_menu_label(update_available.as_deref());
-        if !emit(Update { icon, tooltip: tooltip.clone(), pr_labels, update_label }) {
+        if !emit(Update { icon, tooltip, pr_labels, update_label }) {
             return; // UI has gone away
         }
 
         // ── The hoot ─────────────────────────────────────────────────────────
         // After `emit`, so the icon is already showing what the sound is about — a hoot with nothing
         // to look at yet would send the user to a tray that has not caught up. One hoot even when two
-        // or three axes turn over in the same cycle: `crate::sound::hoot` drops overlapping plays
-        // anyway, and three of the same clip at once is a noise rather than a notification.
+        // or three axes, or two portals, turn over in the same cycle: `crate::sound::hoot` drops
+        // overlapping plays anyway, and three of the same clip at once is a noise rather than a
+        // notification.
         if sound_enabled.is_on() && arrivals.iter().any(|&arrived| arrived) {
             let axes: Vec<&str> = PrAxis::ALL
                 .iter()
@@ -432,66 +528,38 @@ fn run_poll_loop(
         }
 
         // ── Credential recovery ──────────────────────────────────────────────
+        // Every portal is asked, not just the first that wants renewing: `recover_credential` also
+        // consumes the per-axis flags, and a short-circuit would leave one portal's latched.
         let mut retry_now = false;
-
-        // All three PR axes share one credential, so a rejection on any of them — or the
-        // credential simply approaching its known expiry, for a GitHub App that has token expiry
-        // turned on (see `PrTokenStore::needs_refresh`) — triggers one shared renewal rather than
-        // three independent ones. `take_pr_reauth` is called for every axis unconditionally
-        // (not through a short-circuiting `.any()`) so each axis's flag is actually consumed.
-        let mut pr_needs_reauth = false;
-        for axis in PrAxis::ALL {
-            if state.take_pr_reauth(axis) {
-                pr_needs_reauth = true;
+        for run in &mut runs {
+            if run.recover_credential() {
+                retry_now = true;
             }
         }
-        if pr.as_ref().is_some_and(PrTokenStore::needs_refresh) {
-            pr_needs_reauth = true;
-        }
-
-        if pr_needs_reauth && may_retry(&mut last_pr_reauth) {
-            match pr.as_mut().map(PrTokenStore::reauthenticate) {
-                // The silent refresh grant worked, so the new credential is worth retrying with at
-                // once. Nothing user-visible happened, which is the point.
-                Some(Ok(())) => retry_now = true,
-                // The grant cannot help: no refresh token, or GitHub rejected the one we have. Hand
-                // it to the user rather than opening a browser unannounced — the exclamation goes up
-                // and the Authenticate item appears, and `Wake::Authenticate` picks it up from there.
-                Some(Err(AuthError::AuthorizationRequired)) => {
-                    infoln!("PR status needs authorization — waiting for the menu");
-                    state.require_pr_auth();
-                    pr = None;
-                }
-                // Anything else is a failure to *ask*, not an answer. Most often the network is
-                // down. The credential is kept and the axes are left alone, so this retries on the
-                // next cycle instead of costing the user a click it did not need. `MIN_REAUTH_INTERVAL`
-                // is what stops that becoming a hot loop.
-                Some(Err(e)) => errorln!("PR credential renewal could not be attempted ({e}) — will retry"),
-                None => {}
-            }
-        }
-
         if retry_now {
             continue; // retry at once with the fresh credential
         }
 
-        // A queued burst entry wins over normal pacing, so resolve the real delay here.
-        let delay = match next_pace(&mut burst, state.rate_limited(), state.next_delay()) {
+        // The slowest portal sets the pace: a portal's own floor (`min_poll_interval`) and whatever
+        // backoff its state worked out, and the largest across portals wins. One portal at the
+        // default floor is exactly the cadence this loop always had. A queued burst entry wins over
+        // normal pacing, so resolve the real delay here.
+        let rate_limited = runs.iter().any(|run| run.state.rate_limited());
+        let steady = runs
+            .iter()
+            .map(|run| run.state.next_delay().max(run.portal.info().min_poll_interval))
+            .max()
+            .unwrap_or(crate::state::MIN_POLL_INTERVAL);
+        let delay = match next_pace(&mut burst, rate_limited, steady) {
             Pace::Burst(delay) => delay,
-            // Leaving the burst also ends the unconditional streak it was running.
-            Pace::Steady(delay) => {
-                delay
-            }
+            Pace::Steady(delay) => delay,
         };
 
         // No healthy-poll heartbeat here on purpose: a clean cycle logs nothing, so the only lines
-        // in the file are the failures worth reading. Each failing poll already logged its reason
-        // above, named by axis.
+        // in the file are the failures worth reading. Each failing poll already logged its reason,
+        // named by axis.
 
         match wake_rx.recv_timeout(delay) {
-            // Either way the next cycle starts at once, and without an `If-None-Match`: a
-            // conditional request may legitimately answer 304 from a cached view, which would leave
-            // a user who just asked for an update staring at the icon they were trying to change.
             Ok(wake) => {
                 match wake {
                     Wake::Refresh => {
@@ -551,39 +619,15 @@ fn run_poll_loop(
                             restart.clone(),
                         );
                     }
-                    // Blocks this thread for as long as the user takes, which is exactly why it is
-                    // here and not in the click handler: the tray stays responsive throughout, and
-                    // the only cost is that polling pauses while a credential is being obtained —
-                    // which it could not usefully do anyway.
-                    Wake::Authenticate => match PrTokenStore::authenticate(&app_asset_path, &github_endpoints.oauth) {
-                        Ok(store) => match store.installation_count() {
-                            // Authorized, but the App is installed nowhere, so search would see no
-                            // repositories at all. Another click cannot fix that, so the exclamation
-                            // comes down and a stated reason replaces it. Same check startup does.
-                            Ok(0) => {
-                                infoln!("{PR_NOT_INSTALLED}");
-                                state.clear_pr_auth();
-                                for axis in PrAxis::ALL {
-                                    state.disable_pr(axis, PR_NOT_INSTALLED.to_string());
-                                }
-                                pr = None;
-                            }
-                            // Could not confirm installations. Start polling anyway rather than
-                            // refuse over a question we could not even ask — the same reasoning
-                            // startup uses.
-                            outcome => {
-                                if let Err(e) = outcome {
-                                    errorln!("could not confirm installations ({e}) — continuing anyway");
-                                }
-                                infoln!("PR status authorized");
-                                state.clear_pr_auth();
-                                pr = Some(store);
-                            }
-                        },
-                        // Denied, expired, or the network went away mid-flow. The state is left as
-                        // it was, so the item is still on the menu to try again.
-                        Err(e) => errorln!("authorization failed: {e}"),
-                    },
+                    // The portal waiting for a sign-in, or the first one when none is: with a
+                    // single portal those are the same thing, and one menu item per portal is the
+                    // follow-up that would tell them apart.
+                    Wake::Authenticate => {
+                        let which = runs.iter().position(|run| run.state.pr_needs_auth()).unwrap_or(0);
+                        if let Some(run) = runs.get_mut(which) {
+                            run.authenticate();
+                        }
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1001,4 +1045,171 @@ mod tests {
         );
     }
 
+
+    // ─── The loop through the seam ──────────────────────────────────────────
+    //
+    // `PortalRun` is the loop body minus the channel, so a `FakePortal` can drive it end to end
+    // without a network. What these hold is the *contract* between the loop and a portal: which
+    // axes get asked, what a rejected credential leads to, and that a portal with no status page
+    // leaves the outage mark alone.
+
+    use crate::portal::fake::FakePortal;
+    use crate::portal::types::{PollResponse, PollResult};
+    use crate::portal::{CredentialState, Health, PollOutcome};
+
+    fn response(result: PollResult) -> PollResponse {
+        PollResponse { result, poll_interval: None }
+    }
+
+    fn fresh(count: u32) -> PollResponse {
+        response(PollResult::Fresh { present: count > 0, count: Some(count), prs: Some(Vec::new()) })
+    }
+
+    fn ready(fake: FakePortal, pr_enabled: [bool; 3]) -> PortalRun {
+        PortalRun::new(Box::new(fake), CredentialState::Ready, pr_enabled)
+    }
+
+    /// The portal is told exactly the axes in play and nothing else: an axis the user switched
+    /// off must cost no request, and that decision is the loop's, not the adapter's.
+    #[test]
+    fn a_run_asks_only_for_the_axes_in_play() {
+        let fake = FakePortal::default()
+            .script(PollOutcome { axes: [Some(fresh(2)), None, Some(fresh(0))] });
+        let log = fake.log();
+        let mut run = ready(fake, [true, false, true]);
+        run.cycle();
+        assert_eq!(log.lock().unwrap().asked, vec![[true, false, true]]);
+        assert_eq!(run.state.confirmed_count(PrAxis::ReviewRequested), Some(2));
+        assert!(!run.state.pr_in_play(PrAxis::ReadyToMerge));
+    }
+
+    /// Waiting for a sign-in means no poll at all, an exclamation, and the menu item. The click
+    /// runs the portal's own flow and the run comes alive on the spot.
+    #[test]
+    fn a_run_waiting_for_sign_in_polls_nothing_until_the_menu_click() {
+        let fake = FakePortal::default().script(PollOutcome { axes: [Some(fresh(1)), None, None] });
+        let log = fake.log();
+        let mut run = PortalRun::new(Box::new(fake), CredentialState::NeedsAuth, [true, false, false]);
+        run.cycle();
+        assert!(log.lock().unwrap().asked.is_empty(), "nothing to ask with");
+        assert!(run.state.icon().needs_auth);
+
+        run.authenticate();
+        assert_eq!(log.lock().unwrap().authenticate_calls, 1);
+        assert!(!run.state.icon().needs_auth);
+        run.cycle();
+        assert_eq!(log.lock().unwrap().asked, vec![[true, false, false]]);
+        assert_eq!(run.state.confirmed_count(PrAxis::ReviewRequested), Some(1));
+    }
+
+    /// "Signed in, nothing to see" is a dead end the user cannot click away, so it is worded as a
+    /// reason on every axis rather than as an exclamation, both at startup and after a sign-in
+    /// that ends there.
+    #[test]
+    fn an_off_portal_explains_itself_and_never_polls() {
+        let fake = FakePortal::default();
+        let log = fake.log();
+        let mut run = PortalRun::new(Box::new(fake), CredentialState::Off("nothing installed".to_string()), [true; 3]);
+        run.cycle();
+        assert!(log.lock().unwrap().asked.is_empty());
+        assert!(!run.state.icon().needs_auth);
+        assert!(run.state.tooltip_lines().iter().any(|l| l == "nothing installed"), "{:?}", run.state.tooltip_lines());
+
+        let mut fake = FakePortal::default();
+        fake.after_sign_in = CredentialState::Off("still nothing".to_string());
+        let mut run = PortalRun::new(Box::new(fake), CredentialState::NeedsAuth, [true; 3]);
+        run.authenticate();
+        assert!(!run.live);
+        assert!(!run.state.icon().needs_auth, "the exclamation comes down: another click cannot help");
+        assert!(run.state.tooltip_lines().iter().any(|l| l == "still nothing"));
+    }
+
+    /// A rejected credential is renewed silently, once, and the loop is told to retry at once. A
+    /// second rejection inside `MIN_REAUTH_INTERVAL` is not retried: that gate is what keeps a
+    /// credential the portal keeps rejecting from becoming a storm.
+    #[test]
+    fn a_rejected_credential_is_renewed_once_per_interval() {
+        let fake = FakePortal::default()
+            .script(PollOutcome { axes: [Some(response(PollResult::Unauthorized)), None, None] })
+            .script(PollOutcome { axes: [Some(response(PollResult::Unauthorized)), None, None] });
+        let log = fake.log();
+        let mut run = ready(fake, [true, false, false]);
+
+        run.cycle();
+        assert!(run.recover_credential(), "a renewed credential is worth retrying with at once");
+        assert_eq!(log.lock().unwrap().reauthenticate_calls, 1);
+        assert!(run.live);
+
+        run.cycle();
+        assert!(!run.recover_credential(), "inside the interval: no second attempt");
+        assert_eq!(log.lock().unwrap().reauthenticate_calls, 1);
+    }
+
+    /// When the portal says only the user can help, the run stops polling and asks for the click
+    /// rather than opening a browser unannounced.
+    #[test]
+    fn a_renewal_the_portal_cannot_do_hands_over_to_the_menu() {
+        let mut fake = FakePortal::default()
+            .script(PollOutcome { axes: [Some(response(PollResult::Unauthorized)), None, None] });
+        fake.renewal = Err(crate::portal::AuthError::AuthorizationRequired);
+        let log = fake.log();
+        let mut run = ready(fake, [true, false, false]);
+        run.cycle();
+        assert!(!run.recover_credential());
+        assert!(!run.live);
+        assert!(run.state.icon().needs_auth);
+        run.cycle();
+        assert_eq!(log.lock().unwrap().asked.len(), 1, "no further poll while waiting for the click");
+    }
+
+    /// Expiry known in advance is renewed before a poll ever fails.
+    #[test]
+    fn an_expiring_credential_is_renewed_before_it_is_rejected() {
+        let mut fake = FakePortal::default();
+        fake.refresh_due = true;
+        let log = fake.log();
+        let mut run = ready(fake, [true, false, false]);
+        run.cycle();
+        assert!(run.recover_credential());
+        assert_eq!(log.lock().unwrap().reauthenticate_calls, 1);
+    }
+
+    /// `None` from `health` is "this portal has no status page", not "fine" and not "unknown":
+    /// the mark is left exactly as it was. A verdict, when there is one, moves it both ways.
+    #[test]
+    fn a_portal_without_a_status_page_never_touches_the_outage_mark() {
+        let mut run = ready(FakePortal::default(), [true, false, false]);
+        run.cycle();
+        assert!(!run.state.icon().status_degraded);
+
+        let mut fake = FakePortal::default();
+        fake.health = Some(Ok(Health::Degraded { description: "Wobbly".to_string() }));
+        let mut run = ready(fake, [true, false, false]);
+        run.cycle();
+        assert!(run.state.icon().status_degraded);
+        assert!(run.state.tooltip_lines()[0].contains("Wobbly"));
+    }
+
+    /// Until the page groups by portal, the snapshot for an axis is every portal's confirmed list
+    /// in one, and it is `None` only when nobody has one.
+    #[test]
+    fn the_snapshot_merges_every_portals_confirmed_entries() {
+        use crate::portal::types::PrEntry;
+        let listed = |urls: &[&str]| {
+            response(PollResult::Fresh {
+                present: !urls.is_empty(),
+                count: Some(urls.len() as u32),
+                prs: Some(urls.iter().map(|u| PrEntry::stub(u)).collect()),
+            })
+        };
+        let a = FakePortal::named("A").script(PollOutcome { axes: [Some(listed(&["https://a.example/1"])), None, None] });
+        let b = FakePortal::named("B").script(PollOutcome { axes: [Some(listed(&["https://b.example/1", "https://b.example/2"])), None, None] });
+        let mut runs = vec![ready(a, [true; 3]), ready(b, [true; 3])];
+        for run in &mut runs {
+            run.cycle();
+        }
+        let merged = merged_entries(&runs, PrAxis::ReviewRequested).expect("both confirmed");
+        assert_eq!(merged.len(), 3);
+        assert!(merged_entries(&runs, PrAxis::ReadyToMerge).is_none(), "nobody answered this axis yet");
+    }
 }

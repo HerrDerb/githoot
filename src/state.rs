@@ -811,10 +811,8 @@ impl PollState {
 
     /// Whether PR status is waiting on the user.
     ///
-    /// `#[cfg(test)]` like the two `*_configured` accessors above: the UI reads this through
-    /// `icon().needs_auth` so the icon and the menu item cannot disagree, which leaves no non-test
-    /// caller for a second way to ask.
-    #[cfg(test)]
+    /// The UI reads this through `icon().needs_auth` so the icon and the menu item cannot disagree;
+    /// the poll loop reads it here to pick which portal a sign-in click is for.
     pub fn pr_needs_auth(&self) -> bool {
         self.pr_needs_auth
     }

@@ -5,6 +5,7 @@
 //! of the seam. Its second job is to let `scheduler` and the overview be driven without a network.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::{
@@ -12,17 +13,29 @@ use super::{
     PortalId, PortalInfo, PortalKind,
 };
 
+/// What the fake was asked to do, shared so a test can keep reading it after the fake has been
+/// boxed and handed to the scheduler.
+#[derive(Default, Debug)]
+pub struct FakeLog {
+    /// Every `axes` argument `poll` was called with.
+    pub asked: Vec<[bool; 3]>,
+    pub authenticate_calls: u32,
+    pub reauthenticate_calls: u32,
+}
+
 pub struct FakePortal {
     pub info: PortalInfo,
     /// Handed back one per `poll`, in order. An empty queue answers with nothing on every axis.
     pub scripted: VecDeque<PollOutcome>,
+    /// What `load_saved_credential` answers, and what `authenticate` moves to `Ready`.
     pub credential: CredentialState,
+    /// What `authenticate` answers. `Ready` unless a test wants the "signed in, nothing to see" path.
+    pub after_sign_in: CredentialState,
     pub health: Option<Result<Health, String>>,
     pub refresh_due: bool,
-    pub authenticate_calls: u32,
-    pub reauthenticate_calls: u32,
-    /// Every `axes` argument `poll` was called with, so a test can assert what was asked for.
-    pub asked: Vec<[bool; 3]>,
+    /// What `reauthenticate` answers when a renewal is attempted.
+    pub renewal: Result<(), AuthError>,
+    pub log: Arc<Mutex<FakeLog>>,
 }
 
 impl FakePortal {
@@ -48,17 +61,22 @@ impl FakePortal {
             },
             scripted: VecDeque::new(),
             credential: CredentialState::Ready,
+            after_sign_in: CredentialState::Ready,
             health: None,
             refresh_due: false,
-            authenticate_calls: 0,
-            reauthenticate_calls: 0,
-            asked: Vec::new(),
+            renewal: Ok(()),
+            log: Arc::new(Mutex::new(FakeLog::default())),
         }
     }
 
     pub fn script(mut self, outcome: PollOutcome) -> Self {
         self.scripted.push_back(outcome);
         self
+    }
+
+    /// A handle on the log that outlives handing the fake away.
+    pub fn log(&self) -> Arc<Mutex<FakeLog>> {
+        Arc::clone(&self.log)
     }
 }
 
@@ -78,9 +96,9 @@ impl Portal for FakePortal {
     }
 
     fn authenticate(&mut self) -> Result<CredentialState, AuthError> {
-        self.authenticate_calls += 1;
-        self.credential = CredentialState::Ready;
-        Ok(CredentialState::Ready)
+        self.log.lock().unwrap().authenticate_calls += 1;
+        self.credential = self.after_sign_in.clone();
+        Ok(self.after_sign_in.clone())
     }
 
     fn needs_refresh(&self) -> bool {
@@ -88,13 +106,23 @@ impl Portal for FakePortal {
     }
 
     fn reauthenticate(&mut self) -> Result<(), AuthError> {
-        self.reauthenticate_calls += 1;
+        self.log.lock().unwrap().reauthenticate_calls += 1;
         self.refresh_due = false;
-        Ok(())
+        // `AuthError` is not `Clone`; rebuild the scripted answer each time.
+        match &self.renewal {
+            Ok(()) => Ok(()),
+            Err(AuthError::AuthorizationRequired) => Err(AuthError::AuthorizationRequired),
+            Err(AuthError::Network(e)) => Err(AuthError::Network(e.clone())),
+            Err(AuthError::Denied) => Err(AuthError::Denied),
+            Err(AuthError::Expired) => Err(AuthError::Expired),
+            Err(AuthError::Portal { name, detail }) => {
+                Err(AuthError::Portal { name: name.clone(), detail: detail.clone() })
+            }
+        }
     }
 
     fn poll(&mut self, axes: [bool; 3]) -> PollOutcome {
-        self.asked.push(axes);
+        self.log.lock().unwrap().asked.push(axes);
         self.scripted.pop_front().unwrap_or_default()
     }
 
@@ -138,6 +166,7 @@ mod tests {
         let mut portal = FakePortal::default()
             .script(PollOutcome { axes: [Some(fresh(2)), None, Some(fresh(0))] })
             .script(PollOutcome { axes: [Some(fresh(3)), None, None] });
+        let log = portal.log();
 
         let first = portal.poll([true, false, true]);
         assert_eq!(count_of(&first.axes[0]), Some(2));
@@ -149,22 +178,28 @@ mod tests {
 
         let third = portal.poll([true, true, true]);
         assert!(third.axes.iter().all(Option::is_none), "an exhausted script answers nothing");
-        assert_eq!(portal.asked, vec![[true, false, true], [true, false, false], [true, true, true]]);
+        assert_eq!(
+            log.lock().unwrap().asked,
+            vec![[true, false, true], [true, false, false], [true, true, true]]
+        );
     }
 
     #[test]
     fn credentials_and_health_are_scripted_too() {
         let mut portal = FakePortal::default();
+        let log = portal.log();
         portal.credential = CredentialState::NeedsAuth;
         assert_eq!(portal.load_saved_credential().unwrap(), CredentialState::NeedsAuth);
         assert_eq!(portal.authenticate().unwrap(), CredentialState::Ready);
-        assert_eq!(portal.authenticate_calls, 1);
+        assert_eq!(log.lock().unwrap().authenticate_calls, 1);
 
         portal.refresh_due = true;
         assert!(portal.needs_refresh());
         portal.reauthenticate().unwrap();
-        assert_eq!(portal.reauthenticate_calls, 1);
+        assert_eq!(log.lock().unwrap().reauthenticate_calls, 1);
         assert!(!portal.needs_refresh(), "a renewal clears the due flag");
+        portal.renewal = Err(AuthError::AuthorizationRequired);
+        assert!(matches!(portal.reauthenticate(), Err(AuthError::AuthorizationRequired)));
 
         assert!(portal.health().is_none(), "a portal with no status page says nothing");
         portal.health = Some(Ok(Health::Degraded { description: "Wobbly".to_string() }));

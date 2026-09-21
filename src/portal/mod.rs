@@ -25,10 +25,6 @@
 //!   list there costs one request per repository. [`PortalInfo::min_poll_interval`] is the floor a
 //!   portal asks for, and the scheduler paces to the slowest.
 
-// Until the scheduler drives portals through the trait (a few commits from now) nothing outside
-// this module constructs these types. Removed with the first real caller.
-#![allow(dead_code)]
-
 pub mod github;
 pub mod statuspage;
 pub mod types;
@@ -59,7 +55,9 @@ pub enum PortalKind {
 pub enum AuthStyle {
     /// A browser round trip started from the menu: GitHub App device flow, GitLab 17.9+.
     DeviceFlow,
-    /// The user makes a token on the portal's own site and hands it over. Bitbucket Cloud.
+    /// The user makes a token on the portal's own site and hands it over. Bitbucket Cloud, which
+    /// is why nothing constructs it yet.
+    #[allow(dead_code)]
     PastedToken,
 }
 

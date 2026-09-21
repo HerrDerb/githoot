@@ -180,6 +180,8 @@ impl Endpoints {
         }
     }
 
+    /// Shorthand for the tests; production derives from the configured base.
+    #[cfg(test)]
     pub fn github_com() -> Endpoints {
         Endpoints::for_base(DEFAULT_BASE_URL)
     }

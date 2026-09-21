@@ -379,24 +379,6 @@ fn installation_count(http: &Client, oauth: &OAuthEndpoints, token: &str) -> Res
 /// after a menu-driven sign-in — so the same condition cannot be worded two ways.
 pub const PR_NOT_INSTALLED: &str = "PR status off: install the GitHub App to see your PRs";
 
-/// What PR status could be brought up to without asking the user anything.
-///
-/// Three outcomes rather than an `Option`, because "no dots on the icon" has three quite different
-/// meanings and each is said differently. Collapsing them is exactly the confusion this codebase is
-/// shaped around avoiding: a dark icon that means "nothing needs you" must never look like one that
-/// means "nobody could ask".
-pub enum PrStatus {
-    /// A usable credential. Polling starts immediately.
-    Ready(PrTokenStore),
-    /// Nothing usable on disk, or what was there can no longer be renewed silently. Red
-    /// exclamation, `Authenticate` on the menu, one click from being fixed.
-    NeedsAuth,
-    /// Signed in fine, but there is nothing to see and clicking would not change that — the App is
-    /// not installed on any account, or no HTTP client could be built at all. The reason travels
-    /// with it, for the tooltip.
-    Off(String),
-}
-
 /// Owns the PR-status credential and knows how to renew it.
 ///
 /// Lives on the poll thread so a mid-run 401, or an approaching expiry, can be recovered from

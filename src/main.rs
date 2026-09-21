@@ -20,8 +20,8 @@ mod state;
 mod update;
 mod version;
 
-use crate::portal::github::auth as github_app;
-use crate::portal::statuspage as github_status;
+use crate::portal::github::{GitHubOptions, GitHubPortal, DEFAULT_BASE_URL};
+use crate::portal::{CredentialState, Portal, PortalId};
 
 
 // ─── Command-line contract ────────────────────────────────────────────────────
@@ -107,65 +107,88 @@ fn await_process_exit(pid: Option<&str>) {
     }
 }
 
-/// Brings up the shared PR-status credential (the `github_app` Device Flow) as far as it can go
-/// *without involving the user*, and confirms it can actually see something.
+/// Builds every configured portal and brings each one's credential as far as it can go *without
+/// involving the user*.
 ///
 /// Deliberately never opens a browser and never blocks on a human. A saved credential is reused, and
-/// refreshed silently if it is expiring, but when a full sign-in is needed this returns
-/// `PrStatus::NeedsAuth` and startup carries on: the tray icon appears wearing a red exclamation
-/// with an `Authenticate` entry on its menu, and the user starts the flow when it suits them. That is
-/// the whole point — a tray app that opens a browser window before its icon has even appeared is
+/// refreshed silently if it is expiring, but when a full sign-in is needed the portal answers
+/// `NeedsAuth` and startup carries on: the tray icon appears wearing a red exclamation with an
+/// `Authenticate` entry on its menu, and the user starts the flow when it suits them. That is the
+/// whole point — a tray app that opens a browser window before its icon has even appeared is
 /// indistinguishable from something that has gone wrong.
 ///
-/// Never fatal either way. Notifications are a separate, optional feature (see `config`) that does
-/// not care whether this succeeds. The outcome does have to be *said*, though: a dark dot that means
-/// "nobody could ask" looks exactly like a dark dot that means "nothing to review", and that
-/// confusion is the bug this whole codebase is shaped around avoiding.
-fn load_pr_credential(app_asset_path: &std::path::Path) -> github_app::PrStatus {
-    let store = match github_app::PrTokenStore::load_saved(
-        app_asset_path,
-        &crate::portal::github::Endpoints::github_com().oauth,
-    ) {
-        Ok(Some(store)) => store,
-        // Nothing usable on disk. Not an error and not worth a dialog: it is the expected state on a
-        // first run, and the icon and menu now say it plainly without interrupting anyone.
-        Ok(None) => return github_app::PrStatus::NeedsAuth,
-        // No HTTP client could be built at all, which is a broken TLS stack rather than a missing
-        // credential. Clicking `Authenticate` would fail the same way, so this is `Off`, not
-        // `NeedsAuth`.
+/// Skipped entirely when every PR signal is switched off. Without that guard a disabled feature
+/// would still make a network call (the installations read) and, on Windows and macOS, could raise a
+/// sign-in dialog — for something the user turned off.
+///
+/// Never fatal. The outcome does have to be *said*, though: a dark dot that means "nobody could ask"
+/// looks exactly like a dark dot that means "nothing to review", and that confusion is the bug this
+/// whole codebase is shaped around avoiding. Each portal's `CredentialState` carries the reason.
+///
+/// One portal, GitHub, for now. The list is the shape the poll loop already takes, so a second
+/// portal is one more push here and nothing downstream.
+fn build_portals(
+    config: &config::Config,
+    app_asset_path: &std::path::Path,
+    copilot: &config::Switch,
+) -> Vec<(Box<dyn Portal>, CredentialState)> {
+    // The portal's own HTTP client. Failing to build one is a broken TLS stack, not a missing
+    // credential, and nothing a click could fix: say so and run with no portal at all.
+    let http = match portal::github::api::build_client() {
+        Ok(http) => http,
         Err(e) => {
-            let msg = format!("Could not set up GitHub access for PR status: {e}");
-            infoln!("PR status disabled: {msg}");
-
-            // On Windows there is no console (`windows_subsystem = "windows"`) and on macOS the app
-            // ships as an `LSUIElement` bundle whose stdout goes to unified logging, so on both a
-            // dialog is the only way this reaches someone who is not reading the log file.
-            //
-            // Not `dialog::message` on Linux: this runs during startup and nobody is waiting to be
-            // asked anything, so its stdin fallback would block the app before the tray appears.
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
-            dialog::message("githoot-tray: PR status", &msg);
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            eprintln!("\ngithoot-tray: PR status disabled\n\n{msg}\n");
-
-            return github_app::PrStatus::Off("PR status off: setup failed".to_string());
+            report_setup_failure(&format!("Could not set up GitHub access for PR status: {e}"));
+            return Vec::new();
         }
     };
+    let mut github = GitHubPortal::new(
+        PortalId("github".to_string()),
+        DEFAULT_BASE_URL,
+        http,
+        app_asset_path.to_path_buf(),
+        GitHubOptions {
+            copilot_reviews: copilot.clone(),
+            status_components: config.status_components.clone(),
+        },
+    );
+    let credential = if config.any_pr_enabled() {
+        load_credential(&mut github)
+    } else {
+        infoln!("all PR signals are off in config.txt — skipping PR sign-in entirely");
+        CredentialState::Off("PR status off in config.txt".to_string())
+    };
+    vec![(Box::new(github), credential)]
+}
 
-    match store.installation_count() {
-        Ok(0) => {
-            infoln!("{}", github_app::PR_NOT_INSTALLED);
-            github_app::PrStatus::Off(github_app::PR_NOT_INSTALLED.to_string())
-        }
-        Ok(_) => github_app::PrStatus::Ready(store),
-        // Could not confirm installations — start anyway rather than refuse over a question we
-        // could not even ask. Same "unreachable is not the same as invalid" reasoning
-        // `access_token`'s saved-token check already uses.
+/// The non-interactive credential path for one portal, with the one failure that is not the
+/// portal's to word: no HTTP client could be built at all, which no amount of clicking would fix,
+/// so it is `Off` rather than `NeedsAuth`.
+fn load_credential(portal: &mut dyn Portal) -> CredentialState {
+    match portal.load_saved_credential() {
+        Ok(state) => state,
         Err(e) => {
-            errorln!("could not confirm GitHub App installations ({e}) — continuing anyway");
-            github_app::PrStatus::Ready(store)
+            let msg = format!(
+                "Could not set up {} access for PR status: {e}",
+                portal.info().display_name
+            );
+            infoln!("PR status disabled: {msg}");
+            report_setup_failure(&msg);
+            CredentialState::Off("PR status off: setup failed".to_string())
         }
     }
+}
+
+/// On Windows there is no console (`windows_subsystem = "windows"`) and on macOS the app ships as an
+/// `LSUIElement` bundle whose stdout goes to unified logging, so on both a dialog is the only way this
+/// reaches someone who is not reading the log file.
+///
+/// Not `dialog::message` on Linux: this runs during startup and nobody is waiting to be asked
+/// anything, so its stdin fallback would block the app before the tray appears.
+fn report_setup_failure(msg: &str) {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    dialog::message("githoot-tray: PR status", msg);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    eprintln!("\ngithoot-tray: PR status disabled\n\n{msg}\n");
 }
 
 /// Reports a failure without blocking the thread the menu runs on.
@@ -239,20 +262,12 @@ fn main() {
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
     autostart::offer_on_first_run(first_run);
-    // Skipped entirely when every PR signal is switched off. Without this guard a disabled feature
-    // would still make a network call (`installation_count`) and, on Windows and macOS, could raise a
-    // sign-in dialog — for something the user turned off.
-    let pr = if config.any_pr_enabled() {
-        load_pr_credential(&app_asset_path)
-    } else {
-        infoln!("all PR signals are off in config.txt — skipping PR sign-in entirely");
-        github_app::PrStatus::Off("PR status off in config.txt".to_string())
-    };
 
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
     let copilot = config::Switch::new(config.copilot_reviews);
+    let portals = build_portals(&config, &app_asset_path, &copilot);
 
     let mut indicator = AppIndicator::new("githoot_tray", "");
     indicator.set_status(AppIndicatorStatus::Active);
@@ -487,7 +502,7 @@ fn main() {
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     let status_item = MenuItem::with_label(state::STATUS_MENU_LABEL);
     status_item.connect_activate(move |_| {
-        if let Err(e) = open::that(github_status::STATUS_PAGE_URL) {
+        if let Err(e) = open::that(portal::statuspage::STATUS_PAGE_URL) {
             errorln!("failed to open the GitHub status page: {e}");
         }
     });
@@ -567,7 +582,7 @@ fn main() {
             update: update_item.clone(),
         },
         scheduler::PollInputs {
-            pr,
+            portals,
             app_asset_path: app_asset_path.clone(),
             update_check: config.update_check,
             // Mapped over the axes rather than written as a literal, so the axis name appears on both
@@ -575,8 +590,6 @@ fn main() {
             // which bar a setting controls.
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
             sound: sound.clone(),
-            status_components: config.status_components.clone(),
-            copilot_reviews: copilot.clone(),
         },
         wake_rx,
         restart_tx,
@@ -712,20 +725,12 @@ fn main() {
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
     autostart::offer_on_first_run(first_run);
-    // Skipped entirely when every PR signal is switched off. Without this guard a disabled feature
-    // would still make a network call (`installation_count`) and, on Windows and macOS, could raise a
-    // sign-in dialog — for something the user turned off.
-    let pr = if config.any_pr_enabled() {
-        load_pr_credential(&app_asset_path)
-    } else {
-        infoln!("all PR signals are off in config.txt — skipping PR sign-in entirely");
-        github_app::PrStatus::Off("PR status off in config.txt".to_string())
-    };
 
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
     let copilot = config::Switch::new(config.copilot_reviews);
+    let portals = build_portals(&config, &app_asset_path, &copilot);
 
     // ── Tray ─────────────────────────────────────────────────────────────────
 
@@ -1044,7 +1049,7 @@ fn main() {
     // Launch the polling thread; it communicates back via the proxy.
     scheduler::start_notification_scheduler(
         scheduler::PollInputs {
-            pr,
+            portals,
             app_asset_path: app_asset_path.clone(),
             update_check: config.update_check,
             // Mapped over the axes rather than written as a literal, so the axis name appears on both
@@ -1052,8 +1057,6 @@ fn main() {
             // which bar a setting controls.
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
             sound: sound.clone(),
-            status_components: config.status_components.clone(),
-            copilot_reviews: copilot.clone(),
         },
         wake_rx,
         proxy,
@@ -1143,7 +1146,7 @@ fn main() {
                     errorln!("failed to open the repository: {e}");
                 }
             } else if *id == tray.status_item_id {
-                if let Err(e) = open::that(github_status::STATUS_PAGE_URL) {
+                if let Err(e) = open::that(portal::statuspage::STATUS_PAGE_URL) {
                     errorln!("failed to open the GitHub status page: {e}");
                 }
             } else if *id == tray.quit_item_id {
