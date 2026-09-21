@@ -121,7 +121,10 @@ fn await_process_exit(pid: Option<&str>) {
 /// "nobody could ask" looks exactly like a dark dot that means "nothing to review", and that
 /// confusion is the bug this whole codebase is shaped around avoiding.
 fn load_pr_credential(app_asset_path: &std::path::Path) -> github_app::PrStatus {
-    let store = match github_app::PrTokenStore::load_saved(app_asset_path) {
+    let store = match github_app::PrTokenStore::load_saved(
+        app_asset_path,
+        &crate::portal::github::Endpoints::github_com().oauth,
+    ) {
         Ok(Some(store)) => store,
         // Nothing usable on disk. Not an error and not worth a dialog: it is the expected state on a
         // first run, and the icon and menu now say it plainly without interrupting anyone.

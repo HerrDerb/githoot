@@ -14,7 +14,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::portal::types::{CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict};
 
-const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const AGENT: &str = "githoot-tray";
 
 /// How many search hits the changes-requested GraphQL poll inspects.
@@ -145,9 +144,10 @@ query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!){\
 /// the server-side filter is unchanged and only the client-side intersection is new.
 ///
 /// No `If-None-Match`: GraphQL is a POST and does not answer `304`.
-pub fn poll_changes_requested(client: &Client, token: &str, query: &str, copilot: bool) -> PollResponse {
+pub fn poll_changes_requested(client: &Client, graphql_url: &str, token: &str, query: &str, copilot: bool) -> PollResponse {
     poll_reviewed(
         client,
+        graphql_url,
         token,
         query,
         &|body| parse_reviewed(body, |pr| work_required(pr, copilot)),
@@ -165,9 +165,9 @@ pub fn poll_changes_requested(client: &Client, token: &str, query: &str, copilot
 /// is handed to `search` unchanged, so the count does not move — except that it now shares the other
 /// two axes' cap: past `SEARCH_HITS_CAP` matches the extras are not seen. That undercounts rather
 /// than overcounts, and is unreachable by the inbox this app exists for.
-pub fn poll_review_requested(client: &Client, token: &str, query: &str) -> PollResponse {
+pub fn poll_review_requested(client: &Client, graphql_url: &str, token: &str, query: &str) -> PollResponse {
     // No threads: Copilot's comments on a pull request are its author's work, never its reviewer's.
-    poll_reviewed(client, token, query, &|body| parse_reviewed(body, |_| true), false)
+    poll_reviewed(client, graphql_url, token, query, &|body| parse_reviewed(body, |_| true), false)
 }
 
 /// Polls the user's own open pull requests and counts the ones a reviewer approved.
@@ -175,9 +175,10 @@ pub fn poll_review_requested(client: &Client, token: &str, query: &str) -> PollR
 /// `query` must *not* carry `review:approved`: that qualifier is the `reviewDecision` projection this
 /// axis exists to get away from (see `PR_REVIEWS_DOCUMENT`). The server narrows to the user's open,
 /// non-draft pull requests; `approved` judges each hit by its reviews.
-pub fn poll_approved(client: &Client, token: &str, query: &str, copilot: bool) -> PollResponse {
+pub fn poll_approved(client: &Client, graphql_url: &str, token: &str, query: &str, copilot: bool) -> PollResponse {
     poll_reviewed(
         client,
+        graphql_url,
         token,
         query,
         &|body| parse_reviewed(body, |pr| approved(pr, copilot)),
@@ -189,6 +190,7 @@ pub fn poll_approved(client: &Client, token: &str, query: &str, copilot: bool) -
 /// variables, one parser apiece.
 fn poll_reviewed(
     client: &Client,
+    graphql_url: &str,
     token: &str,
     query: &str,
     parse_ok: BodyParser,
@@ -205,7 +207,7 @@ fn poll_reviewed(
             "threads": if threads { REVIEW_THREADS_CAP } else { 0 },
         },
     });
-    let request = client.post(GRAPHQL_URL).json(&body);
+    let request = client.post(graphql_url).json(&body);
 
     send(request, token, parse_ok)
 }

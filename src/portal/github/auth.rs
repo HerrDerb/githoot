@@ -67,6 +67,16 @@ const EXPIRY_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// This credential's tag for `dialog::show_device_code_prompt`/`show_auth_success`.
 const AUTH_SUBJECT: &str = "GitHub PR Status";
 
+/// The three URLs the device flow and the installations read talk to, derived from the portal's
+/// base by `super::Endpoints::for_base` so a GitHub Enterprise Server is a different base and
+/// nothing else in here changes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OAuthEndpoints {
+    pub device_code: String,
+    pub access_token: String,
+    pub installations: String,
+}
+
 fn client_id() -> String {
     std::env::var(CLIENT_ID_ENV)
         .ok()
@@ -236,9 +246,9 @@ fn save_credential(path: &Path, credential: &Credential) {
 ///
 /// Sent *without* a client secret — see this module's doc comment for why, and what happens if
 /// that turns out to be wrong for this App.
-fn refresh(http: &Client, refresh_token: &str) -> Result<Credential, AuthError> {
+fn refresh(http: &Client, oauth: &OAuthEndpoints, refresh_token: &str) -> Result<Credential, AuthError> {
     let response = http
-        .post("https://github.com/login/oauth/access_token")
+        .post(&oauth.access_token)
         .header("Accept", "application/json")
         .header("User-Agent", AGENT)
         .form(&[
@@ -265,9 +275,9 @@ fn refresh(http: &Client, refresh_token: &str) -> Result<Credential, AuthError> 
 /// Step 1 of the device flow: request a device code. Sends no `scope` — a GitHub App's
 /// permissions are fixed at registration, not requested per-authorization, so the parameter is
 /// meaningless here (unlike the classic OAuth App flow in `access_token`).
-fn request_device_code(http: &Client) -> Result<DeviceCodeResponse, AuthError> {
+fn request_device_code(http: &Client, oauth: &OAuthEndpoints) -> Result<DeviceCodeResponse, AuthError> {
     let response = http
-        .post("https://github.com/login/device/code")
+        .post(&oauth.device_code)
         .header("Accept", "application/json")
         .header("User-Agent", AGENT)
         .form(&[("client_id", client_id().as_str())])
@@ -280,8 +290,8 @@ fn request_device_code(http: &Client) -> Result<DeviceCodeResponse, AuthError> {
 }
 
 /// Runs the full Device Flow and returns the resulting credential.
-fn device_code_flow(http: &Client) -> Result<Credential, AuthError> {
-    let dc = request_device_code(http)?;
+fn device_code_flow(http: &Client, oauth: &OAuthEndpoints) -> Result<Credential, AuthError> {
+    let dc = request_device_code(http, oauth)?;
 
     // The prompt owns the browser launch — see `dialog::show_device_code_prompt`. Non-blocking, so
     // the poll loop below starts while the dialog is still on screen.
@@ -298,7 +308,7 @@ fn device_code_flow(http: &Client) -> Result<Credential, AuthError> {
         std::thread::sleep(poll_interval);
 
         let response = http
-            .post("https://github.com/login/oauth/access_token")
+            .post(&oauth.access_token)
             .header("Accept", "application/json")
             .header("User-Agent", AGENT)
             .form(&[
@@ -345,9 +355,9 @@ struct InstallationsResponse {
 /// report" indistinguishable from genuinely having nothing to report. Called once at startup, not
 /// every poll — installations do not change fast enough to justify the extra request on the hot
 /// path.
-fn installation_count(http: &Client, token: &str) -> Result<u64, AuthError> {
+fn installation_count(http: &Client, oauth: &OAuthEndpoints, token: &str) -> Result<u64, AuthError> {
     let response = http
-        .get("https://api.github.com/user/installations")
+        .get(&oauth.installations)
         .header("Accept", "application/vnd.github+json")
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .header("User-Agent", AGENT)
@@ -393,6 +403,7 @@ pub enum PrStatus {
 /// without restarting the app — same role `access_token::TokenStore` plays for notifications.
 pub struct PrTokenStore {
     token_path: PathBuf,
+    oauth: OAuthEndpoints,
     credential: Credential,
     http: Client,
 }
@@ -409,7 +420,7 @@ impl PrTokenStore {
     ///
     /// A refresh grant *is* still attempted here, unlike the device flow: it needs no browser and no
     /// human, so there is nothing to defer.
-    pub fn load_saved(app_asset_path: &Path) -> Result<Option<Self>, AuthError> {
+    pub fn load_saved(app_asset_path: &Path, oauth: &OAuthEndpoints) -> Result<Option<Self>, AuthError> {
         let http = build_client()?;
         let token_path = app_asset_path.join(PR_TOKEN_FILE);
 
@@ -419,7 +430,7 @@ impl PrTokenStore {
         };
 
         if !saved.needs_refresh() {
-            return Ok(Some(Self { token_path, credential: saved, http }));
+            return Ok(Some(Self { token_path, oauth: oauth.clone(), credential: saved, http }));
         }
 
         let Some(refresh_token) = saved.refresh_token.clone() else {
@@ -427,10 +438,10 @@ impl PrTokenStore {
             return Ok(None);
         };
 
-        match refresh(&http, &refresh_token) {
+        match refresh(&http, oauth, &refresh_token) {
             Ok(credential) => {
                 save_credential(&token_path, &credential);
-                Ok(Some(Self { token_path, credential, http }))
+                Ok(Some(Self { token_path, oauth: oauth.clone(), credential, http }))
             }
             // Could not reach GitHub, which says nothing about whether the refresh token is still
             // good — the common cause is a tray app started at login before the network is up. Keep
@@ -438,7 +449,7 @@ impl PrTokenStore {
             // cycle, rather than demanding a click for something that heals itself.
             Err(e @ AuthError::Network(_)) => {
                 errorln!("could not refresh the PR credential yet ({e}) — retrying on the poll loop");
-                Ok(Some(Self { token_path, credential: saved, http }))
+                Ok(Some(Self { token_path, oauth: oauth.clone(), credential: saved, http }))
             }
             Err(e) => {
                 errorln!("saved PR credential was rejected ({e}) — waiting for the user to authorize");
@@ -452,12 +463,12 @@ impl PrTokenStore {
     /// Called only when the user picks the tray's Authenticate item, so a browser and a dialog are
     /// expected here rather than a surprise. Blocks for as long as the flow takes (up to GitHub's
     /// 15-minute device-code lifetime), so its caller must be the poll thread, never the UI thread.
-    pub fn authenticate(app_asset_path: &Path) -> Result<Self, AuthError> {
+    pub fn authenticate(app_asset_path: &Path, oauth: &OAuthEndpoints) -> Result<Self, AuthError> {
         let http = build_client()?;
         let token_path = app_asset_path.join(PR_TOKEN_FILE);
-        let credential = device_code_flow(&http)?;
+        let credential = device_code_flow(&http, oauth)?;
         save_credential(&token_path, &credential);
-        Ok(Self { token_path, credential, http })
+        Ok(Self { token_path, oauth: oauth.clone(), credential, http })
     }
 
     pub fn token(&self) -> &str {
@@ -468,7 +479,7 @@ impl PrTokenStore {
     /// genuinely empty PR search apart from one that can't see any repositories at all yet. See
     /// `installation_count`'s own doc comment for why this matters.
     pub fn installation_count(&self) -> Result<u64, AuthError> {
-        installation_count(&self.http, self.token())
+        installation_count(&self.http, &self.oauth, self.token())
     }
 
     /// Whether the current credential is expired or expiring imminently.
@@ -496,7 +507,7 @@ impl PrTokenStore {
             return Err(AuthError::AuthorizationRequired);
         };
 
-        match refresh(&self.http, &refresh_token) {
+        match refresh(&self.http, &self.oauth, &refresh_token) {
             Ok(credential) => {
                 save_credential(&self.token_path, &credential);
                 self.credential = credential;
@@ -516,6 +527,10 @@ impl PrTokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn oauth() -> OAuthEndpoints {
+        crate::portal::github::Endpoints::github_com().oauth
+    }
 
     #[test]
     fn a_credential_with_no_expiry_never_needs_refresh() {
@@ -626,7 +641,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("test temp dir");
 
-        let outcome = PrTokenStore::load_saved(&dir).expect("building an HTTP client must succeed");
+        let outcome = PrTokenStore::load_saved(&dir, &oauth()).expect("building an HTTP client must succeed");
         assert!(outcome.is_none(), "an empty asset directory must mean authorization is needed");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -649,7 +664,7 @@ mod tests {
             },
         );
 
-        let store = PrTokenStore::load_saved(&dir)
+        let store = PrTokenStore::load_saved(&dir, &oauth())
             .expect("building an HTTP client must succeed")
             .expect("a healthy saved credential must be reused");
         assert_eq!(store.token(), "ghu_still_good");
@@ -676,7 +691,7 @@ mod tests {
             },
         );
 
-        let outcome = PrTokenStore::load_saved(&dir).expect("building an HTTP client must succeed");
+        let outcome = PrTokenStore::load_saved(&dir, &oauth()).expect("building an HTTP client must succeed");
         assert!(outcome.is_none(), "an unrenewable credential must mean authorization is needed");
 
         let _ = std::fs::remove_dir_all(&dir);

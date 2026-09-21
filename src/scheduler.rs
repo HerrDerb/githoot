@@ -9,7 +9,7 @@
 //! refresh when the user opens their notifications, and a clean exit when the UI goes away.
 
 use crate::portal::github::api as github;
-use crate::portal::types::{PollResponse, PrEntry};
+use crate::portal::types::PrEntry;
 use crate::portal::github::auth::{AuthError, PrStatus, PrTokenStore, PR_NOT_INSTALLED};
 use crate::update::{Available, RestartPlan};
 use crate::{errorln, infoln};
@@ -48,120 +48,6 @@ const STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// loop iteration that spawned it, so the flag has to live somewhere both can see. Clicking the menu
 /// entry twice is the case this exists for.
 static UPDATE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Search query for pull requests awaiting the user's review.
-///
-/// `-label:dependencies` is the conventional Dependabot marker, but it is applied by convention
-/// rather than guaranteed — a repo with custom Dependabot config, or Renovate instead, would slip
-/// through — so the bot authors are excluded by name as well.
-///
-/// `draft:false`, same as `MERGE_QUERY`: a draft is not ready for review by GitHub's own
-/// definition, so a request parked on one is work that cannot be acted on yet. It lights the dot
-/// the moment the author marks it ready, because leaving draft state is an update to the PR.
-///
-/// `review-requested:@me`, not `user-review-requested:@me` — a deliberate choice between two
-/// documented qualifiers. The wider one also matches PRs where a *team* the user belongs to was
-/// asked, which is still work someone expects picked up, and it clears once anyone on the team
-/// reviews. The narrower one would count only requests naming the user directly.
-///
-/// `sort:updated-desc` from the equivalent UI search is deliberately absent: it is a UI-only
-/// qualifier the API does not read, and the order hits come back in is the page's business, not the
-/// count's. `REVIEW_UI_SORT` adds it back for the browser view alone.
-const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false archived:false \
-                            -label:dependencies -author:app/dependabot -author:app/renovate";
-
-/// Search query for the user's own pull requests that might be approved.
-///
-/// Server-side: yours, open, not a draft. *Approved* is judged client-side by `github::approved`, and
-/// there is deliberately no `review:approved` here. That qualifier reads `reviewDecision`, GitHub's
-/// verdict on a repository's review *policy*, and a repository that requires no reviews gets no verdict:
-/// every one of its pull requests reports `null`, approved or not, and the qualifier matches none of
-/// them. The green bar sat dark over six approved PRs before this was noticed. Reading the reviews
-/// themselves is what the PR page does, and it is what this axis does now — see `PR_REVIEWS_DOCUMENT`.
-///
-/// There is deliberately no CI qualifier either. A red check used to disqualify a hit — the bar meant
-/// *approved and mergeable* — and that hid the one thing worth being told, that somebody approved your
-/// work. Whether CI is green is a question you go and answer on the page the entry opens. So
-/// `status:success` is not merely unused but unwanted. (It would not have worked anyway: it reads only
-/// GitHub's legacy combined commit status, empty for repos whose checks are all check runs.) Also still
-/// unchecked, and always was: branch-protection rules needing more than one approval or named reviewers.
-const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
-
-/// Search query for the user's own pull requests that might need work from you.
-///
-/// Server-side: yours, open, not a draft. Nothing else — **`review:changes_requested` is deliberately
-/// gone.** The axis counts two things now, a reviewer's standing objection *or* a merge conflict with
-/// someone waiting, and `mergeable` is not a search qualifier, so a hit has to be looked at either
-/// way. Narrowing to one of the two halves server-side would have hidden the other.
-///
-/// `draft:false` is new with it. A draft is work you already know is unfinished, so neither half of
-/// this bar is news on one; before the conflict half existed the qualifier was absent, and a draft
-/// carrying a changes-requested review did count.
-///
-/// This is now character-for-character `MERGE_QUERY`. Two identical searches per cycle is real waste,
-/// and collapsing them into one poll feeding two rules is worth doing — it is left alone here only so
-/// a semantic change and a poll-loop refactor do not land in the same commit.
-const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
-
-/// The search query behind `axis`'s dot. `PrAxis` itself doesn't know about queries — issuing
-/// HTTP requests is this module's job, not `state`'s — so the mapping lives here.
-fn pr_query(axis: PrAxis) -> &'static str {
-    match axis {
-        PrAxis::ReviewRequested => REVIEW_QUERY,
-        PrAxis::ReadyToMerge => MERGE_QUERY,
-        PrAxis::ChangesRequested => CHANGES_QUERY,
-    }
-}
-
-/// Which rule decides whether a search hit counts for an axis.
-///
-/// All three axes now issue the same GraphQL document against the same endpoint, so what separates
-/// them is the query string and this. It used to be `PrEndpoint`, and the rename is the point: with
-/// `ReviewRequested` moved off REST Search there is one endpoint left, and a type naming three of
-/// them would be a lie in a type name.
-///
-/// Split out of `poll_pr` for the reason the old type was: `poll_pr` does I/O and therefore cannot be
-/// asserted, while *which rule judges which axis* is exactly the kind of decision that should not be
-/// able to change unnoticed. Same motivation as `pr_query` above — one definition, one test.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PrJudge {
-    /// Every hit counts. `review-requested:@me` is a real server-side filter, so there is nothing for
-    /// a client-side rule to narrow; the hits are fetched only so the page can name them.
-    EveryHit,
-    /// `github::approved` reads each hit's reviews, because Search's `review:` qualifier reads a field
-    /// GitHub leaves empty wherever no review policy exists.
-    Approved,
-    /// `github::still_on_you` reads each hit's pending requests, which Search cannot express at all.
-    StillOnYou,
-}
-
-/// The rule behind `axis`'s dot.
-fn pr_judge(axis: PrAxis) -> PrJudge {
-    match axis {
-        PrAxis::ReviewRequested => PrJudge::EveryHit,
-        PrAxis::ReadyToMerge => PrJudge::Approved,
-        PrAxis::ChangesRequested => PrJudge::StillOnYou,
-    }
-}
-
-/// Issues `axis`'s poll.
-///
-/// One endpoint, one document, three query strings and three rules. The three `github::poll_*`
-/// functions stay separate rather than collapsing into one call taking the rule, because each carries
-/// the argument for why its rule exists — and on this axis that argument is the asset, not the code.
-fn poll_pr(
-    client: &reqwest::blocking::Client,
-    token: &str,
-    axis: PrAxis,
-    copilot: bool,
-) -> PollResponse {
-    let query = pr_query(axis);
-    match pr_judge(axis) {
-        PrJudge::EveryHit => github::poll_review_requested(client, token, query),
-        PrJudge::Approved => github::poll_approved(client, token, query, copilot),
-        PrJudge::StillOnYou => github::poll_changes_requested(client, token, query, copilot),
-    }
-}
 
 /// The last pull requests each axis's poll confirmed, indexed by `PrAxis::index`.
 ///
@@ -337,6 +223,7 @@ fn run_poll_loop(
             return;
         }
     };
+    let github_endpoints = crate::portal::github::Endpoints::github_com();
 
     let (mut pr, pr_off, needs_auth) = match pr {
         PrStatus::Ready(store) => (Some(store), None, false),
@@ -400,7 +287,13 @@ fn run_poll_loop(
                 if !state.pr_in_play(axis) {
                     continue;
                 }
-                let response = poll_pr(&client, store.token(), axis, copilot_reviews.is_on());
+                let response = crate::portal::github::poll_axis(
+                    &client,
+                    &github_endpoints,
+                    store.token(),
+                    axis,
+                    copilot_reviews.is_on(),
+                );
                 // Only a failed axis speaks up, and it says what actually failed — this is the line
                 // that would have shown the merge-ready `statusCheckRollup` FORBIDDEN outright.
                 if let Some(detail) = response.result.problem() {
@@ -420,7 +313,11 @@ fn run_poll_loop(
         // A failed check deliberately does **not** clear a known outage: see `github_status`.
         if last_status_check.is_none_or(|at| at.elapsed() >= STATUS_CHECK_INTERVAL) {
             last_status_check = Some(Instant::now());
-            match crate::portal::statuspage::check(&client, &status_components) {
+            match crate::portal::statuspage::check(
+                &client,
+                crate::portal::statuspage::STATUS_PAGE_URL,
+                &status_components,
+            ) {
                 Ok(report) => {
                     // Only on a change, and the first answer always counts as one. A name that
                     // matches nothing is a typo the user has to fix, and its only other symptom is a
@@ -654,7 +551,7 @@ fn run_poll_loop(
                     // here and not in the click handler: the tray stays responsive throughout, and
                     // the only cost is that polling pauses while a credential is being obtained —
                     // which it could not usefully do anyway.
-                    Wake::Authenticate => match PrTokenStore::authenticate(&app_asset_path) {
+                    Wake::Authenticate => match PrTokenStore::authenticate(&app_asset_path, &github_endpoints.oauth) {
                         Ok(store) => match store.installation_count() {
                             // Authorized, but the App is installed nowhere, so search would see no
                             // repositories at all. Another click cannot fix that, so the exclamation
@@ -1019,47 +916,6 @@ mod tests {
     use super::*;
 
     const STEADY: Duration = Duration::from_secs(60);
-
-    /// The review-requested axis keeps every hit: `review-requested:@me` is a real server-side
-    /// filter, so there is nothing left for a client-side rule to narrow.
-    ///
-    /// It read a plain `total_count` off REST Search until the PR page needed to *name* the pull
-    /// requests behind the number, which a total never could.
-    #[test]
-    fn review_requested_counts_every_hit() {
-        assert_eq!(pr_judge(PrAxis::ReviewRequested), PrJudge::EveryHit);
-    }
-
-    /// The whole point of the move is that the server-side filter did not change. If this literal
-    /// drifts, the count moves with it and the bar starts meaning something else.
-    #[test]
-    fn the_review_query_is_unchanged_by_the_move_to_graphql() {
-        assert_eq!(
-            REVIEW_QUERY,
-            "is:pr review-requested:@me state:open draft:false archived:false \
--label:dependencies -author:app/dependabot -author:app/renovate"
-        );
-    }
-
-    /// The approved axis went back to GraphQL, and its query must not carry the qualifier it left behind.
-    ///
-    /// It was a `total_count` read from 1.11.0 (`review:approved`, after the CI gate came out) until
-    /// `review:approved` was found to match nothing in a repository that requires no reviews — GitHub
-    /// leaves `reviewDecision` empty there, and the qualifier reads nothing else. So the hits are judged
-    /// by their reviews again, and putting `review:approved` back into the query would silently
-    /// reintroduce the hole in front of the judge.
-    #[test]
-    fn ready_to_merge_judges_reviews_over_graphql_without_a_review_qualifier() {
-        assert_eq!(pr_judge(PrAxis::ReadyToMerge), PrJudge::Approved);
-        assert!(!MERGE_QUERY.contains("review:"), "got {MERGE_QUERY}");
-    }
-
-    /// `still_on_you` answers a question the Search query genuinely cannot, so this axis keeps its
-    /// client-side rule.
-    #[test]
-    fn changes_requested_still_narrows_its_hits() {
-        assert_eq!(pr_judge(PrAxis::ChangesRequested), PrJudge::StillOnYou);
-    }
 
     fn burst_of(secs: &[u64]) -> VecDeque<Duration> {
         secs.iter().map(|s| Duration::from_secs(*s)).collect()

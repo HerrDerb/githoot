@@ -56,13 +56,6 @@ use serde::Deserialize;
 
 use super::{Health, HealthReport};
 
-const STATUS_URL: &str = "https://www.githubstatus.com/api/v2/status.json";
-
-/// The per-component view, read only when the user has named the components they care about. Bigger
-/// than `status.json` (a few kB rather than 219 bytes) and on the same host, which is why the
-/// unfiltered path still asks for the small one.
-const COMPONENTS_URL: &str = "https://www.githubstatus.com/api/v2/components.json";
-
 /// The page people are sent to, rather than the JSON endpoint above.
 pub const STATUS_PAGE_URL: &str = "https://www.githubstatus.com";
 
@@ -106,10 +99,22 @@ struct StatusBody {
 /// `watched` is `config::Config::status_components`. Empty means the page-wide indicator; anything
 /// else means only those components count. The endpoint follows from that, so an unfiltered install
 /// still makes the same 219-byte request it always did.
-pub fn check(client: &Client, watched: &[String]) -> Result<HealthReport, String> {
-    let url = if watched.is_empty() { STATUS_URL } else { COMPONENTS_URL };
+/// The page-wide verdict, 219 bytes.
+fn status_url(base: &str) -> String {
+    format!("{base}/api/v2/status.json")
+}
+
+/// The per-component view, a few kB, on the same host.
+fn components_url(base: &str) -> String {
+    format!("{base}/api/v2/components.json")
+}
+
+pub fn check(client: &Client, base: &str, watched: &[String]) -> Result<HealthReport, String> {
+    // The per-component view is bigger than `status.json` (a few kB rather than 219 bytes) and on
+    // the same host, which is why the unfiltered path still asks for the small one.
+    let url = if watched.is_empty() { status_url(base) } else { components_url(base) };
     let response = client
-        .get(url)
+        .get(&url)
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, "githoot-tray")
         .send()
@@ -320,8 +325,9 @@ mod tests {
     /// way to explain an outage.
     #[test]
     fn the_page_url_is_not_the_api_url() {
-        assert_ne!(STATUS_PAGE_URL, STATUS_URL);
-        assert!(STATUS_URL.starts_with(STATUS_PAGE_URL), "both should be the same host");
+        let status = status_url(STATUS_PAGE_URL);
+        assert_ne!(STATUS_PAGE_URL, status);
+        assert!(status.starts_with(STATUS_PAGE_URL), "both should be the same host");
         assert!(!STATUS_PAGE_URL.contains("api"));
     }
 
@@ -477,9 +483,10 @@ mod tests {
     /// path must ask for.
     #[test]
     fn the_components_url_is_a_sibling_of_the_status_url() {
-        assert_ne!(COMPONENTS_URL, STATUS_URL);
-        assert!(COMPONENTS_URL.starts_with(STATUS_PAGE_URL));
-        assert!(COMPONENTS_URL.ends_with("components.json"));
+        let components = components_url(STATUS_PAGE_URL);
+        assert_ne!(components, status_url(STATUS_PAGE_URL));
+        assert!(components.starts_with(STATUS_PAGE_URL));
+        assert!(components.ends_with("components.json"));
     }
 
     /// Hits the real status page. Ignored by default, like the updater's live check.
@@ -487,7 +494,7 @@ mod tests {
     #[ignore = "needs network; queries the real GitHub status page"]
     fn reads_the_live_status_page() {
         let client = crate::portal::github::api::build_client().expect("a client");
-        match check(&client, &[]) {
+        match check(&client, STATUS_PAGE_URL, &[]) {
             Ok(report) => println!("live GitHub health: {:?}", report.health),
             Err(e) => panic!("could not read the live status page: {e}"),
         }
@@ -502,7 +509,7 @@ mod tests {
         // Every component GitHub publishes, not just the ones a fresh config watches: the template's
     // comment names all of them, so a rename breaks the comment as surely as it would the value.
     let watched = crate::config::all_status_components();
-        let report = check(&client, &watched).expect("could not read the live components");
+        let report = check(&client, STATUS_PAGE_URL, &watched).expect("could not read the live components");
         assert!(
             report.unmatched.is_empty(),
             "config.rs names components GitHub no longer publishes: {:?}",
