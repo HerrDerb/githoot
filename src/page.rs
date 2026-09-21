@@ -606,11 +606,12 @@ fn card(e: &PrEntry, link_prefix: &str, now_unix: u64) -> String {
     if e.conflicting {
         meta.push_str("<span class=\"pill checks-failure\">Merge conflict</span>");
     }
-    if e.copilot_unresolved > 0 {
-        let plural = if e.copilot_unresolved == 1 { "" } else { "s" };
+    if let Some(bot) = &e.bot_review {
+        let plural = if bot.unresolved == 1 { "" } else { "s" };
         meta.push_str(&format!(
-            "<span class=\"pill checks-pending\">{} unresolved Copilot comment{plural}</span>",
-            e.copilot_unresolved
+            "<span class=\"pill checks-pending\">{} unresolved {} comment{plural}</span>",
+            bot.unresolved,
+            esc(&bot.name)
         ));
     }
     let (class, words) = checks_pill(e.checks);
@@ -661,7 +662,7 @@ mod tests {
             updated_at: Some("2026-09-15T09:12:33Z".to_string()),
             is_draft: false,
             conflicting: false,
-            copilot_unresolved: 0,
+            bot_review: None,
             checks: CheckRollup::Success,
             verdicts: vec![],
             pending: vec![],
@@ -896,7 +897,7 @@ mod tests {
     #[test]
     fn unresolved_copilot_comments_are_named_on_the_card() {
         let mut e = entry("https://github.com/o/r/pull/1");
-        e.copilot_unresolved = 3;
+        e.bot_review = Some(crate::portal::types::BotReview { name: "Copilot".into(), unresolved: 3 });
         let html = page(Some(&[e]));
         assert!(html.contains("3 unresolved Copilot comments"), "got: {html}");
     }
@@ -905,7 +906,7 @@ mod tests {
     #[test]
     fn one_copilot_comment_reads_as_one() {
         let mut e = entry("https://github.com/o/r/pull/1");
-        e.copilot_unresolved = 1;
+        e.bot_review = Some(crate::portal::types::BotReview { name: "Copilot".into(), unresolved: 1 });
         assert!(page(Some(&[e])).contains("1 unresolved Copilot comment<"));
     }
 
@@ -1193,7 +1194,7 @@ mod tests {
         let mut e = entry("https://github.com/qumea/care-api/pull/2204");
         e.is_draft = true;
         e.conflicting = true;
-        e.copilot_unresolved = 2;
+        e.bot_review = Some(crate::portal::types::BotReview { name: "Copilot".into(), unresolved: 2 });
         e.checks = CheckRollup::Failure;
         e.verdicts = vec![
             crate::portal::types::Verdict { login: "alice".into(), state: ReviewState::Approved },

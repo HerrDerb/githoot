@@ -37,15 +37,27 @@ pub struct PrEntry {
     /// The head branch conflicts with the base. Only ever `true` for a definite `CONFLICTING`; an
     /// uncomputed `UNKNOWN` is absence of evidence, not evidence of a clean merge.
     pub conflicting: bool,
-    /// Open review threads started by GitHub's automatic reviewer, ignoring resolved and outdated
-    /// ones. Zero whenever the axis did not ask for threads — see `COPILOT_REVIEWER`.
-    pub copilot_unresolved: u32,
+    /// The portal's automatic reviewer and how many of its review threads are still open, ignoring
+    /// resolved and outdated ones. `None` when the portal has no such reviewer, when the axis did
+    /// not ask for threads, or when the count is zero — so the page has nothing to say rather than
+    /// a zero to hide. The entry names the bot itself ("Copilot") because the page must not have to
+    /// know which portal a card came from to word its pill.
+    pub bot_review: Option<BotReview>,
     pub checks: CheckRollup,
     /// One verdict per reviewer, `COMMENTED` already dropped by GitHub's own
     /// `latestOpinionatedReviews`.
     pub verdicts: Vec<Verdict>,
     /// Reviewers with a re-review outstanding.
     pub pending: Vec<Reviewer>,
+}
+
+/// An automatic reviewer's outstanding comments on one pull request. See `PrEntry::bot_review`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotReview {
+    /// How the pill names it: "Copilot".
+    pub name: String,
+    /// Open, unresolved, not outdated. Never zero: zero is `None` on the entry.
+    pub unresolved: u32,
 }
 
 /// A bare entry carrying nothing but its URL.
@@ -65,7 +77,7 @@ impl PrEntry {
             updated_at: None,
             is_draft: false,
             conflicting: false,
-            copilot_unresolved: 0,
+            bot_review: None,
             checks: CheckRollup::Unknown,
             verdicts: Vec::new(),
             pending: Vec::new(),

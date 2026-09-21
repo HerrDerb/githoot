@@ -12,7 +12,9 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use crate::portal::types::{CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict};
+pub use crate::portal::types::{
+    BotReview, CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict,
+};
 
 const AGENT: &str = "githoot-tray";
 
@@ -633,7 +635,10 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
         updated_at: node.updated_at.clone(),
         is_draft: node.is_draft,
         conflicting: is_conflicting(node),
-        copilot_unresolved: copilot_unresolved(node),
+        bot_review: match copilot_unresolved(node) {
+            0 => None,
+            unresolved => Some(BotReview { name: "Copilot".to_string(), unresolved }),
+        },
         checks: node
             .status_check_rollup
             .as_ref()
@@ -1399,7 +1404,9 @@ mod tests {
             ],
         )]);
         match changes(StatusCode::OK, &headers(&[]), &body, 0) {
-            PollResult::Fresh { prs: Some(list), .. } => assert_eq!(list[0].copilot_unresolved, 2),
+            PollResult::Fresh { prs: Some(list), .. } => {
+                assert_eq!(list[0].bot_review.as_ref().map(|b| b.unresolved), Some(2))
+            }
             other => panic!("expected Fresh with a list, got {:?}", other),
         }
     }
