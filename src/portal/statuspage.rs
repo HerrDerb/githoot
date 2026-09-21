@@ -507,7 +507,7 @@ mod tests {
     #[test]
     #[ignore = "needs network; queries the real GitHub status page"]
     fn reads_the_live_status_page() {
-        let client = crate::github::build_client().expect("a client");
+        let client = crate::portal::github::api::build_client().expect("a client");
         match check(&client, &[]) {
             Ok(report) => println!("live GitHub health: {:?}", report.health),
             Err(e) => panic!("could not read the live status page: {e}"),
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     #[ignore = "needs network; queries the real GitHub status page"]
     fn every_component_named_in_the_default_config_still_exists() {
-        let client = crate::github::build_client().expect("a client");
+        let client = crate::portal::github::api::build_client().expect("a client");
         // Every component GitHub publishes, not just the ones a fresh config watches: the template's
     // comment names all of them, so a rename breaks the comment as surely as it would the value.
     let watched = crate::config::all_status_components();

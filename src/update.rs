@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     #[ignore = "needs network; downloads the real release assets"]
     fn verifies_the_live_release() {
-        let poll = crate::github::build_client().expect("a polling client");
+        let poll = crate::portal::github::api::build_client().expect("a polling client");
         // A version below any real release, so the newest one is always the target.
         let ancient = Version::parse("0.0.1").expect("parses");
         let available = check(&poll, ancient)

@@ -7,9 +7,6 @@
 mod autostart;
 mod config;
 mod dialog;
-mod github;
-mod github_app;
-mod github_status;
 mod icons;
 mod log;
 mod page;
@@ -21,6 +18,9 @@ mod sound;
 mod state;
 mod update;
 mod version;
+
+use crate::portal::github::auth as github_app;
+use crate::portal::statuspage as github_status;
 
 
 // ─── Command-line contract ────────────────────────────────────────────────────

@@ -4,4 +4,6 @@
 //! directory and not about the shape of the program: the core (`state`, `page`, `scheduler`) speaks
 //! the vocabulary in `types` and nothing else.
 
+pub mod github;
+pub mod statuspage;
 pub mod types;

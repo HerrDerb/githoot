@@ -8,9 +8,9 @@
 //! buys three things at once: pacing that adapts to GitHub's `x-poll-interval`, an on-demand
 //! refresh when the user opens their notifications, and a clean exit when the UI goes away.
 
-use crate::github;
+use crate::portal::github::api as github;
 use crate::portal::types::{PollResponse, PrEntry};
-use crate::github_app::{AuthError, PrStatus, PrTokenStore, PR_NOT_INSTALLED};
+use crate::portal::github::auth::{AuthError, PrStatus, PrTokenStore, PR_NOT_INSTALLED};
 use crate::update::{Available, RestartPlan};
 use crate::{errorln, infoln};
 use crate::state::{IconState, PollState, PrAxis, MENU_BURST, REFRESH_BURST};
@@ -420,7 +420,7 @@ fn run_poll_loop(
         // A failed check deliberately does **not** clear a known outage: see `github_status`.
         if last_status_check.is_none_or(|at| at.elapsed() >= STATUS_CHECK_INTERVAL) {
             last_status_check = Some(Instant::now());
-            match crate::github_status::check(&client, &status_components) {
+            match crate::portal::statuspage::check(&client, &status_components) {
                 Ok(report) => {
                     // Only on a change, and the first answer always counts as one. A name that
                     // matches nothing is a typo the user has to fix, and its only other symptom is a
@@ -436,10 +436,10 @@ fn run_poll_loop(
                         last_unmatched = Some(report.unmatched);
                     }
                     match report.health {
-                        crate::github_status::Health::Degraded { description } => {
+                        crate::portal::statuspage::Health::Degraded { description } => {
                             state.set_status_degraded(Some(description));
                         }
-                        crate::github_status::Health::Fine => state.set_status_degraded(None),
+                        crate::portal::statuspage::Health::Fine => state.set_status_degraded(None),
                     }
                 }
                 Err(e) => errorln!("could not read GitHub's status page: {e}"),
