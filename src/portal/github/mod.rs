@@ -35,9 +35,6 @@ pub const DEFAULT_BASE_URL: &str = "https://github.com";
 /// gets no status entry at all rather than a wrong one.
 const STATUS_PAGE: &str = "https://www.githubstatus.com";
 
-/// Wording of the menu entry shown while github.com reports an incident.
-pub const STATUS_MENU_LABEL: &str = "GitHub is githubing again, check status";
-
 /// Search query for pull requests awaiting the user's review.
 ///
 /// `-label:dependencies` is the conventional Dependabot marker, but it is applied by convention
@@ -224,7 +221,7 @@ impl GitHubPortal {
             inbox_url: format!("{base}/pulls/inbox"),
             status_page: (base == DEFAULT_BASE_URL).then(|| StatusPage {
                 url: STATUS_PAGE.to_string(),
-                menu_label: STATUS_MENU_LABEL.to_string(),
+                menu_label: crate::state::STATUS_MENU_LABEL.to_string(),
             }),
             capabilities: Capabilities {
                 auth_style: AuthStyle::DeviceFlow,
@@ -401,7 +398,7 @@ mod tests {
         assert_eq!(info.inbox_url, "https://github.com/pulls/inbox");
         assert_eq!(
             info.status_page.as_ref().map(|s| s.menu_label.as_str()),
-            Some(STATUS_MENU_LABEL)
+            Some(crate::state::STATUS_MENU_LABEL)
         );
         assert_eq!(info.capabilities.auth_style, AuthStyle::DeviceFlow);
         assert_eq!(info.capabilities.bot_reviewer, Some("Copilot"));

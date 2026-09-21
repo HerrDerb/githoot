@@ -20,8 +20,8 @@ mod state;
 mod update;
 mod version;
 
-use crate::portal::github::{GitHubOptions, GitHubPortal, DEFAULT_BASE_URL};
-use crate::portal::{CredentialState, Portal, PortalId};
+use crate::portal::github::{GitHubOptions, GitHubPortal};
+use crate::portal::{CredentialState, Portal, PortalKind};
 
 
 // ─── Command-line contract ────────────────────────────────────────────────────
@@ -141,23 +141,29 @@ fn build_portals(
             return Vec::new();
         }
     };
-    let mut github = GitHubPortal::new(
-        PortalId("github".to_string()),
-        DEFAULT_BASE_URL,
-        http,
-        app_asset_path.to_path_buf(),
-        GitHubOptions {
-            copilot_reviews: copilot.clone(),
-            status_components: config.status_components.clone(),
-        },
-    );
-    let credential = if config.any_pr_enabled() {
-        load_credential(&mut github)
-    } else {
-        infoln!("all PR signals are off in config.txt — skipping PR sign-in entirely");
-        CredentialState::Off("PR status off in config.txt".to_string())
-    };
-    vec![(Box::new(github), credential)]
+    let mut portals: Vec<(Box<dyn Portal>, CredentialState)> = Vec::new();
+    for described in config.portals() {
+        let mut portal: Box<dyn Portal> = match described.kind {
+            PortalKind::GitHub => Box::new(GitHubPortal::new(
+                described.id,
+                &described.base_url,
+                http.clone(),
+                app_asset_path.to_path_buf(),
+                GitHubOptions {
+                    copilot_reviews: copilot.clone(),
+                    status_components: config.status_components.clone(),
+                },
+            )),
+        };
+        let credential = if config.any_pr_enabled() {
+            load_credential(portal.as_mut())
+        } else {
+            infoln!("all PR signals are off in config.txt — skipping PR sign-in entirely");
+            CredentialState::Off("PR status off in config.txt".to_string())
+        };
+        portals.push((portal, credential));
+    }
+    portals
 }
 
 /// The non-interactive credential path for one portal, with the one failure that is not the

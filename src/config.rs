@@ -16,6 +16,7 @@
 //! file belongs to the user, and the app may change a value in it but never its shape.
 
 use crate::log::Level;
+use crate::portal::{PortalId, PortalKind};
 use crate::{errorln, infoln};
 use crate::state::PrAxis;
 use std::path::Path;
@@ -134,6 +135,19 @@ pub enum FirstRun {
 }
 
 /// Settings read from `config.txt`.
+/// One portal as the settings describe it. See [`Config::portals`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PortalConfig {
+    /// The section name, `github` for the implicit portal. Never shown; see `PortalInfo`.
+    pub id: PortalId,
+    pub kind: PortalKind,
+    /// Origin with no trailing slash. The adapter derives every endpoint from it.
+    pub base_url: String,
+}
+
+/// The id of the portal every existing install has without a line in the file to say so.
+const IMPLICIT_PORTAL: &str = "github";
+
 pub struct Config {
     /// Whether to check GitHub for newer releases once a day. On unless explicitly turned off.
     pub update_check: bool,
@@ -472,6 +486,27 @@ impl Config {
     ///
     /// With none of them enabled there is no reason to obtain a PR credential at all, which is what
     /// keeps a switched-off feature from making a network call or raising a sign-in dialog.
+    /// The portals to watch, in the order they should appear.
+    ///
+    /// Always exactly one today: the implicit GitHub portal every existing `config.txt` describes
+    /// without naming it. That is deliberate, not a stub. Naming portals in the file
+    /// (`portal.<name>.type=github|gitlab|bitbucket`, `portal.<name>.url=`, and per-portal
+    /// `enabled`, `interval` and `clientId` after it) is reserved for the release that ships a
+    /// second kind of portal, and the rule for that day is already fixed here: the moment any
+    /// `portal.` key is present the implicit one disappears, so an old file and a new file never
+    /// describe two different models at once. The flat `key=value` parser reads dotted keys as they
+    /// are, so nothing about the file format changes when they arrive.
+    ///
+    /// GitHub Enterprise Server is not a URL swap either: its device flow needs a GitHub App
+    /// registered on that instance, so `url` ships together with `clientId` or not at all.
+    pub fn portals(&self) -> Vec<PortalConfig> {
+        vec![PortalConfig {
+            id: PortalId(IMPLICIT_PORTAL.to_string()),
+            kind: PortalKind::GitHub,
+            base_url: crate::portal::github::DEFAULT_BASE_URL.to_string(),
+        }]
+    }
+
     pub fn any_pr_enabled(&self) -> bool {
         PrAxis::ALL.iter().any(|&axis| self.pr_enabled(axis))
     }
@@ -1235,6 +1270,21 @@ mod tests {
         assert!(Config::load(&dir).0.sound);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Portals ───────────────────────────────────────────────────────────────
+
+    /// Every file that exists today describes one GitHub portal without naming it, and an empty
+    /// file is the same file with nothing filled in. Both must keep working exactly as before.
+    #[test]
+    fn an_existing_file_describes_the_one_implicit_github_portal() {
+        for text in ["", "sound=off\nreviewRequested=on\ncopilotReviews=off"] {
+            let portals = values(text).portals();
+            assert_eq!(portals.len(), 1, "got {portals:?}");
+            assert_eq!(portals[0].id, PortalId("github".to_string()));
+            assert_eq!(portals[0].kind, PortalKind::GitHub);
+            assert_eq!(portals[0].base_url, "https://github.com");
+        }
     }
 }
 
