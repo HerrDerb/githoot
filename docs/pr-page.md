@@ -20,7 +20,13 @@ reviewer's standing verdict.
 | Address | `http://githoot.localhost:<port>/<token>/<bar>`, plus `/items` and `/settings` |
 | Bound | On the first click, never at startup |
 | Port and token | New on every run |
-| Contents | Title, repo, number, author, age, draft, checks, merge conflict, open Copilot comments, per-reviewer verdicts |
+| Contents | Title, repo, number, author, age, draft, checks, merge conflict, open comments from the portal's automatic reviewer (Copilot on GitHub), per-reviewer verdicts |
+
+**Grouped by portal.** With one configured portal the page is a bare list. With several, each
+portal's cards sit under a heading with their own empty state and their own inbox link, because
+"nothing here" on one forge says nothing about another. Only URLs under a portal's own link prefix
+become links (`https://github.com/` for GitHub, trailing slash included), so a URL that is not the
+portal's own is shown as text rather than offered as a click → [Portals](portals.md).
 
 **Newest first.** GitHub's search answers in *best match* relevance order whenever the query names no
 sort, and none of the three does, so what comes back is effectively arbitrary and can differ between

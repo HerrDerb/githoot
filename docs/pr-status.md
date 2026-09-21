@@ -1,5 +1,8 @@
 # PR status
 
+This page describes the GitHub portal, the one every install has today. The seam it sits behind, and
+what GitLab and Bitbucket will have to bring to it, is in [Portals](portals.md).
+
 Three independent signals, each a GitHub Search query against your own pull requests:
 
 | Bar | Query | Then |

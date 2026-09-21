@@ -148,6 +148,7 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [Startup](docs/startup.md) | The one first-run question, what it writes on each platform, and how to undo it |
 | [Menu and settings](docs/menu-and-settings.md) | All menu entries and all config keys |
 | [PR status](docs/pr-status.md) | The three queries, the GraphQL rationale, the GitHub App |
+| [Portals](docs/portals.md) | The seam GitHub sits behind, and what GitLab and Bitbucket will have to bring to it |
 | [The PR page](docs/pr-page.md) | What the menu entries open, why it is served locally, and what guards it |
 | [Settings page](docs/menu-and-settings.md#the-settings-page) | Every setting as a form in your browser, and the guard writing needed |
 | [The hoot](docs/hoot.md) | Exactly which transitions make a sound, and which stay quiet |

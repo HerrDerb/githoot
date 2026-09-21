@@ -142,6 +142,9 @@ existed — the key is appended rather than the file regenerated.
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
 
+Keys starting with `portal.` are **reserved** for naming portals other than GitHub, and are not read
+yet; the rule they will follow is written down in [Portals](portals.md#configuration).
+
 Only `off`, `false`, `0` or `no` switch something off; anything else leaves the default, so a typo cannot
 silently disable a feature. Two keys are not toggles: `logLevel` takes `error` or `info`, falling back to
 `error`; `statusComponents` takes a comma-separated list.

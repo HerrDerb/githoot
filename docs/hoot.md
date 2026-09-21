@@ -2,7 +2,8 @@
 
 Whenever a **pull request you have not been told about** turns up, the app plays a short hoot. Each of
 the three axes hoots for itself: reviews requested of you, your PRs that were approved, your PRs needing
-work.
+work. Each configured portal keeps its own ledgers too, so the same id on two forges is two pull
+requests and neither silences the other; one hoot per cycle however many turned over.
 
 A PR is news when its id is one the axis has not seen before. Several at once is still one hoot, not
 one each: overlapping plays of the same clip are a noise rather than a notification.
