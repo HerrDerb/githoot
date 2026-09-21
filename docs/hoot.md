@@ -36,9 +36,13 @@ A pull request that lands *on* a list because of one of those events — a confl
 amber bar — is a new id there, and hoots for that reason alone. And one pull request leaving while
 another arrives in the same poll, which leaves the count flat, still hoots for the new arrival.
 
-A known id coming back after an absence is not news, whatever happened to it while it was away. That
-is what silences the index blip, and it is a deliberate trade: a review re-requested on a pull request
-you have already been told about will not sound again.
+A known id coming back after an absence is judged by its `updatedAt`. The index blip hands back the
+same pull request untouched: same id, same timestamp, and that stays silent. The same id back with a
+newer timestamp left the list for a reason and came back for a reason, and that return hoots. The
+everyday case is the red axis: changes requested, you fix them and the PR leaves, changes requested
+again and it is back. Until 2.0.4 that second round was silent, because the ledger kept only the id
+and could not tell a return from a blip. If either side has no timestamp there is nothing to compare,
+and the ledger errs quiet.
 
 The ledger holds 200 pull requests per axis and drops the least recently seen. That bound is deliberately
 far out of reach of a blip: an axis shows at most 100 at once, so a PR must sit absent while a further
@@ -46,8 +50,9 @@ hundred churn past before it is forgotten. Eviction is the one thing that could 
 back, so it is set where a blip cannot reach it. Nothing is written to disk — a restart forgets the
 ledger, and the launch rule above covers that.
 
-With `logLevel=info`, a dropped-and-returned pull request writes a line naming it and how many polls it
-was missing, so how often this really happens is a number rather than an impression.
+With `logLevel=info`, a dropped-and-returned pull request writes a line naming it, how many polls it
+was missing and whether it came back unchanged or with newer activity, so how often the blip really
+happens is a number rather than an impression.
 
 One answer the ledger cannot judge: a payload GitHub only partly sent, where one counted hit arrives
 without its URL and the whole list is discarded rather than shown short. There is nothing to compare

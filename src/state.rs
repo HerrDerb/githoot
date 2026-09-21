@@ -376,16 +376,20 @@ impl PrAxis {
 /// entries are dropped least-recently-present first.
 const LEDGER_CAP: usize = 200;
 
-/// What the ledger remembers about one pull request: that it was here, and when it was last here.
+/// What the ledger remembers about one pull request: that it was here, when it was last here, and
+/// what its `updatedAt` read then.
 ///
-/// Nothing about its *state*. It used to carry the pull request's `activity` timestamp, its conflict
-/// flag and its open Copilot count, and hoot when any of them moved — which meant a comment, a label
-/// or a push on a pull request already on the list sounded the tray with nothing visible changing.
-/// The rule is a new id appearing, so an id is all that is kept.
+/// The timestamp is consulted in exactly one place: when a known id comes back after an absence. It
+/// is *not* compared while the pull request sits on the list. An earlier ledger carried the activity
+/// timestamp, the conflict flag and the open Copilot count, and hooted when any of them moved — which
+/// meant a comment, a label or a push on a listed pull request sounded the tray with nothing visible
+/// changing (2.0.0 to 2.0.2). That is not what this is. See `Track::note`.
 #[derive(Clone, Debug)]
 struct Seen {
-    /// Which poll last saw it, for eviction order and for spotting a blip.
+    /// Which poll last saw it, for eviction order and for spotting an absence.
     last_seen: u64,
+    /// GitHub's `updatedAt` as of `last_seen`, to tell a return apart from a blip.
+    updated_at: Option<String>,
 }
 
 struct Track {
@@ -438,19 +442,36 @@ impl Track {
     /// It also answers the case a count could never see: one pull request leaving and another arriving
     /// in the same poll leaves the number flat, and the arriving id is still new.
     ///
-    /// A known id returning after an absence is *not* news, whatever happened to it while it was away.
-    /// That is what silences GitHub's search index dropping and re-serving the same pull request, and
-    /// it is a deliberate trade: a review re-requested on a pull request you have already been told
-    /// about will not sound again.
+    /// A known id returning after an absence is judged by its `updatedAt`. GitHub's search index
+    /// drops a pull request from one answer and re-serves it in the next *untouched*: same id, same
+    /// timestamp, and that is silent. The same id back with a *newer* timestamp left the list for a
+    /// reason and came back for a reason — changes requested a second time on a pull request whose
+    /// first round you already fixed is the everyday case on the red axis — and that return is news.
+    /// Missing a timestamp on either side, the ledger cannot judge and errs quiet.
     fn note(&mut self, prs: &[PrEntry]) -> bool {
         self.polls = self.polls.saturating_add(1);
         let mut news = false;
         for pr in prs {
-            let entry = Seen { last_seen: self.polls };
+            let entry = Seen {
+                last_seen: self.polls,
+                updated_at: pr.updated_at.clone(),
+            };
             match self.seen.get(pr.key()) {
                 None => news = true,
-                Some(before) => {
-                    if before.last_seen < self.polls - 1 {
+                Some(before) if before.last_seen < self.polls - 1 => {
+                    let absent = self.polls - before.last_seen - 1;
+                    let moved = match (&before.updated_at, &pr.updated_at) {
+                        (Some(then), Some(now)) => then != now,
+                        _ => false,
+                    };
+                    if moved {
+                        infoln!(
+                            "{} left for {} poll(s) and is back with newer activity; hoot",
+                            pr.key(),
+                            absent
+                        );
+                        news = true;
+                    } else {
                         // The blip, caught in the act. Logged because "GitHub sometimes omits a PR"
                         // was an observation before it was a fix, and this is the line that says how
                         // often it really happens — and whether it is the index or our own 100-hit
@@ -458,10 +479,11 @@ impl Track {
                         infoln!(
                             "search dropped {} for {} poll(s) and returned it unchanged; no hoot",
                             pr.key(),
-                            self.polls - before.last_seen - 1
+                            absent
                         );
                     }
                 }
+                Some(_) => {}
             }
             self.seen.insert(pr.key().to_string(), entry);
         }
@@ -2068,6 +2090,13 @@ mod tests {
         e
     }
 
+    /// The same pull request as `pr`, stamped with a given `updatedAt`.
+    fn pr_at(key: &str, updated_at: &str) -> PrEntry {
+        let mut e = pr(key, false);
+        e.updated_at = Some(updated_at.to_string());
+        e
+    }
+
     fn fresh_prs(prs: &[PrEntry]) -> PollResponse {
         respond(PollResult::Fresh {
             present: !prs.is_empty(),
@@ -2112,12 +2141,12 @@ mod tests {
     #[test]
     fn activity_on_a_pull_request_already_listed_does_not_hoot() {
         let mut state = ledger_state();
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:00:00Z")]));
         assert!(hooted(&mut state), "the first sighting is news");
 
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:05:00Z")]));
         assert!(!hooted(&mut state), "still the same pull request, however much it is discussed");
-        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:10:00Z")]));
         assert!(!hooted(&mut state));
     }
 
@@ -2148,17 +2177,62 @@ mod tests {
         assert!(hooted(&mut state), "a key never seen before is news");
     }
 
-    /// A known id coming back is not news, whatever happened to it meanwhile. This is the trade the
-    /// rule makes on purpose: it is what silences a blip, and it costs the re-requested-review case.
+    /// A known id coming back *untouched* is the index blip, and not news. `updatedAt` is how the
+    /// ledger knows it was untouched: GitHub hides and re-serves the same row, and nothing on the pull
+    /// request moved while it was hidden.
     #[test]
-    fn a_known_pr_returning_does_not_hoot() {
+    fn a_known_pr_returning_unchanged_does_not_hoot() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:00:00Z")]));
+        assert!(hooted(&mut state));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[]));
+        assert!(!hooted(&mut state));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:00:00Z")]));
+        assert!(!hooted(&mut state), "same id, same updatedAt: the index blinked, nothing happened");
+    }
+
+    /// **The reported bug: changes requested twice, one hoot.** PR 668 had changes requested and
+    /// hooted. The fixes went in and it left the red list. Changes were requested *again*, it came
+    /// back, and the ledger said "known id" and stayed silent. That is the normal round trip on this
+    /// axis, not a corner case. A known id that comes back after an absence *with a newer `updatedAt`*
+    /// left for a reason and came back for a reason, and the return is news.
+    #[test]
+    fn a_known_pr_returning_with_new_activity_hoots() {
+        let mut state = ledger_state();
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr_at("668", "2026-09-15T09:00:00Z")]));
+        assert!(state.take_pr_arrivals()[PrAxis::ChangesRequested.index()], "first request hoots");
+
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[]));
+        assert!(!state.take_pr_arrivals()[PrAxis::ChangesRequested.index()], "leaving is silent");
+
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr_at("668", "2026-09-15T14:30:00Z")]));
+        assert!(
+            state.take_pr_arrivals()[PrAxis::ChangesRequested.index()],
+            "it left, work happened, it is back: that is a second request for changes and it hoots"
+        );
+
+        state.apply_pr(PrAxis::ChangesRequested, fresh_prs(&[pr_at("668", "2026-09-15T14:31:00Z")]));
+        assert!(
+            !state.take_pr_arrivals()[PrAxis::ChangesRequested.index()],
+            "once back on the list, activity on it is silent again"
+        );
+    }
+
+    /// Without an `updatedAt` on either side there is nothing to compare, and the ledger errs quiet:
+    /// a returning id it cannot judge is treated as the blip, not as news.
+    #[test]
+    fn a_known_pr_returning_without_timestamps_stays_silent() {
         let mut state = ledger_state();
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
         assert!(hooted(&mut state));
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[]));
         assert!(!hooted(&mut state));
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr("a", false)]));
-        assert!(!hooted(&mut state), "same id, already told about it");
+        assert!(!hooted(&mut state), "no timestamp to judge by: err quiet");
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[]));
+        let _ = hooted(&mut state);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:00:00Z")]));
+        assert!(!hooted(&mut state), "a timestamp appearing where there was none is not proof of work");
     }
 
     /// A conflict appearing on a listed pull request changes nothing visible on the tray — same
