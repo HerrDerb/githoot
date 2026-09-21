@@ -8,3 +8,10 @@
 # corrupt file that still builds — `include_bytes!` takes whatever is there.
 *.png binary
 *.mp3 binary
+
+# Source and docs are LF in the index and must stay so. A CRLF flip reads as a full-file rewrite
+# in every diff and has landed twice by accident from Windows editors; saying it here makes the
+# index normalise whatever the editor did.
+*.rs text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
