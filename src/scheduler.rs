@@ -1152,8 +1152,10 @@ mod tests {
         assert!(!run.state.icon().needs_auth);
         assert!(run.state.tooltip_lines().iter().any(|l| l == "nothing installed"), "{:?}", run.state.tooltip_lines());
 
-        let mut fake = FakePortal::default();
-        fake.after_sign_in = CredentialState::Off("still nothing".to_string());
+        let fake = FakePortal {
+            after_sign_in: CredentialState::Off("still nothing".to_string()),
+            ..FakePortal::default()
+        };
         let mut run = PortalRun::new(Box::new(fake), CredentialState::NeedsAuth, [true; 3]);
         run.authenticate();
         assert!(!run.live);
@@ -1202,8 +1204,7 @@ mod tests {
     /// Expiry known in advance is renewed before a poll ever fails.
     #[test]
     fn an_expiring_credential_is_renewed_before_it_is_rejected() {
-        let mut fake = FakePortal::default();
-        fake.refresh_due = true;
+        let fake = FakePortal { refresh_due: true, ..FakePortal::default() };
         let log = fake.log();
         let mut run = ready(fake, [true, false, false]);
         run.cycle();
@@ -1219,8 +1220,10 @@ mod tests {
         run.cycle();
         assert!(!run.state.icon().status_degraded);
 
-        let mut fake = FakePortal::default();
-        fake.health = Some(Ok(Health::Degraded { description: "Wobbly".to_string() }));
+        let fake = FakePortal {
+            health: Some(Ok(Health::Degraded { description: "Wobbly".to_string() })),
+            ..FakePortal::default()
+        };
         let mut run = ready(fake, [true, false, false]);
         run.cycle();
         assert!(run.state.icon().status_degraded);

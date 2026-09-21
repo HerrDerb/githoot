@@ -316,7 +316,7 @@ fn main() {
     // change. This opens a view we count nothing in, so there is nothing to pull forward.
     let pr_inbox_item = MenuItem::with_label(state::PR_INBOX_MENU_LABEL);
     pr_inbox_item.connect_activate(move |_| {
-        if let Err(e) = open::that(&scheduler::inbox_url()) {
+        if let Err(e) = open::that(scheduler::inbox_url()) {
             errorln!("failed to open the PR inbox: {e}");
         }
     });
@@ -860,7 +860,7 @@ fn main() {
         let changes_requested_item_id = changes_requested_item.id().clone();
         let pr_inbox_item = MenuItem::new(state::PR_INBOX_MENU_LABEL, true, None);
         let pr_inbox_item_id = pr_inbox_item.id().clone();
-        let authenticate_item = MenuItem::new(&state::authenticate_menu_label("GitHub"), true, None);
+        let authenticate_item = MenuItem::new(state::authenticate_menu_label("GitHub"), true, None);
         let authenticate_item_id = authenticate_item.id().clone();
         let update_item = MenuItem::new(state::UPDATE_MENU_LABEL, true, None);
         let update_item_id = update_item.id().clone();
@@ -1115,7 +1115,7 @@ fn main() {
                 // No `Wake::Refresh` afterwards, unlike the three entries above it. Those open a list
                 // this app is counting, so a refresh catches up with whatever the user just read there.
                 // This one opens a view we count nothing in, so there is nothing to catch up with.
-                if let Err(e) = open::that(&scheduler::inbox_url()) {
+                if let Err(e) = open::that(scheduler::inbox_url()) {
                     errorln!("failed to open the PR inbox: {e}");
                 }
             } else if *id == tray.authenticate_item_id {

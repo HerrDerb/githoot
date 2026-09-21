@@ -150,9 +150,6 @@ impl IconState {
 /// Label of the fallback tray menu item that opens GitHub's own pull-request inbox.
 pub const PR_INBOX_MENU_LABEL: &str = "Open PR inbox";
 
-/// Where that entry goes. GitHub's own inbox view, not a search of ours — the whole point of this one
-/// is that it needs no query, no count and no credential to be worth clicking.
-
 /// Whether the fallback inbox entry is shown: exactly when no *specific* PR entry is.
 ///
 /// Lives here rather than in either platform's menu code for the same reason
@@ -792,12 +789,6 @@ impl PollState {
     pub fn pr_in_play(&self, axis: PrAxis) -> bool {
         self.pr[axis.index()].is_some()
     }
-
-    /// Records the newest release above this build, or clears it.
-    ///
-    /// Called after each update check. Passing `None` clears the arrow, which matters after a
-    /// successful install: the new binary reports its own version, so the very next check finds
-    /// nothing newer and the arrow has to come back down.
 
     /// Records what GitHub says about itself.
     ///
