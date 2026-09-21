@@ -9,6 +9,7 @@ mod config;
 mod dialog;
 mod icons;
 mod log;
+mod overview;
 mod page;
 mod portal;
 mod scheduler;

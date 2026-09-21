@@ -656,11 +656,6 @@ pub struct PollState {
     /// Service") reads it from here, so a second portal's state names itself without a second copy
     /// of the sentence.
     portal_name: String,
-    /// The version of the newest release above this build, once a check has found one.
-    ///
-    /// A `String` rather than a parsed version because its only consumers are a menu label and a
-    /// tooltip line, and it should be shown exactly as the release names itself.
-    update_available: Option<String>,
     /// GitHub's own description of a major or critical incident, when there is one.
     ///
     /// `None` covers both "GitHub is fine" and "we have not been able to ask", and that conflation is
@@ -668,8 +663,8 @@ pub struct PollState {
     /// alternative — a third state that shows the mark — would raise an outage warning on the strength
     /// of the user's own connection dropping.
     ///
-    /// A `String` for the same reason `update_available` is one: its only consumers are a tooltip line
-    /// and a menu entry, and it should quote the words GitHub used.
+    /// A `String` because its only consumers are a tooltip line and a menu entry, and it should
+    /// quote the words the portal used.
     status_degraded: Option<String>,
     /// Most recent `x-poll-interval`, once GitHub has told us one.
     server_interval: Option<Duration>,
@@ -702,7 +697,6 @@ impl PollState {
             pr_enabled,
             pr_off: [None, None, None],
             pr_needs_auth: false,
-            update_available: None,
             // Starts clear: assuming an outage before asking would put an exclamation on the icon for
             // the first few seconds of every launch.
             status_degraded: None,
@@ -805,9 +799,6 @@ impl PollState {
     /// Called after each update check. Passing `None` clears the arrow, which matters after a
     /// successful install: the new binary reports its own version, so the very next check finds
     /// nothing newer and the arrow has to come back down.
-    pub fn set_update_available(&mut self, version: Option<String>) {
-        self.update_available = version;
-    }
 
     /// Records what GitHub says about itself.
     ///
@@ -817,14 +808,6 @@ impl PollState {
         self.status_degraded = description;
     }
 
-    /// Text for the tray menu item that installs the update, or `None` when there is none.
-    ///
-    /// Carries the version for the same reason `pr_menu_label` carries a count: the icon can only say
-    /// that *something* is available, and "Install update: 1.4.0" is what makes it actionable without
-    /// hovering.
-    pub fn update_menu_label(&self) -> Option<String> {
-        self.update_available.as_ref().map(|v| format!("{UPDATE_MENU_LABEL}: {v}"))
-    }
 
     /// Whether PR status is waiting on the user.
     ///
@@ -912,7 +895,9 @@ impl PollState {
             needs_auth: self.pr_needs_auth,
             status_degraded: self.status_degraded.is_some(),
             signals_unsure: self.any_track_failing(),
-            update_available: self.update_available.is_some(),
+            // App-level, not this portal's to know: `overview::icon` fills it in. Every other
+            // reader of a single `PollState` sees a truthful `false`, never a stale `true`.
+            update_available: false,
             review_requested: self.pr_value(PrAxis::ReviewRequested),
             ready_to_merge: self.pr_value(PrAxis::ReadyToMerge),
             changes_requested: self.pr_value(PrAxis::ChangesRequested),
@@ -962,6 +947,9 @@ impl PollState {
     /// The icon itself can only carry a dot. A digit is not legible at the 16px the shell asks for,
     /// so the number goes where there is room for it: the tooltip and this menu item. Unlike the
     /// icon, neither has a limit, so the real figure is shown however large it gets.
+    /// Test-only since the overview took over the menu: `overview::pr_menu_label` sums
+    /// `confirmed_count` across portals and is the identity of this for one.
+    #[cfg(test)]
     pub fn pr_menu_label(&self, axis: PrAxis) -> String {
         let base = axis.menu_label();
         match self.pr[axis.index()].as_ref() {
@@ -1032,7 +1020,11 @@ impl PollState {
 
     /// Hover text. This is the only place `Unknown` becomes visible on Windows, so the reason
     /// belongs here rather than only in the log.
-    pub fn tooltip(&self) -> String {
+    /// The state lines of the hover text, in order: the outage first, then either the single
+    /// not-authorized line or one line per axis. Without the app-level update line and without the
+    /// error detail, which `overview::tooltip` appends in that order so the result for one portal
+    /// is exactly what `tooltip` returns.
+    pub fn tooltip_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
 
         // First, because it reframes everything below it: during an outage a stale count or an
@@ -1065,23 +1057,46 @@ impl PollState {
             }
         }
 
-        // Last of the state lines, and deliberately not gated on anything above it: an available
-        // update is orthogonal to the PR axes, so it is reported whatever else is going on.
-        if let Some(version) = self.update_available.as_deref() {
-            lines.push(format!("Update available: {version}"));
-        }
+        lines
+    }
 
-        // Surface at most one reason, taking the axes in `PrAxis::ALL` order — the tooltip is 128
-        // UTF-16 units on Windows, so more than one error string would not survive truncation anyway.
-        let detail = self.pr.iter().filter_map(Option::as_ref).find_map(|t| t.detail.as_deref());
-        if let Some(detail) = detail {
-            lines.push(detail.to_string());
-        }
+    /// At most one reason something is wrong, taking the axes in `PrAxis::ALL` order — the tooltip
+    /// is 128 UTF-16 units on Windows, so more than one error string would not survive truncation
+    /// anyway.
+    pub fn detail(&self) -> Option<String> {
+        self.pr.iter().filter_map(Option::as_ref).find_map(|t| t.detail.clone())
+    }
 
-        let text = lines.join("\n");
+    /// Hover text for this portal alone: the state lines, then the detail, capped. The tray shows
+    /// `overview::tooltip`, which is this plus the update line and, with several portals, their
+    /// names; for one portal the two are identical, and a test holds them to it. Test-only for
+    /// that reason: production has exactly one reader of hover text, and it is the overview.
+    #[cfg(test)]
+    pub fn tooltip(&self) -> String {
+        let mut lines = self.tooltip_lines();
+        if let Some(detail) = self.detail() {
+            lines.push(detail);
+        }
+        Self::cap_tooltip(lines.join("
+"))
+    }
+
+    /// Cuts hover text to what the tray can show, marking the cut. Applied once to the whole text,
+    /// never per portal, so several portals cannot each spend the whole budget.
+    pub fn cap_tooltip(text: String) -> String {
         match text.char_indices().nth(MAX_TOOLTIP_CHARS) {
             Some((idx, _)) => format!("{}…", &text[..idx]),
             None => text,
+        }
+    }
+
+    /// The count `axis` currently stands behind: `Some(n)` only for a confirmed-present axis that
+    /// counted its hits. `None` for absent, unknown, unconfigured and countless answers alike, so a
+    /// caller summing across portals adds only numbers somebody actually vouched for.
+    pub fn confirmed_count(&self, axis: PrAxis) -> Option<u32> {
+        match self.pr[axis.index()].as_ref() {
+            Some(track) if track.value == Presence::Yes => track.count,
+            _ => None,
         }
     }
 }
@@ -2551,16 +2566,6 @@ mod tests {
 1 PR(s) approved
 Nothing needing your work"
         );
-    }
-
-    #[test]
-    fn golden_tooltip_with_an_update_waiting() {
-        let mut state = new_state(true);
-        state.set_update_available(Some("2.9.0".to_string()));
-        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
-        assert_eq!(state.tooltip(), "2 PR(s) awaiting your review
-Update available: 2.9.0");
-        assert_eq!(state.update_menu_label().as_deref(), Some("Install update: 2.9.0"));
     }
 
     #[test]

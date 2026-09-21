@@ -258,6 +258,9 @@ fn run_poll_loop(
     // The release the last check found, held so the menu click has something to install without
     // re-asking GitHub. Cleared when a check finds nothing newer.
     let mut pending_update: Option<Available> = None;
+    // The version of the newest release above this build, once a check has found one. App-level,
+    // not any portal's: see `overview`.
+    let mut update_available: Option<String> = None;
 
     // While a refresh burst is draining we send no `If-None-Match`. A conditional request can
     // legitimately answer 304 from a cached view, which would leave a just-read icon stuck on
@@ -363,17 +366,18 @@ fn run_poll_loop(
         // more now than it used to: the sound can be switched back on from the menu mid-run, and a
         // latch drained only while hooting was enabled would fire for every arrival missed while it
         // was off — one click, and a hoot for news the user has already seen.
-        let arrivals = state.take_pr_arrivals();
+        let arrivals = crate::overview::arrivals(&[state.take_pr_arrivals()]);
 
-        let icon = state.icon();
-        let tooltip = state.tooltip();
+        let views = [crate::overview::PortalView { name: "GitHub", state: &state }];
+        let icon = crate::overview::icon(&views, update_available.is_some());
+        let tooltip = crate::overview::tooltip(&views, update_available.as_deref());
         let pr_labels = std::array::from_fn(|i| {
             let axis = PrAxis::ALL[i];
-            state.pr_menu_label(axis)
+            crate::overview::pr_menu_label(&views, axis)
         });
 
         // Update the UI before anything else here can block.
-        let update_label = state.update_menu_label();
+        let update_label = crate::overview::update_menu_label(update_available.as_deref());
         if !emit(Update { icon, tooltip: tooltip.clone(), pr_labels, update_label }) {
             return; // UI has gone away
         }
@@ -411,13 +415,13 @@ fn run_poll_loop(
                             "update available: {} (installed {current})",
                             available.version
                         );
-                        state.set_update_available(Some(available.version.to_string()));
+                        update_available = Some(available.version.to_string());
                         pending_update = Some(available);
                     }
                     Ok(None) => {
                         // Clears the arrow, which matters right after an install: the new binary is
                         // current, so this is what takes the arrow back down.
-                        state.set_update_available(None);
+                        update_available = None;
                         pending_update = None;
                     }
                     Err(e) => errorln!("update check failed: {e}"),
