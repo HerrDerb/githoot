@@ -8,7 +8,7 @@
 //! The page exists because GitHub's own search pages cannot express what two of the three bars count,
 //! and because opening one browser tab per pull request was the alternative.
 
-use crate::github::{CheckRollup, PrEntry, ReviewState, Reviewer};
+use crate::portal::types::{CheckRollup, PrEntry, ReviewState, Reviewer};
 use crate::icons;
 use crate::state::PrAxis;
 use std::time::Duration;
@@ -855,8 +855,8 @@ mod tests {
     fn reviewer_verdicts_are_named() {
         let mut e = entry("https://github.com/o/r/pull/1");
         e.verdicts = vec![
-            crate::github::Verdict { login: "alice".into(), state: ReviewState::Approved },
-            crate::github::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
+            crate::portal::types::Verdict { login: "alice".into(), state: ReviewState::Approved },
+            crate::portal::types::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
         ];
         e.pending = vec![Reviewer::User("carol".into()), Reviewer::Team("backend".into())];
         let html = page(Some(&[e]));
@@ -1096,8 +1096,8 @@ mod tests {
         e.copilot_unresolved = 2;
         e.checks = CheckRollup::Failure;
         e.verdicts = vec![
-            crate::github::Verdict { login: "alice".into(), state: ReviewState::Approved },
-            crate::github::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
+            crate::portal::types::Verdict { login: "alice".into(), state: ReviewState::Approved },
+            crate::portal::types::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
         ];
         e.pending = vec![Reviewer::User("carol".into()), Reviewer::Team("platform".into())];
         let json = items_json(Some(&[e]), Some(Duration::from_secs(47)), NOW);

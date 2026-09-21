@@ -17,7 +17,7 @@
 //! Nothing here does I/O, so all of it is testable.
 
 use crate::infoln;
-use crate::github::{PollResponse, PollResult, PrEntry};
+use crate::portal::types::{PollResponse, PollResult, PrEntry};
 use std::time::Duration;
 
 // ── Values GitHub never sends us, so they are ours to choose ──────────────────

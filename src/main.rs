@@ -13,6 +13,7 @@ mod github_status;
 mod icons;
 mod log;
 mod page;
+mod portal;
 mod scheduler;
 mod serve;
 mod settings_watch;

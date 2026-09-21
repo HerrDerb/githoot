@@ -9,6 +9,7 @@
 //! refresh when the user opens their notifications, and a clean exit when the UI goes away.
 
 use crate::github;
+use crate::portal::types::{PollResponse, PrEntry};
 use crate::github_app::{AuthError, PrStatus, PrTokenStore, PR_NOT_INSTALLED};
 use crate::update::{Available, RestartPlan};
 use crate::{errorln, infoln};
@@ -153,7 +154,7 @@ fn poll_pr(
     token: &str,
     axis: PrAxis,
     copilot: bool,
-) -> github::PollResponse {
+) -> PollResponse {
     let query = pr_query(axis);
     match pr_judge(axis) {
         PrJudge::EveryHit => github::poll_review_requested(client, token, query),
@@ -178,7 +179,7 @@ static PR_URLS: std::sync::Mutex<PrSnapshot> =
 /// which is a duration and not a date, so this needs no calendar, no timezone and no crate. It is
 /// also monotonic, so a clock adjustment cannot make the page claim the data is from the future.
 struct PrSnapshot {
-    axes: [Option<Vec<github::PrEntry>>; 3],
+    axes: [Option<Vec<PrEntry>>; 3],
     polled_at: Option<std::time::Instant>,
     /// Bumped on every publish, and the PR page's `ETag`.
     ///
@@ -196,7 +197,7 @@ struct PrSnapshot {
 /// out of it, and the server is simply a third reader of one that already had two.
 pub fn pr_snapshot(
     axis: PrAxis,
-) -> (Option<Vec<github::PrEntry>>, Option<std::time::Duration>, u64) {
+) -> (Option<Vec<PrEntry>>, Option<std::time::Duration>, u64) {
     let snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
     (
         snapshot.axes[axis.index()].clone(),
