@@ -9,6 +9,27 @@
 //! and because opening one browser tab per pull request was the alternative.
 
 use crate::portal::types::{CheckRollup, PrEntry, ReviewState, Reviewer};
+use crate::portal::PortalInfo;
+
+/// One portal's share of an axis page: who it is, and what it last confirmed.
+///
+/// `entries` carries the distinction the whole page is built around: `None` is "no confirmed list" —
+/// the axis is off, has never answered, or the track gave up — and `Some(&[])` is a confirmed empty.
+/// Rendering the first as "0 pull requests" would assert something GitHoot does not know, which is
+/// the one thing this codebase refuses to do.
+///
+/// With one group the page renders exactly as it did before portals existed: no heading, the
+/// group's own inbox in the empty states and the footer. With several, each group gets a heading
+/// and its own empty state, because "nothing here" on GitLab says nothing about GitHub.
+pub struct PortalGroup<'a> {
+    pub info: &'a PortalInfo,
+    pub entries: Option<&'a [PrEntry]>,
+}
+
+/// The groups for one axis, from what the poll loop last published.
+pub fn groups(from: &[(PortalInfo, Option<Vec<PrEntry>>)]) -> Vec<PortalGroup<'_>> {
+    from.iter().map(|(info, entries)| PortalGroup { info, entries: entries.as_deref() }).collect()
+}
 use crate::icons;
 use crate::state::PrAxis;
 use std::time::Duration;
@@ -38,14 +59,17 @@ pub fn esc(s: &str) -> String {
 ///
 /// **`esc` is not enough for an `href`.** `javascript:alert(1)` contains not one escapable character
 /// and would survive untouched into a link the page invites the user to click. So this is an
-/// allowlist of exactly one prefix, not a denylist of schemes: `url` comes from GitHub's own `url`
-/// field on a pull request, which is always `https://github.com/owner/repo/pull/N`, and anything else
-/// is either a payload GitHub could not have sent or one we should not be following. The caller
-/// renders a rejected URL as escaped text, so nothing is hidden — it just is not clickable.
+/// allowlist of exactly one prefix, not a denylist of schemes: `url` comes from the portal's own
+/// `url` field on a pull request, which on GitHub is always `https://github.com/owner/repo/pull/N`,
+/// and anything else is either a payload the portal could not have sent or one we should not be
+/// following. The caller renders a rejected URL as escaped text, so nothing is hidden — it just is
+/// not clickable.
 ///
-/// The trailing slash in the prefix is load-bearing: without it `https://github.com.evil.com/` passes.
-pub fn safe_url(url: &str) -> Option<&str> {
-    url.starts_with("https://github.com/").then_some(url)
+/// `prefix` is the portal's `PortalInfo::link_prefix`, so a GitLab pull request under the GitLab
+/// group is a link and the same URL under the GitHub group is text. The trailing slash in the prefix
+/// is load-bearing: without it `https://github.com.evil.com/` passes.
+pub fn safe_url<'a>(url: &'a str, prefix: &str) -> Option<&'a str> {
+    url.starts_with(prefix).then_some(url)
 }
 
 /// GitHub's `updatedAt` as a short relative age.
@@ -179,7 +203,8 @@ margin:1.5rem 0 .5rem;font-weight:600}\
 .row input{width:1rem;height:1rem;accent-color:var(--accent);flex:none}\
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
 font:inherit;font-weight:600;cursor:pointer}\
-code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}";
+code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}\
+.portal{font-size:.85rem;font-weight:600;letter-spacing:.04em;opacity:.7;margin:1.4rem 0 .5rem}";
 
 /// One axis's whole page.
 ///
@@ -223,10 +248,13 @@ const REFRESH_SCRIPT: &str = "(function(){var asof=document.getElementById('asof
 /// Separate from the age because the two change on different clocks: the count only when a poll
 /// publishes, the age every second. Keeping them apart is what lets the age tick locally while the
 /// server answers `304`.
-fn count_text(entries: Option<&[PrEntry]>) -> String {
-    match entries {
-        Some(list) => format!("{} pull request(s) · ", list.len()),
-        None => String::new(),
+fn count_text(groups: &[PortalGroup]) -> String {
+    // Only confirmed lists are counted, and a page with none confirmed says nothing rather than "0".
+    let confirmed: Vec<usize> = groups.iter().filter_map(|g| g.entries.map(<[PrEntry]>::len)).collect();
+    if confirmed.is_empty() {
+        String::new()
+    } else {
+        format!("{} pull request(s) · ", confirmed.iter().sum::<usize>())
     }
 }
 
@@ -240,19 +268,53 @@ fn age_text(polled: Option<Duration>) -> String {
 
 /// The cards, or whichever empty state applies. Shared by the page and the refresh fragment, so the
 /// two can never render the list differently.
-fn items(entries: Option<&[PrEntry]>, now_unix: u64) -> String {
-    match entries {
+///
+/// One group renders bare, as the page always did. Several get a heading each, so a card can be
+/// placed, and each its own empty state, so "nothing here" is said per portal rather than once for
+/// all of them. No groups at all — nothing configured, or nothing published yet — is the "not
+/// known" state with nowhere to send anyone.
+fn items(groups: &[PortalGroup], now_unix: u64) -> String {
+    match groups {
+        [] => "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
+               no answer it still stands behind for this bar.</p></div>\n"
+            .to_string(),
+        [one] => group_items(one, now_unix),
+        many => many
+            .iter()
+            .map(|g| {
+                format!(
+                    "<h2 class=\"portal\">{}</h2>\n{}",
+                    esc(&g.info.display_name),
+                    group_items(g, now_unix)
+                )
+            })
+            .collect(),
+    }
+}
+
+/// One portal's cards, or its empty state, with its own inbox as the way out.
+fn group_items(g: &PortalGroup, now_unix: u64) -> String {
+    let inbox = || {
+        portal_link(
+            &g.info.link_prefix,
+            &g.info.inbox_url,
+            &format!("Open your pull requests on {}", g.info.display_name),
+        )
+    };
+    match g.entries {
         // No confirmed list. Say that, and offer somewhere to go rather than a dead end.
         None => format!(
             "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
              no answer it still stands behind for this bar.</p><p>{}</p></div>\n",
-            github_link(crate::state::PR_INBOX_URL, "Open your pull requests on GitHub")
+            inbox()
         ),
         Some([]) => format!(
             "<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n",
-            github_link(crate::state::PR_INBOX_URL, "Open your pull requests on GitHub")
+            inbox()
         ),
-        Some(list) => newest_first(list).into_iter().map(|e| card(e, now_unix)).collect(),
+        Some(list) => {
+            newest_first(list).into_iter().map(|e| card(e, &g.info.link_prefix, now_unix)).collect()
+        }
     }
 }
 
@@ -261,24 +323,20 @@ fn items(entries: Option<&[PrEntry]>, now_unix: u64) -> String {
 /// JSON rather than a bare HTML fragment precisely so the two can travel separately. `serde_json`
 /// does the escaping, which is what makes it safe to build by hand from strings that already contain
 /// markup.
-pub fn items_json(
-    entries: Option<&[PrEntry]>,
-    polled: Option<Duration>,
-    now_unix: u64,
-) -> String {
+pub fn items_json(groups: &[PortalGroup], polled: Option<Duration>, now_unix: u64) -> String {
     serde_json::json!({
         // How old the data was *at this instant*, not a rendered age. The page anchors its own clock
         // to it, so the line keeps counting between polls without asking again.
         "age": polled.map(|d| d.as_secs()),
-        "count": count_text(entries),
-        "items": items(entries, now_unix),
+        "count": count_text(groups),
+        "items": items(groups, now_unix),
     })
     .to_string()
 }
 
 pub fn axis_page(
     axis: PrAxis,
-    entries: Option<&[PrEntry]>,
+    groups: &[PortalGroup],
     polled: Option<Duration>,
     token: &str,
     now_unix: u64,
@@ -307,17 +365,28 @@ pub fn axis_page(
 
     h.push_str(&format!(
         "<p class=\"sub\"><span id=\"count\">{}</span><span id=\"asof\">{}</span></p>\n",
-        esc(&count_text(entries)),
+        esc(&count_text(groups)),
         esc(&age_text(polled))
     ));
     h.push_str("<div class=\"rule\"></div>\n");
-    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(entries, now_unix)));
+    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(groups, now_unix)));
 
-    h.push_str(&format!(
-        "<footer>Rendered locally by GitHoot from its last poll, and kept current without a \
-         reload. · {}</footer>\n",
-        github_link(crate::state::PR_INBOX_URL, "Your pull requests on GitHub")
-    ));
+    // One link per portal, the first portal's first. With none there is nowhere to send anyone.
+    let inboxes: Vec<String> = groups
+        .iter()
+        .map(|g| {
+            portal_link(
+                &g.info.link_prefix,
+                &g.info.inbox_url,
+                &format!("Your pull requests on {}", g.info.display_name),
+            )
+        })
+        .collect();
+    h.push_str("<footer>Rendered locally by GitHoot from its last poll, and kept current without a reload.");
+    for inbox in inboxes {
+        h.push_str(&format!(" · {inbox}"));
+    }
+    h.push_str("</footer>\n");
     h.push_str(&format!(
         "<script nonce=\"{}\">{}</script>\n",
         esc(nonce),
@@ -494,8 +563,8 @@ fn age_of(d: Duration) -> String {
 /// page exists to get away from, and the back button is a better way back to the list than a pile of
 /// tabs. `noopener` goes with `_blank`: it exists to deny the opened tab a handle back to this one,
 /// and a same-window navigation has no opened tab to deny.
-fn github_link(url: &str, text: &str) -> String {
-    match safe_url(url) {
+fn portal_link(prefix: &str, url: &str, text: &str) -> String {
+    match safe_url(url, prefix) {
         Some(safe) => {
             format!("<a href=\"{}\" rel=\"noreferrer\">{}</a>", esc(safe), esc(text))
         }
@@ -504,10 +573,10 @@ fn github_link(url: &str, text: &str) -> String {
 }
 
 /// One pull request.
-fn card(e: &PrEntry, now_unix: u64) -> String {
+fn card(e: &PrEntry, link_prefix: &str, now_unix: u64) -> String {
     let title = e.title.as_deref().unwrap_or("(untitled)");
-    // A URL that is not GitHub's own is shown but not offered as a link — see `safe_url`.
-    let headline = match safe_url(&e.url) {
+    // A URL that is not the portal's own is shown but not offered as a link — see `safe_url`.
+    let headline = match safe_url(&e.url, link_prefix) {
         Some(url) => format!("<a href=\"{}\" rel=\"noreferrer\">{}</a>", esc(url), esc(title)),
         None => esc(title),
     };
@@ -599,8 +668,39 @@ mod tests {
         }
     }
 
+    /// The one portal every existing install has, as the page sees it.
+    static GITHUB: std::sync::LazyLock<PortalInfo> = std::sync::LazyLock::new(|| PortalInfo {
+        id: crate::portal::PortalId("github".to_string()),
+        kind: crate::portal::PortalKind::GitHub,
+        display_name: "GitHub".to_string(),
+        link_prefix: "https://github.com/".to_string(),
+        inbox_url: "https://github.com/pulls/inbox".to_string(),
+        status_page: None,
+        capabilities: crate::portal::Capabilities {
+            auth_style: crate::portal::AuthStyle::DeviceFlow,
+            conflict_state: true,
+            rereview_pending: true,
+            team_reviewers: true,
+            bot_reviewer: Some("Copilot"),
+        },
+        min_poll_interval: Duration::from_secs(60),
+    });
+
+    /// A second portal, so the grouping has something to group.
+    static GITLAB: std::sync::LazyLock<PortalInfo> = std::sync::LazyLock::new(|| PortalInfo {
+        id: crate::portal::PortalId("gitlab".to_string()),
+        display_name: "GitLab".to_string(),
+        link_prefix: "https://gitlab.example/".to_string(),
+        inbox_url: "https://gitlab.example/dashboard/merge_requests".to_string(),
+        ..GITHUB.clone()
+    });
+
+    fn group(entries: Option<&[PrEntry]>) -> PortalGroup<'_> {
+        PortalGroup { info: &GITHUB, entries }
+    }
+
     fn page(entries: Option<&[PrEntry]>) -> String {
-        axis_page(PrAxis::ChangesRequested, entries, Some(Duration::from_secs(47)), "deadbeef", NOW, "cafebabe")
+        axis_page(PrAxis::ChangesRequested, &[group(entries)], Some(Duration::from_secs(47)), "deadbeef", NOW, "cafebabe")
     }
 
     // ── Escaping: the security surface ────────────────────────────────────────
@@ -640,7 +740,7 @@ mod tests {
     /// become links; anything else is rendered as text.
     #[test]
     fn only_github_https_urls_become_links() {
-        assert_eq!(safe_url("https://github.com/o/r/pull/1"), Some("https://github.com/o/r/pull/1"));
+        assert_eq!(safe_url("https://github.com/o/r/pull/1", &GITHUB.link_prefix), Some("https://github.com/o/r/pull/1"));
         for hostile in [
             "javascript:alert(1)",
             "JavaScript:alert(1)",
@@ -650,7 +750,7 @@ mod tests {
             "https://github.com.evil.com/",
             "",
         ] {
-            assert_eq!(safe_url(hostile), None, "{hostile} must not become a link");
+            assert_eq!(safe_url(hostile, &GITHUB.link_prefix), None, "{hostile} must not become a link");
         }
     }
 
@@ -697,7 +797,7 @@ mod tests {
     fn every_outbound_link_goes_to_the_pr_inbox() {
         for entries in [None, Some(&[][..])] {
             let html = page(entries);
-            assert!(html.contains(crate::state::PR_INBOX_URL), "got {html}");
+            assert!(html.contains(&GITHUB.inbox_url), "got {html}");
             assert!(!html.contains("github.com/pulls?q="), "no hand-built search URL: {html}");
             assert!(!html.contains("same query"), "and no claim to be one: {html}");
         }
@@ -874,7 +974,7 @@ mod tests {
             (PrAxis::ReadyToMerge, icons::MERGE_DOT_COLOR),
             (PrAxis::ChangesRequested, icons::CHANGES_DOT_COLOR),
         ] {
-            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "n");
+            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n");
             assert!(html.contains(&icons::css_hex(color)), "{axis:?} should wear its own colour");
         }
     }
@@ -887,7 +987,7 @@ mod tests {
     #[test]
     fn the_axis_accent_is_the_only_definition_and_comes_last() {
         assert!(!STYLESHEET.contains("--accent:"), "the sheet must not define the accent");
-        let html = axis_page(PrAxis::ReadyToMerge, Some(&[]), None, "t", NOW, "n");
+        let html = axis_page(PrAxis::ReadyToMerge, &[group(Some(&[]))], None, "t", NOW, "n");
         let hex = icons::css_hex(icons::MERGE_DOT_COLOR);
         assert_eq!(html.matches("--accent:").count(), 1, "exactly one definition");
         let accent_at = html.find(&format!("--accent:{hex}")).expect("the axis colour");
@@ -898,7 +998,7 @@ mod tests {
     #[test]
     fn every_axis_renders_and_names_only_itself() {
         for axis in PrAxis::ALL {
-            let html = axis_page(axis, Some(&[]), None, "tok", NOW, "n");
+            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n");
             assert!(html.contains(heading(axis)), "{axis:?} should name itself");
             for other in PrAxis::ALL.into_iter().filter(|o| *o != axis) {
                 assert!(!html.contains(heading(other)), "{axis:?} must not name {other:?}");
@@ -922,7 +1022,7 @@ mod tests {
     // ── Live refresh ──────────────────────────────────────────────────────────
 
     fn live(entries: Option<&[PrEntry]>) -> String {
-        items_json(entries, Some(Duration::from_secs(47)), NOW)
+        items_json(&[group(entries)], Some(Duration::from_secs(47)), NOW)
     }
 
     /// The fragment must render the *same* cards the page does, or a refresh would quietly swap the
@@ -965,7 +1065,7 @@ mod tests {
     /// A poll that never happened says so with a null rather than a zero age.
     #[test]
     fn an_unpolled_fragment_sends_a_null_age() {
-        let json = items_json(None, None, NOW);
+        let json = items_json(&[group(None)], None, NOW);
         assert!(json.contains(r#""age":null"#), "got {json}");
     }
 
@@ -1100,22 +1200,69 @@ mod tests {
             crate::portal::types::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
         ];
         e.pending = vec![Reviewer::User("carol".into()), Reviewer::Team("platform".into())];
-        let json = items_json(Some(&[e]), Some(Duration::from_secs(47)), NOW);
+        let json = items_json(&[group(Some(&[e]))], Some(Duration::from_secs(47)), NOW);
         assert_eq!(json, r#"{"age":47,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2><a href=\"https://github.com/qumea/care-api/pull/2204\" rel=\"noreferrer\">Fix the bed-exit debounce</a></h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill draft\">Draft</span><span class=\"pill checks-failure\">Merge conflict</span><span class=\"pill checks-pending\">2 unresolved Copilot comments</span><span class=\"pill checks-failure\">Checks failing</span></div><ul class=\"who\"><li><span class=\"dot dot-ok\"></span>alice approved</li><li><span class=\"dot dot-no\"></span>bob requested changes</li><li><span class=\"dot dot-wait\"></span>carol re-review pending</li><li><span class=\"dot dot-wait\"></span>team platform re-review pending</li></ul></div>\n"}"#);
     }
 
     #[test]
     fn golden_items_json_for_both_empty_states() {
-        assert_eq!(items_json(None, None, NOW), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
-        assert_eq!(items_json(Some(&[]), Some(Duration::from_secs(5)), NOW), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(&[group(None)], None, NOW), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(&[group(Some(&[]))], Some(Duration::from_secs(5)), NOW), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
     }
 
     #[test]
     fn golden_unsafe_url_is_text_not_link() {
         let mut e = entry("https://github.com.evil.com/x");
         e.title = Some("t".into());
-        let json = items_json(Some(&[e]), None, NOW);
+        let json = items_json(&[group(Some(&[e]))], None, NOW);
         assert_eq!(json, r#"{"age":null,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2>t</h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill checks-success\">Checks passing</span></div></div>\n"}"#);
+    }
+
+    // ── Several portals ───────────────────────────────────────────────────────
+
+    /// Two portals, two headings, and each group's own empty state and inbox: "nothing here" on one
+    /// says nothing about the other. One portal keeps the old bare markup, which the goldens above
+    /// pin down.
+    #[test]
+    fn several_portals_render_a_heading_and_an_empty_state_each() {
+        let a = entry("https://github.com/o/r/pull/1");
+        let groups = [
+            PortalGroup { info: &GITHUB, entries: Some(&[a]) },
+            PortalGroup { info: &GITLAB, entries: Some(&[]) },
+        ];
+        let html = axis_page(PrAxis::ReviewRequested, &groups, None, "tok", NOW, "n");
+        assert!(html.contains("<h2 class=\"portal\">GitHub</h2>"), "got {html}");
+        assert!(html.contains("<h2 class=\"portal\">GitLab</h2>"));
+        assert!(html.contains("Open your pull requests on GitLab"), "GitLab's empty state names GitLab");
+        assert!(html.contains(&GITLAB.inbox_url), "and links GitLab's inbox");
+        assert!(html.contains("Your pull requests on GitHub") && html.contains("Your pull requests on GitLab"), "footer offers both inboxes");
+        assert!(html.contains("1 pull request(s)"), "the count is the sum of confirmed lists");
+
+        let one = page(Some(&[]));
+        assert!(!one.contains("class=\"portal\""), "one portal gets no heading");
+    }
+
+    /// Which prefix makes a URL clickable is the group's, not a global: the same GitLab URL is a
+    /// link under GitLab and text under GitHub, and no group's prefix admits the other's hosts.
+    #[test]
+    fn the_groups_link_prefix_decides_what_becomes_a_link() {
+        let mut mr = entry("https://gitlab.example/g/p/-/merge_requests/7");
+        mr.title = Some("Widen the door".to_string());
+        let under_gitlab = items_json(&[PortalGroup { info: &GITLAB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW);
+        assert!(under_gitlab.contains("<a href=\\\"https://gitlab.example/g/p/-/merge_requests/7\\\""), "got {under_gitlab}");
+        let under_github = items_json(&[PortalGroup { info: &GITHUB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW);
+        assert!(!under_github.contains("href=\\\"https://gitlab.example"), "got {under_github}");
+        assert!(under_github.contains("Widen the door"), "shown as text, not hidden");
+    }
+
+    /// Before the poll loop has published anything there are no groups at all. That is the "not
+    /// known" state with nowhere to send anyone, and it must not claim a count.
+    #[test]
+    fn no_groups_at_all_is_not_known_with_no_link() {
+        let json = items_json(&[], None, NOW);
+        assert!(json.contains("not known"), "got {json}");
+        assert!(!json.contains("href"), "no portal, no inbox to offer");
+        assert!(json.contains("\"count\":\"\""), "no confirmed list, no number");
     }
 }
 

@@ -152,7 +152,6 @@ pub const PR_INBOX_MENU_LABEL: &str = "Open PR inbox";
 
 /// Where that entry goes. GitHub's own inbox view, not a search of ours — the whole point of this one
 /// is that it needs no query, no count and no credential to be worth clicking.
-pub const PR_INBOX_URL: &str = "https://github.com/pulls/inbox";
 
 /// Whether the fallback inbox entry is shown: exactly when no *specific* PR entry is.
 ///
@@ -2544,7 +2543,6 @@ mod tests {
     fn golden_menu_constants() {
         assert_eq!(authenticate_menu_label("GitHub"), "Authenticate GitHub PR Status");
         assert_eq!(STATUS_MENU_LABEL, "GitHub is githubing again, check status");
-        assert_eq!(PR_INBOX_URL, "https://github.com/pulls/inbox");
         assert_eq!(PR_INBOX_MENU_LABEL, "Open PR inbox");
         assert_eq!(REVIEWS_MENU_LABEL, "Open Requested Reviews");
         assert_eq!(REPOSITORY_MENU_LABEL, "Open GitHoot on GitHub");

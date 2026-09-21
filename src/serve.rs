@@ -532,7 +532,7 @@ static SERVER: OnceLock<Option<Server>> = OnceLock::new();
 pub fn open_axis_page(axis: PrAxis) {
     // The PR inbox when there is no listener: GitHub's own search cannot express what two of the
     // three bars count, and the URL that tried to say otherwise did not work either.
-    open_url(url_for(axis).unwrap_or_else(|| crate::state::PR_INBOX_URL.to_string()));
+    open_url(url_for(axis).unwrap_or_else(scheduler::inbox_url));
 }
 
 /// Opens the settings page, or falls back to the settings *file* when there is no listener.
@@ -662,7 +662,8 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             respond(&mut stream, 200, "image/png", icons::TRAY_ICON, request.body_wanted)
         }
         Route::Items(axis) => {
-            let (entries, polled, version) = scheduler::pr_snapshot(axis);
+            let snapshot = scheduler::pr_snapshot(axis);
+            let version = snapshot.version;
             // The client already holds this poll's answer, so there is nothing to send. Its age line
             // keeps ticking on its own — see `page::REFRESH_SCRIPT` for why that is what makes a
             // genuine `304` correct here rather than a lie about freshness.
@@ -673,11 +674,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 let _ = stream.shutdown(std::net::Shutdown::Both);
                 return;
             }
-            let json = page::items_json(
-                entries.as_deref(),
-                polled,
-                unix_now(),
-            );
+            let json = page::items_json(&page::groups(&snapshot.groups), snapshot.polled_at, unix_now());
             respond_as(
                 &mut stream,
                 200,
@@ -688,15 +685,15 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             )
         }
         Route::Page(axis) => {
-            let (entries, polled, _) = scheduler::pr_snapshot(axis);
+            let snapshot = scheduler::pr_snapshot(axis);
             // A fresh nonce per response, which is what a nonce is for: it names *this* page's script
             // in *this* response's CSP. Failing to get one drops the script rather than widening the
             // policy — the page still works, it just stops refreshing itself.
             let nonce = new_token().unwrap_or_default();
             let html = page::axis_page(
                 axis,
-                entries.as_deref(),
-                polled,
+                &page::groups(&snapshot.groups),
+                snapshot.polled_at,
                 token,
                 unix_now(),
                 &nonce,

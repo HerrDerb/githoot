@@ -10,7 +10,7 @@
 
 use crate::portal::github::api::build_client;
 use crate::portal::types::PrEntry;
-use crate::portal::{AuthError, CredentialState, Portal};
+use crate::portal::{AuthError, CredentialState, Portal, PortalInfo};
 use crate::update::{Available, RestartPlan};
 use crate::{errorln, infoln};
 use crate::state::{IconState, PollState, PrAxis, MENU_BURST, REFRESH_BURST};
@@ -57,7 +57,7 @@ static UPDATE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// `Some(vec![])`. All three axes fill their slot now; before 1.17.0 `ReviewRequested`'s stayed empty
 /// for life, because a `total_count` read has no hits to name.
 static PR_URLS: std::sync::Mutex<PrSnapshot> =
-    std::sync::Mutex::new(PrSnapshot { axes: [None, None, None], polled_at: None, version: 0 });
+    std::sync::Mutex::new(PrSnapshot { portals: Vec::new(), polled_at: None, version: 0 });
 
 /// What the poll thread last published, plus when.
 ///
@@ -65,7 +65,10 @@ static PR_URLS: std::sync::Mutex<PrSnapshot> =
 /// which is a duration and not a date, so this needs no calendar, no timezone and no crate. It is
 /// also monotonic, so a clock adjustment cannot make the page claim the data is from the future.
 struct PrSnapshot {
-    axes: [Option<Vec<PrEntry>>; 3],
+    /// One entry per configured portal, in configuration order. Grouped by portal rather than
+    /// merged per axis because the page says which forge a card came from and offers each
+    /// portal's own inbox; a merged list would have to guess both from the URL.
+    portals: Vec<PortalSnapshot>,
     polled_at: Option<std::time::Instant>,
     /// Bumped on every publish, and the PR page's `ETag`.
     ///
@@ -76,20 +79,49 @@ struct PrSnapshot {
     version: u64,
 }
 
-/// The pull requests `axis` last confirmed, and how long ago that was.
+/// One portal's share of the snapshot.
+struct PortalSnapshot {
+    info: PortalInfo,
+    /// Indexed by `PrAxis::index`. `None` means "no confirmed list", never "no PRs".
+    axes: [Option<Vec<PrEntry>>; 3],
+}
+
+/// What the page renders for one axis: each portal with its confirmed list, plus the age and the
+/// version the ETag is built from.
+pub struct AxisSnapshot {
+    pub groups: Vec<(PortalInfo, Option<Vec<PrEntry>>)>,
+    pub polled_at: Option<std::time::Duration>,
+    pub version: u64,
+}
+
+/// Where "open my pull requests" goes when no list can be opened: the first portal's inbox, or
+/// GitHub's when nothing has been published yet, which is where every install pointed before
+/// portals existed.
+pub fn inbox_url() -> String {
+    let snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+    snapshot
+        .portals
+        .first()
+        .map(|p| p.info.inbox_url.clone())
+        .unwrap_or_else(|| format!("{}/pulls/inbox", crate::portal::github::DEFAULT_BASE_URL))
+}
+
+/// The pull requests `axis` last confirmed, per portal, and how long ago that was.
 ///
 /// `serve`'s listener thread is the caller, which is why this exists rather than the server reaching
 /// into `PollState`: that stays owned by the poll thread alone. This static was already the channel
 /// out of it, and the server is simply a third reader of one that already had two.
-pub fn pr_snapshot(
-    axis: PrAxis,
-) -> (Option<Vec<PrEntry>>, Option<std::time::Duration>, u64) {
+pub fn pr_snapshot(axis: PrAxis) -> AxisSnapshot {
     let snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
-    (
-        snapshot.axes[axis.index()].clone(),
-        snapshot.polled_at.map(|at| at.elapsed()),
-        snapshot.version,
-    )
+    AxisSnapshot {
+        groups: snapshot
+            .portals
+            .iter()
+            .map(|p| (p.info.clone(), p.axes[axis.index()].clone()))
+            .collect(),
+        polled_at: snapshot.polled_at.map(|at| at.elapsed()),
+        version: snapshot.version,
+    }
 }
 
 /// Reason the poll loop was woken early.
@@ -379,17 +411,14 @@ impl PortalRun {
     }
 }
 
-/// Every portal's confirmed entries for `axis`, one list. `None` only when no portal has a
-/// confirmed list, so a confirmed empty on one portal and nothing known on another still opens the
-/// page rather than the fallback search.
-fn merged_entries(runs: &[PortalRun], axis: PrAxis) -> Option<Vec<PrEntry>> {
-    let mut merged: Option<Vec<PrEntry>> = None;
-    for run in runs {
-        if let Some(entries) = run.state.pr_entries(axis) {
-            merged.get_or_insert_with(Vec::new).extend(entries);
-        }
-    }
-    merged
+/// Every portal's confirmed lists, in configuration order, for the snapshot the page reads.
+fn snapshot_of(runs: &[PortalRun]) -> Vec<PortalSnapshot> {
+    runs.iter()
+        .map(|run| PortalSnapshot {
+            info: run.portal.info().clone(),
+            axes: PrAxis::ALL.map(|axis| run.state.pr_entries(axis)),
+        })
+        .collect()
 }
 
 /// `app_asset_path` is held for the whole run because `Wake::SettingsOpened` needs the config path.
@@ -421,6 +450,14 @@ fn run_poll_loop(
         .map(|(portal, credential)| PortalRun::new(portal, credential, pr_enabled))
         .collect();
 
+    // Published once before the first cycle, with no lists yet, so a page opened or a menu clicked
+    // in the first second already knows which portals exist and where their inboxes are. `polled_at`
+    // stays `None`: nothing has been asked, and the page says "not polled yet" accordingly.
+    {
+        let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+        snapshot.portals = snapshot_of(&runs);
+    }
+
     let mut burst: VecDeque<Duration> = VecDeque::new();
     // `None` means "never checked", which is what makes the first check happen immediately.
     let mut last_update_check: Option<Instant> = None;
@@ -442,7 +479,7 @@ fn run_poll_loop(
         {
             let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
             *snapshot = PrSnapshot {
-                axes: PrAxis::ALL.map(|axis| merged_entries(&runs, axis)),
+                portals: snapshot_of(&runs),
                 polled_at: Some(std::time::Instant::now()),
                 version: snapshot.version.saturating_add(1),
             };
@@ -1190,10 +1227,10 @@ mod tests {
         assert!(run.state.tooltip_lines()[0].contains("Wobbly"));
     }
 
-    /// Until the page groups by portal, the snapshot for an axis is every portal's confirmed list
-    /// in one, and it is `None` only when nobody has one.
+    /// The snapshot keeps every portal's list apart and in configuration order, so the page can
+    /// say where a card came from; an axis nobody has confirmed is `None` for that portal alone.
     #[test]
-    fn the_snapshot_merges_every_portals_confirmed_entries() {
+    fn the_snapshot_keeps_each_portals_confirmed_entries_apart() {
         use crate::portal::types::PrEntry;
         let listed = |urls: &[&str]| {
             response(PollResult::Fresh {
@@ -1208,8 +1245,11 @@ mod tests {
         for run in &mut runs {
             run.cycle();
         }
-        let merged = merged_entries(&runs, PrAxis::ReviewRequested).expect("both confirmed");
-        assert_eq!(merged.len(), 3);
-        assert!(merged_entries(&runs, PrAxis::ReadyToMerge).is_none(), "nobody answered this axis yet");
+        let snapshot = snapshot_of(&runs);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].info.display_name, "A");
+        assert_eq!(snapshot[0].axes[0].as_ref().map(Vec::len), Some(1));
+        assert_eq!(snapshot[1].axes[0].as_ref().map(Vec::len), Some(2));
+        assert!(snapshot[1].axes[1].is_none(), "nobody answered this axis yet");
     }
 }

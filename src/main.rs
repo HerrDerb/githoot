@@ -310,7 +310,7 @@ fn main() {
     // change. This opens a view we count nothing in, so there is nothing to pull forward.
     let pr_inbox_item = MenuItem::with_label(state::PR_INBOX_MENU_LABEL);
     pr_inbox_item.connect_activate(move |_| {
-        if let Err(e) = open::that(state::PR_INBOX_URL) {
+        if let Err(e) = open::that(&scheduler::inbox_url()) {
             errorln!("failed to open the PR inbox: {e}");
         }
     });
@@ -1109,7 +1109,7 @@ fn main() {
                 // No `Wake::Refresh` afterwards, unlike the three entries above it. Those open a list
                 // this app is counting, so a refresh catches up with whatever the user just read there.
                 // This one opens a view we count nothing in, so there is nothing to catch up with.
-                if let Err(e) = open::that(state::PR_INBOX_URL) {
+                if let Err(e) = open::that(&scheduler::inbox_url()) {
                     errorln!("failed to open the PR inbox: {e}");
                 }
             } else if *id == tray.authenticate_item_id {
