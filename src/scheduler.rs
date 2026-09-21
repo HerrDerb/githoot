@@ -234,7 +234,7 @@ fn run_poll_loop(
     // The config, not `[pr.is_some(); 3]`. Whether a credential exists is said by the two calls
     // below; putting it here as well would make `require_pr_auth` a no-op on the very path that
     // exists to obtain one. See `PollState::new`.
-    let mut state = PollState::new(pr_enabled);
+    let mut state = PollState::for_portal("GitHub", pr_enabled);
     // Both branches mean "no PR dots", and both are deliberately said differently: one has a menu
     // item waiting to be clicked, the other has a reason clicking cannot address. The three axes
     // share one credential, so whichever it is applies to all three at once.

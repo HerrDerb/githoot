@@ -189,11 +189,15 @@ pub fn shows_pr_inbox(pr_entries: [bool; 3], needs_auth: bool) -> bool {
 /// Lives here, next to the code that appends the count to it, so the two cannot drift apart.
 pub const REVIEWS_MENU_LABEL: &str = "Open Requested Reviews";
 
-/// Text of the tray menu item that starts the PR-status Device Flow.
+/// Text of the tray menu item that starts a portal's sign-in.
 ///
 /// Shown only while `PollState::pr_needs_auth` holds. Lives here with the other menu wording so the
-/// platform UI code in `main.rs` and `scheduler.rs` cannot spell it two different ways.
-pub const AUTHENTICATE_MENU_LABEL: &str = "Authenticate GitHub PR Status";
+/// platform UI code in `main.rs` and `scheduler.rs` cannot spell it two different ways. Takes the
+/// portal's display name, so two portals waiting to be authorized get two items a user can tell
+/// apart; for one GitHub portal it reads exactly as it always did.
+pub fn authenticate_menu_label(portal: &str) -> String {
+    format!("Authenticate {portal} PR Status")
+}
 
 /// Hover text while PR status is waiting to be authorized. Says what is wrong *and* where the fix
 /// is, because the red exclamation on its own only says that something is.
@@ -552,7 +556,7 @@ impl Track {
         }
     }
 
-    fn apply(&mut self, result: PollResult) -> Option<Duration> {
+    fn apply(&mut self, portal: &str, result: PollResult) -> Option<Duration> {
         match result {
             PollResult::Fresh { present, count, prs } => {
                 // Read before the write: the new rule is a comparison, so the old number has to be
@@ -604,7 +608,7 @@ impl Track {
             // we still know would be a lie for as long as the app stays open.
             PollResult::Unauthorized => {
                 self.failures = self.failures.saturating_add(1);
-                self.detail = Some("GitHub rejected the credential".to_string());
+                self.detail = Some(format!("{portal} rejected the credential"));
                 self.value = Presence::Unknown;
                 self.prs = None;
                 self.needs_reauth = true;
@@ -647,6 +651,11 @@ pub struct PollState {
     /// the user cannot clear from here (the GitHub App is not installed anywhere); this is a state
     /// with a menu item waiting to be clicked, so it gets its own icon and its own wording.
     pr_needs_auth: bool,
+    /// The display name of the portal this state belongs to: "GitHub". Every line of wording that
+    /// names who said something ("GitHub rejected the credential", "GitHub: Partially Degraded
+    /// Service") reads it from here, so a second portal's state names itself without a second copy
+    /// of the sentence.
+    portal_name: String,
     /// The version of the newest release above this build, once a check has found one.
     ///
     /// A `String` rather than a parsed version because its only consumers are a menu label and a
@@ -676,8 +685,17 @@ impl PollState {
     /// missing credential — every flag would be false, so there would be no exclamation icon, no
     /// `Authenticate` menu entry, and no way to ever obtain one. A missing credential is said
     /// afterwards, by calling `require_pr_auth` or `disable_pr`.
+    /// The state for one GitHub portal. Kept for the tests, which predate portals and say nothing
+    /// about them; production goes through `for_portal`.
+    #[cfg(test)]
     pub fn new(pr_enabled: [bool; 3]) -> Self {
+        Self::for_portal("GitHub", pr_enabled)
+    }
+
+    /// One portal's state. `portal_name` is `PortalInfo::display_name`.
+    pub fn for_portal(portal_name: &str, pr_enabled: [bool; 3]) -> Self {
         Self {
+            portal_name: portal_name.to_string(),
             // Derived from the value stored below, not from a second read of the argument, so the
             // two can never disagree about which axes exist.
             pr: pr_enabled.map(|enabled| enabled.then(Track::new)),
@@ -828,7 +846,7 @@ impl PollState {
     pub fn apply_pr(&mut self, axis: PrAxis, response: PollResponse) {
         self.learn_pacing(&response);
         let Some(track) = self.pr[axis.index()].as_mut() else { return };
-        let forced = track.apply(response.result);
+        let forced = track.apply(&self.portal_name, response.result);
         self.record_forced(forced);
     }
 
@@ -1020,7 +1038,7 @@ impl PollState {
         // First, because it reframes everything below it: during an outage a stale count or an
         // "unknown" axis has an explanation, and the user should read that before the numbers.
         if let Some(description) = self.status_degraded.as_deref() {
-            lines.push(format!("GitHub: {description}"));
+            lines.push(format!("{}: {description}", self.portal_name));
         }
 
         // A disabled axis explains itself; there is nothing else left to keep quiet about
@@ -2511,7 +2529,7 @@ mod tests {
 
     #[test]
     fn golden_menu_constants() {
-        assert_eq!(AUTHENTICATE_MENU_LABEL, "Authenticate GitHub PR Status");
+        assert_eq!(authenticate_menu_label("GitHub"), "Authenticate GitHub PR Status");
         assert_eq!(STATUS_MENU_LABEL, "GitHub is githubing again, check status");
         assert_eq!(PR_INBOX_URL, "https://github.com/pulls/inbox");
         assert_eq!(PR_INBOX_MENU_LABEL, "Open PR inbox");
@@ -2551,6 +2569,19 @@ Update available: 2.9.0");
         state.apply_pr(PrAxis::ReviewRequested, respond(PollResult::Unauthorized));
         assert_eq!(state.tooltip(), "Review state unknown
 GitHub rejected the credential");
+    }
+
+    /// The wording that names a portal comes from the state's own name, so a second portal reads
+    /// as itself and the GitHub goldens above stay exactly as they were.
+    #[test]
+    fn a_portal_state_names_itself_in_its_wording() {
+        let mut state = PollState::for_portal("GitLab", [true, false, false]);
+        state.set_status_degraded(Some("Wobbly".to_string()));
+        state.apply_pr(PrAxis::ReviewRequested, respond(PollResult::Unauthorized));
+        assert_eq!(state.tooltip(), "GitLab: Wobbly
+Review state unknown
+GitLab rejected the credential");
+        assert_eq!(authenticate_menu_label("GitLab"), "Authenticate GitLab PR Status");
     }
 
     #[test]

@@ -303,7 +303,7 @@ fn main() {
     // every other entry is hidden. The click only *asks*: the device flow itself runs on the poll
     // thread (see `scheduler::Wake::Authenticate`), because it blocks for as long as the user takes
     // and doing that here would freeze the entire GTK main loop, tray icon and all.
-    let authenticate_item = MenuItem::with_label(state::AUTHENTICATE_MENU_LABEL);
+    let authenticate_item = MenuItem::with_label(&state::authenticate_menu_label("GitHub"));
     let authenticate_wake_tx = wake_tx.clone();
     authenticate_item.connect_activate(move |_| {
         let _ = authenticate_wake_tx.send(scheduler::Wake::Authenticate);
@@ -848,7 +848,7 @@ fn main() {
         let changes_requested_item_id = changes_requested_item.id().clone();
         let pr_inbox_item = MenuItem::new(state::PR_INBOX_MENU_LABEL, true, None);
         let pr_inbox_item_id = pr_inbox_item.id().clone();
-        let authenticate_item = MenuItem::new(state::AUTHENTICATE_MENU_LABEL, true, None);
+        let authenticate_item = MenuItem::new(&state::authenticate_menu_label("GitHub"), true, None);
         let authenticate_item_id = authenticate_item.id().clone();
         let update_item = MenuItem::new(state::UPDATE_MENU_LABEL, true, None);
         let update_item_id = update_item.id().clone();
