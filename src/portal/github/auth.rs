@@ -64,9 +64,6 @@ const SLOW_DOWN_PENALTY: Duration = Duration::from_secs(5);
 /// the token expire mid-flight.
 const EXPIRY_SAFETY_MARGIN: Duration = Duration::from_secs(5 * 60);
 
-/// This credential's tag for `dialog::show_device_code_prompt`/`show_auth_success`.
-const AUTH_SUBJECT: &str = "GitHub PR Status";
-
 /// The three URLs the device flow and the installations read talk to, derived from the portal's
 /// base by `super::Endpoints::for_base` so a GitHub Enterprise Server is a different base and
 /// nothing else in here changes.
@@ -88,6 +85,7 @@ fn client_id() -> String {
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 pub use crate::portal::AuthError;
+use crate::portal::{SignInPrompt, SignInProgress};
 
 /// GitHub answered, and the answer was a refusal or nonsense.
 fn github_error(detail: String) -> AuthError {
@@ -204,6 +202,14 @@ fn read_credential(path: &Path) -> Option<Credential> {
 
 /// Writes a credential with owner-only permissions — same approach as
 /// `access_token::save_token`, since this file holds a live bearer token too.
+/// Deletes the saved credential. Nothing there is not an error: the outcome is the same.
+pub fn forget_saved(app_asset_path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(app_asset_path.join(PR_TOKEN_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 fn save_credential(path: &Path, credential: &Credential) {
     let mut content = format!("access_token={}\n", credential.access_token);
     if let Some(at) = credential.expires_at
@@ -290,12 +296,23 @@ fn request_device_code(http: &Client, oauth: &OAuthEndpoints) -> Result<DeviceCo
 }
 
 /// Runs the full Device Flow and returns the resulting credential.
-fn device_code_flow(http: &Client, oauth: &OAuthEndpoints) -> Result<Credential, AuthError> {
+fn device_code_flow(
+    http: &Client,
+    oauth: &OAuthEndpoints,
+    progress: &dyn SignInProgress,
+) -> Result<Credential, AuthError> {
     let dc = request_device_code(http, oauth)?;
 
-    // The prompt owns the browser launch — see `dialog::show_device_code_prompt`. Non-blocking, so
-    // the poll loop below starts while the dialog is still on screen.
-    crate::dialog::show_device_code_prompt(AUTH_SUBJECT, &dc.user_code, &dc.verification_uri);
+    // Whoever started the flow shows the code; this thread only polls. Handed over before the first
+    // wait, so the settings page has something to show within a second of the click.
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    progress.prompt(SignInPrompt {
+        code: dc.user_code.clone(),
+        url: dc.verification_uri.clone(),
+        expires_at: now_unix.saturating_add(dc.expires_in),
+    });
 
     let mut poll_interval = Duration::from_secs(dc.interval.max(MIN_DEVICE_POLL_INTERVAL));
     let expires_at = Instant::now() + Duration::from_secs(dc.expires_in);
@@ -305,7 +322,18 @@ fn device_code_flow(http: &Client, oauth: &OAuthEndpoints) -> Result<Credential,
             return Err(AuthError::Expired);
         }
 
-        std::thread::sleep(poll_interval);
+        // GitHub's interval is five seconds or more, and a cancel should not have to wait it out:
+        // sleep in one-second steps and look up between them.
+        let resume_at = Instant::now() + poll_interval;
+        while Instant::now() < resume_at {
+            if progress.cancelled() {
+                return Err(AuthError::Cancelled);
+            }
+            std::thread::sleep(Duration::from_secs(1).min(resume_at.saturating_duration_since(Instant::now())));
+        }
+        if progress.cancelled() {
+            return Err(AuthError::Cancelled);
+        }
 
         let response = http
             .post(&oauth.access_token)
@@ -324,7 +352,6 @@ fn device_code_flow(http: &Client, oauth: &OAuthEndpoints) -> Result<Credential,
             .map_err(|_| github_error(describe_oauth_failure(status, &body)))?;
 
         if let Some(access_token) = resp.access_token {
-            crate::dialog::show_auth_success(AUTH_SUBJECT);
             return Ok(to_credential(access_token, resp.expires_in, resp.refresh_token));
         }
 
@@ -445,10 +472,14 @@ impl PrTokenStore {
     /// Called only when the user picks the tray's Authenticate item, so a browser and a dialog are
     /// expected here rather than a surprise. Blocks for as long as the flow takes (up to GitHub's
     /// 15-minute device-code lifetime), so its caller must be the poll thread, never the UI thread.
-    pub fn authenticate(app_asset_path: &Path, oauth: &OAuthEndpoints) -> Result<Self, AuthError> {
+    pub fn authenticate(
+        app_asset_path: &Path,
+        oauth: &OAuthEndpoints,
+        progress: &dyn SignInProgress,
+    ) -> Result<Self, AuthError> {
         let http = build_client()?;
         let token_path = app_asset_path.join(PR_TOKEN_FILE);
-        let credential = device_code_flow(&http, oauth)?;
+        let credential = device_code_flow(&http, oauth, progress)?;
         save_credential(&token_path, &credential);
         Ok(Self { token_path, oauth: oauth.clone(), credential, http })
     }

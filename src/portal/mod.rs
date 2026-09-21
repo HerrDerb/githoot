@@ -129,6 +129,65 @@ pub enum CredentialState {
     Off(String),
 }
 
+/// How a portal's sign-in stands, as the settings page shows it.
+///
+/// `CredentialState` is what the poll loop acts on; this is what a person reads. They differ in one
+/// place: a device flow that is running right now is neither signed in nor not, and a page that said
+/// "not signed in" while the browser was already open would invite a second click.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AuthStatus {
+    SignedIn,
+    NotSignedIn,
+    /// A sign-in is in flight on the poll thread. `None` until the portal has handed out what the
+    /// user must do; then the code and the address the settings page shows.
+    SigningIn(Option<SignInPrompt>),
+    /// Signed in, but nothing can be seen and another sign-in would not help. The reason, worded
+    /// for the tooltip and reused here.
+    Off(String),
+}
+
+impl From<&CredentialState> for AuthStatus {
+    fn from(credential: &CredentialState) -> Self {
+        match credential {
+            CredentialState::Ready => AuthStatus::SignedIn,
+            CredentialState::NeedsAuth => AuthStatus::NotSignedIn,
+            CredentialState::Off(reason) => AuthStatus::Off(reason.clone()),
+        }
+    }
+}
+
+/// What the user has to do to finish a sign-in: a code to enter at an address, before a deadline.
+///
+/// This is the device flow's shape, and the pasted-token style will need a different prompt when it
+/// arrives; the settings page renders whatever a portal hands over here.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SignInPrompt {
+    pub code: String,
+    pub url: String,
+    /// Unix seconds. The page says how long is left rather than a wall-clock time nobody converts.
+    pub expires_at: u64,
+}
+
+/// How a running sign-in talks back to whoever started it.
+///
+/// A device flow blocks the poll thread for as long as the user takes, so the two things it needs
+/// from the outside world go through this rather than through a dialog the flow opens itself: where
+/// to *show* the code (the settings page, today), and whether the user has given up. Checked between
+/// polls, so a cancel takes effect within about a second.
+pub trait SignInProgress {
+    /// The portal has issued what the user must do. Called once, early.
+    fn prompt(&self, prompt: SignInPrompt);
+    /// Whether the user asked for the sign-in to stop. The flow returns `AuthError::Cancelled`.
+    fn cancelled(&self) -> bool;
+}
+
+/// One portal as the settings page lists it: who it is and how its sign-in stands.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PortalStatus {
+    pub info: PortalInfo,
+    pub auth: AuthStatus,
+}
+
 /// One poll's answers, indexed by `PrAxis::index`.
 ///
 /// `None` for an axis the caller did not ask for. An adapter that answers all three from one round
@@ -167,6 +226,10 @@ pub enum AuthError {
     Network(String),
     Denied,
     Expired,
+    /// The user stopped the sign-in from the settings page. Not a failure to report as one.
+    Cancelled,
+    /// The saved credential could not be written or deleted. Local, not the portal's doing.
+    Storage(String),
     /// The portal answered, and the answer was a refusal or nonsense. Named so the message can
     /// quote who said it.
     Portal { name: String, detail: String },
@@ -185,6 +248,8 @@ impl std::fmt::Display for AuthError {
             AuthError::Network(e) => write!(f, "network error during authorization: {e}"),
             AuthError::Denied => write!(f, "authorization was denied"),
             AuthError::Expired => write!(f, "device code expired before authorization completed"),
+            AuthError::Cancelled => write!(f, "sign-in cancelled"),
+            AuthError::Storage(e) => write!(f, "could not update the saved credential: {e}"),
             AuthError::Portal { name, detail } => write!(f, "{name} reported: {detail}"),
             AuthError::AuthorizationRequired => write!(f, "authorization required"),
         }
@@ -211,8 +276,15 @@ pub trait Portal: Send {
     fn load_saved_credential(&mut self) -> Result<CredentialState, AuthError>;
 
     /// The interactive path. Blocks for as long as the user takes, so its caller must be the poll
-    /// thread and never the UI thread.
-    fn authenticate(&mut self) -> Result<CredentialState, AuthError>;
+    /// thread and never the UI thread. What the user must do, and whether they gave up, go through
+    /// `progress`; the portal opens no dialog of its own.
+    fn authenticate(&mut self, progress: &dyn SignInProgress) -> Result<CredentialState, AuthError>;
+
+    /// Forgets the credential, on disk and in memory. Afterwards `load_saved_credential` would
+    /// answer `NeedsAuth`, and so should the caller's state. The portal's own session (a GitHub App
+    /// authorization, say) is not revoked: that is the user's to do on the portal, and this app
+    /// holds no token that could do it once the saved one is gone.
+    fn sign_out(&mut self) -> Result<(), AuthError>;
 
     /// Whether the credential is expired or about to be. `false` for a portal whose tokens do not
     /// expire on a schedule.

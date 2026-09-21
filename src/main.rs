@@ -328,7 +328,12 @@ fn main() {
     let authenticate_item = MenuItem::with_label(&state::authenticate_menu_label("GitHub"));
     let authenticate_wake_tx = wake_tx.clone();
     authenticate_item.connect_activate(move |_| {
-        let _ = authenticate_wake_tx.send(scheduler::Wake::Authenticate);
+        // Only opens the page. Signing in is started by the button there, never by this entry:
+        // a click that opened a browser *and* began a device flow read as the flow starting on its
+        // own. If the page cannot be served at all, the old wake runs the flow with its dialog.
+        if !serve::open_settings_page() {
+            let _ = authenticate_wake_tx.send(scheduler::Wake::Authenticate(None));
+        }
     });
 
     // Placed with Authenticate at the top, for the same reason: when the icon is wearing a mark, the
@@ -1122,7 +1127,10 @@ fn main() {
                 // Only asks. The device flow runs on the poll thread (see
                 // `scheduler::Wake::Authenticate`), because it blocks for as long as the user takes
                 // and doing that here would freeze the event loop and the tray with it.
-                let _ = self.wake_tx.send(scheduler::Wake::Authenticate);
+                // Only opens the page; see the Linux entry point for why.
+                if !serve::open_settings_page() {
+                    let _ = self.wake_tx.send(scheduler::Wake::Authenticate(None));
+                }
             } else if *id == tray.update_item_id {
                 // Only asks. The download, verification and swap all happen on the update thread —
                 // see `scheduler::Wake::UpdateNow`.

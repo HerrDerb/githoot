@@ -9,7 +9,21 @@
 //! and because opening one browser tab per pull request was the alternative.
 
 use crate::portal::types::{CheckRollup, PrEntry, ReviewState, Reviewer};
-use crate::portal::PortalInfo;
+use crate::portal::{AuthStatus, AuthStyle, PortalInfo, PortalStatus, SignInPrompt};
+
+/// Everything the settings page shows about portals, and the two markers a redirect back from a
+/// button carries: the id whose sign-in was just asked for, and the id just signed out of. Both
+/// exist because the poll thread may not have published the outcome by the time the browser follows
+/// the redirect, so the page says what was asked and reloads once to catch up.
+#[derive(Clone, Copy)]
+pub struct PortalsView<'a> {
+    pub portals: &'a [PortalStatus],
+    pub signin_started: Option<&'a str>,
+    pub signed_out: Option<&'a str>,
+    pub now_unix: u64,
+    /// Names the copy button's script in the CSP. Empty means no script is emitted.
+    pub nonce: &'a str,
+}
 
 /// One portal's share of an axis page: who it is, and what it last confirmed.
 ///
@@ -204,6 +218,10 @@ margin:1.5rem 0 .5rem;font-weight:600}\
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
 font:inherit;font-weight:600;cursor:pointer}\
 code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}\
+.code-row{display:flex;gap:.6rem;align-items:stretch;margin:.6rem 0}\
+.code-row input{flex:0 0 auto;width:11ch;box-sizing:content-box;text-align:center;font:inherit;\
+font-size:1.5rem;font-weight:700;letter-spacing:.15em;padding:.55rem .6rem;border:1px solid var(--line);\
+border-radius:8px;background:var(--bg);color:inherit}\
 .portal{font-size:.85rem;font-weight:600;letter-spacing:.04em;opacity:.7;margin:1.4rem 0 .5rem}";
 
 /// One axis's whole page.
@@ -436,8 +454,31 @@ fn newest_first(list: &[PrEntry]) -> Vec<&PrEntry> {
 ///
 /// `saved` is how many keys the last submission actually changed, for the banner. `None` means the
 /// page was opened rather than submitted.
-pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]) -> String {
-    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token);
+///
+/// `portals` is every configured portal with how its sign-in stands, and `signin_started` is the id
+/// of the portal whose sign-in the previous request just asked for, from the redirect back. That
+/// banner exists because the poll thread may not have published "in progress" yet by the time the
+/// browser follows the redirect, and a page that still offered the button would invite a second
+/// click while the first device code dialog is on its way up.
+pub fn settings_page(
+    cfg: &crate::config::Config,
+    token: &str,
+    restarts: &[&str],
+    view: &PortalsView,
+) -> String {
+    let PortalsView { portals, signin_started, signed_out, now_unix, nonce } = *view;
+    // Reload every few seconds while a sign-in is in flight, or has just been asked for, so the
+    // code appears without a click and the card turns to "Signed in" on its own.
+    // A redirect marker means the poll thread was just asked for something and the page should
+    // catch up as soon as it plausibly has: one second. A running flow reloads at the slower pace.
+    let refresh = if signin_started.is_some() || signed_out.is_some() {
+        Some(CATCH_UP_REFRESH_SECS)
+    } else if portals.iter().any(|p| matches!(p.auth, AuthStatus::SigningIn(_))) {
+        Some(SIGN_IN_REFRESH_SECS)
+    } else {
+        None
+    };
+    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, refresh);
 
     if !restarts.is_empty() {
         h.push_str(&format!(
@@ -446,6 +487,30 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
             if restarts.len() == 1 { "s" } else { "" },
             esc(&restarts.join(", "))
         ));
+    }
+    if let Some(started) = signin_started.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
+        h.push_str(&format!(
+            "<div class=\"empty\"><strong>Sign-in to {} started.</strong> This page refreshes itself; \
+             what to do appears below in a moment.</div>\n",
+            esc(&started.info.display_name)
+        ));
+    }
+
+    if let Some(gone) = signed_out.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
+        h.push_str(&format!(
+            "<div class=\"empty\"><strong>Signed out of {}.</strong> The saved credential was \
+             deleted; sign in again whenever you like.</div>\n",
+            esc(&gone.info.display_name)
+        ));
+    }
+
+    // Its own forms, outside the settings form below: a form cannot nest, and a sign-in is an
+    // action rather than a setting to save.
+    h.push_str("<h2 class=\"section\">Portals</h2>\n");
+    let mut code_on_screen = false;
+    for portal in portals {
+        h.push_str(&portal_card(portal, token, now_unix));
+        code_on_screen |= matches!(portal.auth, AuthStatus::SigningIn(Some(_)));
     }
 
     h.push_str(&format!("<form method=\"post\" action=\"/{}/settings\">\n", esc(token)));
@@ -499,14 +564,123 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
     h.push_str("<p><button type=\"submit\">Save</button></p>\n</form>\n");
     h.push_str(
         "<footer>Written to <code>config.txt</code>, one line per changed setting — your comments \
-         and any keys this version has never heard of are left alone.</footer>\n</main>\n</body>\n</html>\n",
+         and any keys this version has never heard of are left alone.</footer>\n",
     );
+    // The one script this page ever carries, and only while there is a code to copy. Named by
+    // nonce like the PR page's refresh script, so the CSP stays `default-src 'none'` otherwise.
+    if code_on_screen && !nonce.is_empty() {
+        h.push_str(&format!("<script nonce=\"{}\">{COPY_SCRIPT}</script>\n", esc(nonce)));
+    }
+    h.push_str("</main>\n</body>\n</html>\n");
     h
+}
+
+/// Copies the device code and opens the sign-in address in a new tab when the button is clicked,
+/// then says so on the button for a moment.
+///
+/// `navigator.clipboard` needs a secure context, which `*.localhost` is in every current browser;
+/// where it is refused anyway the code is selected instead, one keystroke from copied. The address
+/// comes from the button's own `data-url`, which the page sets only for an allowlisted URL, and the
+/// tab is opened inside the click handler so popup blockers let it through. No dependencies, no
+/// state, nothing that runs before a click.
+const COPY_SCRIPT: &str = "(function(){var b=document.getElementById('copy-code'),i=document.getElementById('device-code');if(!b||!i)return;var url=b.getAttribute('data-url');function done(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy and open';},1500);if(url){window.open(url,'_blank','noopener,noreferrer');}}function copy(){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(i.value).catch(function(){i.select();});}i.select();try{document.execCommand('copy');}catch(e){}return Promise.resolve();}b.addEventListener('click',function(){copy().then(done,done);});})();";
+
+/// How often the settings page reloads while a sign-in runs. Short enough that the code shows
+/// within a moment of the click and the card flips to "Signed in" soon after the browser finishes;
+/// long enough not to fight the user reading the code.
+const SIGN_IN_REFRESH_SECS: u32 = 3;
+
+/// How soon the page reloads after a button's redirect, to show what the poll thread made of the
+/// click. The click is handled within milliseconds; the second is the browser's round trip.
+const CATCH_UP_REFRESH_SECS: u32 = 1;
+
+/// One portal on the settings page: its name, how its sign-in stands, and one button. Sign in while
+/// not signed in; Sign out while signed in, which deletes the saved credential; Cancel while a
+/// sign-in runs. Only a dead end the portal declared (nothing installed, switched off in the file)
+/// gets no button, because a sign-in would change nothing there.
+fn portal_card(portal: &PortalStatus, token: &str, now_unix: u64) -> String {
+    let name = esc(&portal.info.display_name);
+    let action = |field: &str, label: &str| {
+        format!(
+            "<form method=\"post\" action=\"/{}/settings/authenticate\"><input type=\"hidden\" \
+             name=\"portal\" value=\"{}\">{}<button type=\"submit\">{label}</button></form>",
+            esc(token),
+            esc(&portal.info.id.0),
+            if field.is_empty() {
+                String::new()
+            } else {
+                format!("<input type=\"hidden\" name=\"{field}\" value=\"1\">")
+            }
+        )
+    };
+    let (status, form) = match &portal.auth {
+        AuthStatus::SignedIn => ("Signed in".to_string(), action("signout", "Sign out")),
+        AuthStatus::NotSignedIn => (
+            format!("Not signed in. <span class=\"sub\">{}</span>", sign_in_hint(&portal.info)),
+            action("", &format!("Sign in to {name}")),
+        ),
+        AuthStatus::SigningIn(None) => ("Starting sign-in…".to_string(), action("cancel", "Cancel")),
+        AuthStatus::SigningIn(Some(prompt)) => {
+            (sign_in_step(&portal.info, prompt, now_unix), action("cancel", "Cancel"))
+        }
+        AuthStatus::Off(reason) => (esc(reason), String::new()),
+    };
+    // A `div`, not a `p`: the running sign-in puts a block (the code row) inside the status.
+    format!(
+        "<div class=\"card\"><div class=\"row\"><strong>{name}</strong> · <span class=\"portal-status\">{status}</span></div>{form}</div>\n"
+    )
+}
+
+/// What the user has to do right now: the code, where to enter it, and how long they have. The
+/// link opens in a new tab on purpose, the one place this app does that: this page has to stay open
+/// to show the outcome, and the code is also on the clipboard.
+///
+/// The address came over the network, so it is a link only under the portal's own prefix, like
+/// every other URL on these pages; anything else is shown as text.
+fn sign_in_step(info: &PortalInfo, prompt: &SignInPrompt, now_unix: u64) -> String {
+    let left = prompt.expires_at.saturating_sub(now_unix);
+    let deadline = if left == 0 {
+        "The code has expired; cancel and start again.".to_string()
+    } else {
+        format!("Expires in {} min.", left.div_ceil(60))
+    };
+    // The button opens the address only when it passed the allowlist; otherwise it only copies,
+    // and the address is shown as text for the user to judge.
+    let safe = safe_url(&prompt.url, &info.link_prefix);
+    let where_ = match safe {
+        Some(url) => format!(
+            "<a href=\"{}\" target=\"_blank\" rel=\"noreferrer noopener\">{}</a>",
+            esc(url),
+            esc(url)
+        ),
+        None => esc(&prompt.url),
+    };
+    let open = safe.map(|url| format!(" data-url=\"{}\"", esc(url))).unwrap_or_default();
+    format!(
+        "Enter this code at {where_}. {deadline}<div class=\"code-row\"><input id=\"device-code\" \
+         class=\"device-code\" type=\"text\" readonly value=\"{}\" aria-label=\"Device code\">\
+         <button type=\"button\" id=\"copy-code\"{open}>Copy and open</button></div><span class=\"sub\">\
+         This page updates itself when you are done.</span>",
+        esc(&prompt.code)
+    )
+}
+
+/// What the sign-in will look like, so the button is not a surprise.
+fn sign_in_hint(info: &PortalInfo) -> String {
+    match info.capabilities.auth_style {
+        AuthStyle::DeviceFlow => format!(
+            "A code and a link to {} appear here; enter the code there to finish.",
+            esc(&info.display_name)
+        ),
+        AuthStyle::PastedToken => {
+            format!("You will be asked for a token you created on {}.", esc(&info.display_name))
+        }
+    }
 }
 
 /// What the settings route says when `serve::install` was never called.
 pub fn settings_unavailable(token: &str) -> String {
-    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::REVIEW_DOT_COLOR), token);
+    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::REVIEW_DOT_COLOR), token, None);
     h.push_str(
         "<div class=\"empty\">Settings are not available in this run.</div>\n</main>\n</body>\n</html>\n",
     );
@@ -523,10 +697,20 @@ fn checkbox(name: &str, label: &str, on: bool) -> String {
 }
 
 /// Everything both kinds of page share: head, stylesheet, owl and heading.
-fn shell(title: &str, accent: String, token: &str) -> String {
+/// `refresh_secs` makes the page reload itself, the one way a page with no script can follow
+/// something changing on the poll thread. Used only while a sign-in is running.
+fn shell(title: &str, accent: String, token: &str, refresh_secs: Option<u32>) -> String {
     let mut h = String::with_capacity(4096);
     h.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
     h.push_str("<meta charset=\"utf-8\">\n");
+    if let Some(secs) = refresh_secs {
+        // To the plain address, so a `?signin=` marker from a redirect is carried exactly once and
+        // the page does not reload forever on the strength of a click long finished.
+        h.push_str(&format!(
+            "<meta http-equiv=\"refresh\" content=\"{secs};url=/{}/settings\">\n",
+            esc(token)
+        ));
+    }
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n");
     // `same-origin`, not `no-referrer`: the latter also nulls the `Origin` header on this page's own
     // form POST, which is the CSRF check's only evidence. See `serve::Referrer`.
@@ -1082,13 +1266,25 @@ mod tests {
     /// The settings page has a form and no list, so it gets no refresh loop.
     #[test]
     fn the_settings_page_has_no_refresh_script() {
-        assert!(!settings_page(&default_cfg(), "tok", &[]).contains("<script"));
+        assert!(!settings_page(&default_cfg(), "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n" }).contains("<script"));
     }
 
     // ── The settings page ─────────────────────────────────────────────────────
 
     fn settings(cfg: &crate::config::Config) -> String {
-        settings_page(cfg, "tok", &[])
+        settings_page(cfg, "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n" })
+    }
+
+    fn portal(auth: AuthStatus) -> PortalStatus {
+        PortalStatus { info: GITHUB.clone(), auth }
+    }
+
+    fn view<'a>(portals: &'a [PortalStatus], signin: Option<&'a str>) -> PortalsView<'a> {
+        PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n" }
+    }
+
+    fn settings_with(portals: &[PortalStatus], signin: Option<&str>) -> String {
+        settings_page(&default_cfg(), "tok", &[], &view(portals, signin))
     }
 
     fn default_cfg() -> crate::config::Config {
@@ -1139,16 +1335,129 @@ mod tests {
         }
     }
 
+    // ── Portals on the settings page ──────────────────────────────────────────
+
+    /// The button appears exactly when a click would help: not signed in. It posts to its own
+    /// route, names its portal, and stays outside the settings form so the two cannot nest.
     #[test]
-    fn the_settings_page_runs_no_script_either() {
+    fn a_portal_waiting_for_sign_in_gets_a_button_that_names_it() {
+        let html = settings_with(&[portal(AuthStatus::NotSignedIn)], None);
+        assert!(html.contains("<h2 class=\"section\">Portals</h2>"), "got {html}");
+        assert!(html.contains("<strong>GitHub</strong> · <span class=\"portal-status\">Not signed in."), "got {html}");
+        assert!(html.contains(r#"<form method="post" action="/tok/settings/authenticate">"#));
+        assert!(html.contains(r#"<input type="hidden" name="portal" value="github">"#));
+        assert!(html.contains("Sign in to GitHub</button>"));
+        assert!(html.contains("A code and a link"), "the device flow is explained before the click");
+        assert!(!html.contains("http-equiv=\"refresh\""), "nothing running: the page sits still");
+        let sign_in_form = html.find("settings/authenticate").expect("the button's form");
+        let settings_form = html.find(r#"action="/tok/settings">"#).expect("the settings form");
+        assert!(sign_in_form < settings_form, "the sign-in form must not sit inside the settings form");
+    }
+
+    /// Signed in offers Sign out, which posts to the same route with `signout` set. The page after
+    /// the redirect says so and reloads once so the card catches up with the poll thread.
+    #[test]
+    fn a_signed_in_portal_offers_to_sign_out() {
+        let html = settings_with(&[portal(AuthStatus::SignedIn)], None);
+        assert!(html.contains("<span class=\"portal-status\">Signed in</span>"), "got {html}");
+        assert!(html.contains(r#"<input type="hidden" name="signout" value="1"><button type="submit">Sign out</button>"#));
+        assert!(!html.contains("Cancel</button>") && !html.contains("Sign in to GitHub</button>"));
+        assert!(!html.contains("http-equiv=\"refresh\""));
+
+        let statuses = [portal(AuthStatus::NotSignedIn)];
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { signed_out: Some("github"), ..view(&statuses, None) });
+        assert!(html.contains("<strong>Signed out of GitHub.</strong>"), "got {html}");
+        assert!(html.contains(r#"<meta http-equiv="refresh" content="1;url=/tok/settings">"#), "one quick reload to catch up, to the plain address: {html}");
+    }
+
+    /// A dead end the portal declared: the reason is said and no button is offered, because a
+    /// sign-in would change nothing there.
+    #[test]
+    fn a_dead_end_shows_its_reason_without_a_button() {
+        let html = settings_with(&[portal(AuthStatus::Off("PR status off: install the GitHub App to see your PRs".to_string()))], None);
+        assert!(html.contains("install the GitHub App"), "got {html}");
+        assert!(!html.contains("settings/authenticate"));
+        assert!(!html.contains("http-equiv=\"refresh\""));
+    }
+
+    /// While the flow runs the page is the dialog: it shows the code and the link, says how long is
+    /// left, offers Cancel and nothing else, and reloads itself so the outcome shows up on its own.
+    #[test]
+    fn a_running_sign_in_shows_the_code_the_link_the_deadline_and_cancel() {
+        let html = settings_with(&[portal(AuthStatus::SigningIn(None))], None);
+        assert!(html.contains("Starting sign-in"), "got {html}");
+        assert!(html.contains(r#"<input type="hidden" name="cancel" value="1"><button type="submit">Cancel</button>"#));
+        assert!(!html.contains("Sign in to GitHub</button>"), "no second sign-in while one runs");
+        assert!(html.contains(r#"<meta http-equiv="refresh" content="3;url=/tok/settings">"#), "reloads to the plain address");
+
+        let prompt = SignInPrompt {
+            code: "ABCD-1234".to_string(),
+            url: "https://github.com/login/device".to_string(),
+            expires_at: NOW + 14 * 60 + 30,
+        };
+        let html = settings_with(&[portal(AuthStatus::SigningIn(Some(prompt.clone())))], None);
+        assert!(html.contains(r#"<input id="device-code" class="device-code" type="text" readonly value="ABCD-1234" aria-label="Device code">"#), "got {html}");
+        assert!(html.contains(r#"<button type="button" id="copy-code" data-url="https://github.com/login/device">Copy and open</button>"#), "one button copies and opens: {html}");
+        assert!(html.contains("<script nonce=\"n\">"), "the copy button needs the one script this page ever runs");
+        assert!(!html.contains("<p class=\"row\">"), "the code row is a block, so the card must not wrap it in a paragraph");
+        assert!(html.contains(r#"<a href="https://github.com/login/device" target="_blank" rel="noreferrer noopener">https://github.com/login/device</a>"#));
+        assert!(html.contains("Expires in 15 min."), "rounded up, so it never claims less time than there is");
+        assert!(html.contains("Cancel</button>"));
+
+        let expired = SignInPrompt { expires_at: NOW - 1, ..prompt };
+        let html = settings_with(&[portal(AuthStatus::SigningIn(Some(expired)))], None);
+        assert!(html.contains("The code has expired"));
+    }
+
+    /// The code and the URL come from the portal's answer, so they are escaped like anything else
+    /// that arrives over the network.
+    #[test]
+    fn the_prompt_is_escaped() {
+        let prompt = SignInPrompt { code: "<b>".to_string(), url: "javascript:x".to_string(), expires_at: NOW + 60 };
+        let html = settings_with(&[portal(AuthStatus::SigningIn(Some(prompt)))], None);
+        assert!(html.contains("&lt;b&gt;") && !html.contains("<b>"));
+        assert!(!html.contains("href=\"javascript"), "an address off the portal's own host is text, not a link");
+        assert!(!html.contains("data-url="), "and the button will not open it either");
+        assert!(html.contains("at javascript:x."), "shown, so nothing is hidden");
+    }
+
+    /// The redirect back from the button names the portal, and the page says so even if the poll
+    /// thread has not yet published "in progress". An unknown id is ignored rather than rendered.
+    #[test]
+    fn the_sign_in_started_banner_names_the_portal_and_ignores_strangers() {
+        let html = settings_with(&[portal(AuthStatus::NotSignedIn)], Some("github"));
+        assert!(html.contains("<strong>Sign-in to GitHub started.</strong>"), "got {html}");
+        assert!(html.contains("http-equiv=\"refresh\""), "and the page will catch up with the poll thread on its own");
+        let html = settings_with(&[portal(AuthStatus::NotSignedIn)], Some("gitlab"));
+        assert!(!html.contains("started."), "an id the page does not know renders nothing");
+        assert!(!html.contains("gitlab"), "and is not echoed back");
+    }
+
+    /// Text on a portal card comes from the portal and from `config.txt`, so it is escaped like a
+    /// PR title.
+    #[test]
+    fn portal_status_text_is_escaped() {
+        let html = settings_with(&[portal(AuthStatus::Off("<b>x</b>".to_string()))], None);
+        assert!(html.contains("&lt;b&gt;x&lt;/b&gt;"));
+        assert!(!html.contains("<b>x</b>"));
+    }
+
+    /// No script unless a device code is on screen, and none at all without a nonce to name it.
+    #[test]
+    fn the_settings_page_runs_no_script_unless_a_code_is_on_screen() {
         assert!(!settings(&default_cfg()).contains("<script"));
         assert!(!settings_unavailable("tok").contains("<script"));
+        assert!(!settings_with(&[portal(AuthStatus::SigningIn(None))], None).contains("<script"));
+        let prompt = SignInPrompt { code: "X".to_string(), url: GITHUB.link_prefix.clone(), expires_at: NOW + 60 };
+        let statuses = [portal(AuthStatus::SigningIn(Some(prompt)))];
+        let without_nonce = settings_page(&default_cfg(), "tok", &[], &PortalsView { nonce: "", ..view(&statuses, None) });
+        assert!(!without_nonce.contains("<script"), "no nonce, no script: the CSP would block it anyway");
     }
 
     #[test]
     fn the_restart_banner_only_shows_after_a_save() {
         assert!(!settings(&default_cfg()).contains("Saved."));
-        let banner = settings_page(&default_cfg(), "tok", &["logLevel"]);
+        let banner = settings_page(&default_cfg(), "tok", &["logLevel"], &view(&[], None));
         assert!(banner.contains("Saved."));
         assert!(banner.contains("logLevel"));
     }

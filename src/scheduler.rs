@@ -10,7 +10,10 @@
 
 use crate::portal::github::api::build_client;
 use crate::portal::types::PrEntry;
-use crate::portal::{AuthError, CredentialState, Portal, PortalInfo};
+use crate::portal::{
+    AuthError, AuthStatus, CredentialState, Portal, PortalId, PortalInfo, PortalStatus, SignInProgress,
+    SignInPrompt,
+};
 use crate::update::{Available, RestartPlan};
 use crate::{errorln, infoln};
 use crate::state::{IconState, PollState, PrAxis, MENU_BURST, REFRESH_BURST};
@@ -82,6 +85,8 @@ struct PrSnapshot {
 /// One portal's share of the snapshot.
 struct PortalSnapshot {
     info: PortalInfo,
+    /// How the sign-in stands, for the settings page.
+    auth: AuthStatus,
     /// Indexed by `PrAxis::index`. `None` means "no confirmed list", never "no PRs".
     axes: [Option<Vec<PrEntry>>; 3],
 }
@@ -104,6 +109,89 @@ pub fn inbox_url() -> String {
         .first()
         .map(|p| p.info.inbox_url.clone())
         .unwrap_or_else(|| format!("{}/pulls/inbox", crate::portal::github::DEFAULT_BASE_URL))
+}
+
+/// The sign-in currently running on the poll thread, if any, and whether the settings page has
+/// asked for it to stop.
+///
+/// A `static` because the poll thread is *inside* `Portal::authenticate` for the whole flow and reads
+/// no channel while there, so a cancel has to reach it some other way; the flow looks here between
+/// its polls (see `SignInProgress::cancelled`).
+struct SignIn {
+    portal: PortalId,
+    cancel_requested: bool,
+}
+
+static SIGN_IN: std::sync::Mutex<Option<SignIn>> = std::sync::Mutex::new(None);
+
+/// Asks the running sign-in for `portal` to stop. `false` when none is running for it, which the
+/// caller treats as already done rather than as an error.
+pub fn cancel_sign_in(portal: &PortalId) -> bool {
+    let mut running = SIGN_IN.lock().expect("sign-in lock poisoned");
+    match running.as_mut() {
+        Some(sign_in) if sign_in.portal == *portal => {
+            sign_in.cancel_requested = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// How a running sign-in reaches the settings page: the prompt lands in the snapshot the page reads,
+/// and a cancel is looked up in `SIGN_IN`.
+///
+/// The code also goes to the clipboard, as the dialog used to put it, and when the loopback server
+/// could not start at all the old dialog is shown instead, since a page nobody can open would leave
+/// the code nowhere.
+struct PageProgress {
+    portal: PortalId,
+    name: String,
+}
+
+impl SignInProgress for PageProgress {
+    fn prompt(&self, prompt: SignInPrompt) {
+        infoln!(
+            "{}: sign in at {} with code {} (expires in {}s)",
+            self.name,
+            prompt.url,
+            prompt.code,
+            prompt.expires_at.saturating_sub(unix_now())
+        );
+        crate::dialog::copy_to_clipboard(&prompt.code);
+        if !crate::serve::is_available() {
+            crate::dialog::show_device_code_prompt(&format!("{} PR Status", self.name), &prompt.code, &prompt.url);
+        }
+        let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+        if let Some(p) = snapshot.portals.iter_mut().find(|p| p.info.id == self.portal) {
+            p.auth = AuthStatus::SigningIn(Some(prompt));
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        SIGN_IN
+            .lock()
+            .expect("sign-in lock poisoned")
+            .as_ref()
+            .is_some_and(|s| s.portal == self.portal && s.cancel_requested)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Every portal and how its sign-in stands, for the settings page. Published with the snapshot,
+/// and again the moment a sign-in starts, so the page can say "in progress" while the device code
+/// dialog is up rather than offering the button a second time.
+pub fn portal_statuses() -> Vec<PortalStatus> {
+    let snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+    snapshot
+        .portals
+        .iter()
+        .map(|p| PortalStatus { info: p.info.clone(), auth: p.auth.clone() })
+        .collect()
 }
 
 /// The pull requests `axis` last confirmed, per portal, and how long ago that was.
@@ -143,13 +231,20 @@ pub enum Wake {
     /// megabytes would stall notification polling for as long as it takes, so this spawns a dedicated
     /// thread and returns immediately. See `run_poll_loop`.
     UpdateNow,
-    /// The user picked the Authenticate item, asking for the PR-status device flow to run now.
+    /// The user asked for a portal's sign-in to run now: from the tray's Authenticate item, or from
+    /// the settings page's button.
+    ///
+    /// `None` is the menu item, which exists only while some portal is waiting for a sign-in, so it
+    /// means "whichever one that is". `Some(id)` is the settings page, which names the portal beside
+    /// the button it rendered.
     ///
     /// Handled on the poll thread rather than in the click handler because that is where the
     /// credential lives, and because the flow blocks for as long as the user takes — up to GitHub's
     /// 15-minute device-code lifetime. Running it on the UI thread would freeze the tray for all of
     /// it, which on Linux means the whole GTK main loop.
-    Authenticate,
+    Authenticate(Option<PortalId>),
+    /// The settings page's Sign out button: forget the portal's credential and wait for a sign-in.
+    SignOut(PortalId),
     /// The user picked the Settings item, which has already opened `config.txt` in whatever handles it.
     ///
     /// Routed through here rather than started in the click handler because the watcher needs the same
@@ -232,6 +327,11 @@ struct PortalRun {
     /// Whether polls are issued at all. Off while waiting for a sign-in, or when the portal said
     /// there is nothing to see; the state carries the reason for the tooltip either way.
     live: bool,
+    /// The last word on the credential, for the settings page. `live` is derived from it.
+    credential: CredentialState,
+    /// A sign-in is running on this thread right now. Set before `Portal::authenticate` blocks and
+    /// published, so a page opened meanwhile says so.
+    signing_in: bool,
     last_reauth: Option<Instant>,
     last_status_check: Option<Instant>,
     /// Remembered so a permanent typo in `statusComponents` is said once rather than every five
@@ -249,7 +349,7 @@ impl PortalRun {
         // Both non-live branches mean "no PR dots", and both are deliberately said differently: one
         // has a menu item waiting to be clicked, the other has a reason clicking cannot address. The
         // three axes share one credential, so whichever it is applies to all three at once.
-        let live = match credential {
+        let live = match &credential {
             CredentialState::Ready => true,
             CredentialState::NeedsAuth => {
                 state.require_pr_auth();
@@ -266,6 +366,8 @@ impl PortalRun {
             portal,
             state,
             live,
+            credential,
+            signing_in: false,
             last_reauth: None,
             last_status_check: None,
             last_unmatched: None,
@@ -274,6 +376,15 @@ impl PortalRun {
 
     fn name(&self) -> &str {
         &self.portal.info().display_name
+    }
+
+    /// How the sign-in stands, as the settings page words it.
+    fn auth_status(&self) -> AuthStatus {
+        if self.signing_in {
+            AuthStatus::SigningIn(None)
+        } else {
+            AuthStatus::from(&self.credential)
+        }
     }
 
     /// One cycle's worth of asking this portal: the axes in play, then, every few minutes, its
@@ -367,6 +478,7 @@ impl PortalRun {
                 infoln!("{} PR status needs authorization — waiting for the menu", self.name());
                 self.state.require_pr_auth();
                 self.live = false;
+                self.credential = CredentialState::NeedsAuth;
                 false
             }
             // Anything else is a failure to *ask*, not an answer. Most often the network is down.
@@ -380,16 +492,31 @@ impl PortalRun {
         }
     }
 
+    /// The user picked Sign out. The credential goes, the axes go dark with the exclamation up, and
+    /// the Authenticate item is back on the menu: exactly the state a fresh install starts in.
+    fn sign_out(&mut self) {
+        match self.portal.sign_out() {
+            Ok(()) => {
+                infoln!("{} signed out; the saved credential was deleted", self.name());
+                self.state.require_pr_auth();
+                self.live = false;
+                self.credential = CredentialState::NeedsAuth;
+            }
+            Err(e) => errorln!("{} could not sign out: {e}", self.name()),
+        }
+    }
+
     /// The user picked Authenticate. Blocks for as long as they take, which is exactly why it runs
     /// here and not in the click handler: the tray stays responsive throughout, and the only cost is
     /// that polling pauses while a credential is being obtained — which it could not usefully do
     /// anyway.
-    fn authenticate(&mut self) {
-        match self.portal.authenticate() {
+    fn authenticate(&mut self, progress: &dyn SignInProgress) {
+        match self.portal.authenticate(progress) {
             Ok(CredentialState::Ready) => {
                 infoln!("{} PR status authorized", self.name());
                 self.state.clear_pr_auth();
                 self.live = true;
+                self.credential = CredentialState::Ready;
             }
             // Authorized, but there is nothing to see and another click cannot fix that, so the
             // exclamation comes down and a stated reason replaces it. Same answer startup gives.
@@ -400,10 +527,13 @@ impl PortalRun {
                     self.state.disable_pr(axis, reason.clone());
                 }
                 self.live = false;
+                self.credential = CredentialState::Off(reason);
             }
             Ok(CredentialState::NeedsAuth) => {
                 errorln!("{} sign-in finished without a credential; try again", self.name());
             }
+            // The user stopped it from the settings page. Nothing went wrong.
+            Err(AuthError::Cancelled) => infoln!("{} sign-in cancelled", self.name()),
             // Denied, expired, or the network went away mid-flow. The state is left as it was, so
             // the item is still on the menu to try again.
             Err(e) => errorln!("authorization failed: {e}"),
@@ -416,6 +546,7 @@ fn snapshot_of(runs: &[PortalRun]) -> Vec<PortalSnapshot> {
     runs.iter()
         .map(|run| PortalSnapshot {
             info: run.portal.info().clone(),
+            auth: run.auth_status(),
             axes: PrAxis::ALL.map(|axis| run.state.pr_entries(axis)),
         })
         .collect()
@@ -656,13 +787,47 @@ fn run_poll_loop(
                             restart.clone(),
                         );
                     }
-                    // The portal waiting for a sign-in, or the first one when none is: with a
-                    // single portal those are the same thing, and one menu item per portal is the
-                    // follow-up that would tell them apart.
-                    Wake::Authenticate => {
-                        let which = runs.iter().position(|run| run.state.pr_needs_auth()).unwrap_or(0);
-                        if let Some(run) = runs.get_mut(which) {
-                            run.authenticate();
+                    Wake::SignOut(id) => {
+                        match runs.iter_mut().find(|run| run.portal.info().id == id) {
+                            Some(run) => run.sign_out(),
+                            None => errorln!("sign-out requested for a portal that is not configured"),
+                        }
+                        // At once, so the page's one reload after the redirect sees the outcome.
+                        PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                    }
+                    // The named portal, or the one waiting for a sign-in, or the first: with a
+                    // single portal those are the same thing.
+                    Wake::Authenticate(which) => {
+                        let index = match which {
+                            Some(id) => runs.iter().position(|run| run.portal.info().id == id),
+                            None => Some(
+                                runs.iter().position(|run| run.state.pr_needs_auth()).unwrap_or(0),
+                            ),
+                        };
+                        match index {
+                            None => errorln!("sign-in requested for a portal that is not configured"),
+                            // Also over a working credential: the settings page offers "Sign in
+                            // again", and a successful flow simply replaces what is saved.
+                            Some(i) => {
+                                if runs[i].credential == CredentialState::Ready {
+                                    infoln!("{} signing in again over a working credential", runs[i].name());
+                                }
+                                // Said before the flow blocks, so a settings page opened during the
+                                // minutes it can take reads "in progress" rather than offering the
+                                // button again. The prompt itself lands later, from the flow.
+                                let id = runs[i].portal.info().id.clone();
+                                *SIGN_IN.lock().expect("sign-in lock poisoned") =
+                                    Some(SignIn { portal: id.clone(), cancel_requested: false });
+                                runs[i].signing_in = true;
+                                PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                                let progress = PageProgress { portal: id, name: runs[i].name().to_string() };
+                                runs[i].authenticate(&progress);
+                                runs[i].signing_in = false;
+                                *SIGN_IN.lock().expect("sign-in lock poisoned") = None;
+                                // Published at once rather than after the next cycle, so a page
+                                // refreshing itself sees the outcome instead of a stale prompt.
+                                PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                            }
                         }
                     }
                 }
@@ -1131,7 +1296,7 @@ mod tests {
         assert!(log.lock().unwrap().asked.is_empty(), "nothing to ask with");
         assert!(run.state.icon().needs_auth);
 
-        run.authenticate();
+        run.authenticate(&crate::portal::fake::Silent);
         assert_eq!(log.lock().unwrap().authenticate_calls, 1);
         assert!(!run.state.icon().needs_auth);
         run.cycle();
@@ -1157,7 +1322,7 @@ mod tests {
             ..FakePortal::default()
         };
         let mut run = PortalRun::new(Box::new(fake), CredentialState::NeedsAuth, [true; 3]);
-        run.authenticate();
+        run.authenticate(&crate::portal::fake::Silent);
         assert!(!run.live);
         assert!(!run.state.icon().needs_auth, "the exclamation comes down: another click cannot help");
         assert!(run.state.tooltip_lines().iter().any(|l| l == "still nothing"));
@@ -1228,6 +1393,70 @@ mod tests {
         run.cycle();
         assert!(run.state.icon().status_degraded);
         assert!(run.state.tooltip_lines()[0].contains("Wobbly"));
+    }
+
+    /// The settings page reads the sign-in state off the snapshot, so every transition the loop
+    /// makes has to land there: waiting, signed in, and the dead end.
+    #[test]
+    fn a_run_reports_how_its_sign_in_stands() {
+        let mut run = PortalRun::new(Box::new(FakePortal::default()), CredentialState::NeedsAuth, [true; 3]);
+        assert_eq!(run.auth_status(), AuthStatus::NotSignedIn);
+        run.signing_in = true;
+        assert_eq!(run.auth_status(), AuthStatus::SigningIn(None), "a flow in flight is neither");
+        run.signing_in = false;
+        run.authenticate(&crate::portal::fake::Silent);
+        assert_eq!(run.auth_status(), AuthStatus::SignedIn);
+        assert_eq!(snapshot_of(std::slice::from_ref(&run))[0].auth, AuthStatus::SignedIn);
+
+        let mut fake = FakePortal::default().script(PollOutcome {
+            axes: [Some(response(PollResult::Unauthorized)), None, None],
+        });
+        fake.renewal = Err(crate::portal::AuthError::AuthorizationRequired);
+        let mut run = ready(fake, [true, false, false]);
+        run.cycle();
+        run.recover_credential();
+        assert_eq!(run.auth_status(), AuthStatus::NotSignedIn, "a rejected, unrenewable credential asks again");
+
+        let run = PortalRun::new(Box::new(FakePortal::default()), CredentialState::Off("nothing installed".to_string()), [true; 3]);
+        assert_eq!(run.auth_status(), AuthStatus::Off("nothing installed".to_string()));
+    }
+
+    /// Signing out puts the run where a fresh install starts: no polls, exclamation up, waiting for
+    /// the click. The same PR can then be news again after the next sign-in, which is right.
+    #[test]
+    fn signing_out_returns_the_run_to_waiting_for_a_sign_in() {
+        let fake = FakePortal::default().script(PollOutcome { axes: [Some(fresh(1)), None, None] });
+        let log = fake.log();
+        let mut run = ready(fake, [true, false, false]);
+        run.cycle();
+        assert_eq!(run.auth_status(), AuthStatus::SignedIn);
+
+        run.sign_out();
+        assert_eq!(log.lock().unwrap().sign_out_calls, 1);
+        assert_eq!(run.auth_status(), AuthStatus::NotSignedIn);
+        assert!(run.state.icon().needs_auth);
+        run.cycle();
+        assert_eq!(log.lock().unwrap().asked.len(), 1, "no poll while waiting for a sign-in");
+    }
+
+    /// A cancel is only for the sign-in that is running, and asking when none is running is a
+    /// harmless no. The flow reads the flag through `SignInProgress::cancelled` between polls.
+    #[test]
+    fn cancel_reaches_only_the_running_sign_in() {
+        let github = PortalId("github".to_string());
+        let gitlab = PortalId("gitlab".to_string());
+        *SIGN_IN.lock().unwrap() = None;
+        assert!(!cancel_sign_in(&github), "nothing running: nothing to cancel");
+
+        *SIGN_IN.lock().unwrap() = Some(SignIn { portal: github.clone(), cancel_requested: false });
+        let progress = PageProgress { portal: github.clone(), name: "GitHub".to_string() };
+        let other = PageProgress { portal: gitlab.clone(), name: "GitLab".to_string() };
+        assert!(!progress.cancelled());
+        assert!(!cancel_sign_in(&gitlab), "another portal's button does not stop this flow");
+        assert!(cancel_sign_in(&github));
+        assert!(progress.cancelled());
+        assert!(!other.cancelled());
+        *SIGN_IN.lock().unwrap() = None;
     }
 
     /// The snapshot keeps every portal's list apart and in configuration order, so the page can

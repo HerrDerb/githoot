@@ -76,6 +76,8 @@ pub enum Route {
     Settings,
     /// Applying a submitted settings form.
     SaveSettings,
+    /// Starting a portal's sign-in from the settings page.
+    Authenticate,
     Owl,
     /// The path exists but not for this method.
     MethodNotAllowed,
@@ -281,9 +283,15 @@ pub fn route_for(
         return Route::NotFound;
     }
 
-    // The one three-segment route: a page's own refresh fragment, behind the same token and the same
-    // `Host` check as the page it belongs to.
+    // The three-segment routes: a page's own refresh fragment, and the settings page's sign-in
+    // button, both behind the same token and the same `Host` check as the page they belong to.
     if let Some(tail) = tail {
+        if (leaf, tail) == ("settings", "authenticate") {
+            return match method {
+                Method::Post => Route::Authenticate,
+                _ => Route::MethodNotAllowed,
+            };
+        }
         return match (PrAxis::from_slug(leaf), tail, method) {
             (Some(_), "items", Method::Post) => Route::MethodNotAllowed,
             (Some(axis), "items", _) => Route::Items(axis),
@@ -396,6 +404,7 @@ pub struct Head<'a> {
 }
 
 impl<'a> Head<'a> {
+    #[cfg(test)]
     pub fn same_origin() -> Self {
         Head { referrer: Referrer::SameOrigin, ..Head::default() }
     }
@@ -549,6 +558,13 @@ pub fn open_settings_page() -> bool {
     }
 }
 
+/// Whether the listener is up, so a sign-in knows the settings page can show its code. `false`
+/// before the first click as well as after a failed bind; both mean the page is not where the code
+/// should go.
+pub fn is_available() -> bool {
+    SERVER.get().is_some_and(Option::is_some)
+}
+
 fn open_url(url: String) {
     if let Err(e) = open::that(&url) {
         errorln!("failed to open browser: {e}");
@@ -638,23 +654,45 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
 
     match route_for(&request.path, request.host.as_deref(), token, port, request.method) {
         Route::Settings => {
+            // A fresh nonce per response, as the PR page does; failing to get one drops the copy
+            // button's script rather than widening the policy.
+            let nonce = new_token().unwrap_or_default();
             let html = match SETTINGS.get() {
                 Some(_) => {
                     let (cfg, _) = crate::config::Config::load(&settings_path());
-                    page::settings_page(&cfg, token, &restart_names(request.query.as_deref()))
+                    let query = request.query.as_deref();
+                    page::settings_page(
+                        &cfg,
+                        token,
+                        &restart_names(query),
+                        &page::PortalsView {
+                            portals: &scheduler::portal_statuses(),
+                            signin_started: query_value(query, "signin").as_deref(),
+                            signed_out: query_value(query, "signout").as_deref(),
+                            now_unix: unix_now(),
+                            nonce: &nonce,
+                        },
+                    )
                 }
                 None => page::settings_unavailable(token),
             };
+            // `same-origin` for the form's `Origin`, plus the nonce for the copy button's script,
+            // which the page emits only while a device code is on screen.
             respond_as(
                 &mut stream,
                 200,
                 "text/html; charset=utf-8",
                 html.as_bytes(),
                 request.body_wanted,
-                Head::same_origin(),
+                Head {
+                    referrer: Referrer::SameOrigin,
+                    script_nonce: (!nonce.is_empty()).then_some(nonce.as_str()),
+                    etag: None,
+                },
             )
         }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
+        Route::Authenticate => start_sign_in(&mut stream, &head, &request, token, port),
         Route::MethodNotAllowed => {
             respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
         }
@@ -854,6 +892,70 @@ fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &
     }
 }
 
+/// The settings page's sign-in button. Same `Origin` guard as a save, for the same reason: a
+/// cross-site form must not be able to pop a device code dialog on someone's desktop.
+///
+/// Only *asks*: the flow runs on the poll thread, where the credential lives and where blocking for
+/// as long as the user takes costs nothing but a paused poll. The redirect back names the portal so
+/// the page can say the sign-in has started even before the poll thread has published "in progress".
+fn start_sign_in(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+    if !origin_is_ours(request.origin.as_deref(), port) {
+        return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
+    }
+    let Some(settings) = SETTINGS.get() else {
+        return respond(stream, 503, "text/plain; charset=utf-8", b"Settings unavailable", true);
+    };
+    let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
+    let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
+        Ok(body) => body,
+        Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
+    };
+    let form = parse_form(&body);
+    // Only a portal the poll loop knows. Anything else is a stale or hand-made post, and answering
+    // 404 rather than starting a flow for "whatever is waiting" keeps the button meaning one thing.
+    let Some(status) = form
+        .get("portal")
+        .and_then(|id| {
+            let id: &str = id.as_ref();
+            scheduler::portal_statuses().into_iter().find(|p| p.info.id.0 == id)
+        })
+    else {
+        return respond(stream, 404, "text/plain; charset=utf-8", b"Unknown portal", true);
+    };
+    // The same form, with `cancel` set, is the Cancel button beside a running sign-in. It reaches
+    // the flow through a flag rather than a wake, because the poll thread is inside the flow and
+    // reads no channel until it returns.
+    // `signout` deletes the saved credential. Handed to the poll thread like everything else that
+    // touches a credential; the redirect names the portal so the page can say so at once.
+    if form.ticked("signout") {
+        infoln!("settings page asked to sign out of {}", status.info.display_name);
+        if let Ok(wake) = settings.wake.lock() {
+            let _ = wake.send(scheduler::Wake::SignOut(status.info.id.clone()));
+        }
+        return redirect(stream, &format!("/{token}/settings?signout={}", status.info.id.0));
+    }
+    if form.ticked("cancel") {
+        if scheduler::cancel_sign_in(&status.info.id) {
+            infoln!("settings page cancelled the {} sign-in", status.info.display_name);
+        }
+        return redirect(stream, &format!("/{token}/settings"));
+    }
+    infoln!("settings page asked to sign in to {}", status.info.display_name);
+    if let Ok(wake) = settings.wake.lock() {
+        let _ = wake.send(scheduler::Wake::Authenticate(Some(status.info.id.clone())));
+    }
+    redirect(stream, &format!("/{token}/settings?signin={}", status.info.id.0));
+}
+
+/// One query parameter, percent-decoded. `None` when absent.
+fn query_value(query: Option<&str>, key: &str) -> Option<String> {
+    query?
+        .split('&')
+        .filter_map(|p| p.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| percent_decode(v))
+}
+
 /// Reads the rest of the form body, given whatever arrived alongside the head.
 fn read_body(stream: &mut TcpStream, already: &str, length: usize) -> Result<String, u16> {
     if length > MAX_BODY_BYTES {
@@ -924,7 +1026,24 @@ mod tests {
         assert_eq!(r.content_length, Some(7));
     }
 
-    /// Only the settings route accepts one. Everything else is a read.
+    /// The sign-in button posts to its own route under the settings page, and only a POST is a
+    /// sign-in: a GET there is the wrong method, never a flow started by following a link.
+    #[test]
+    fn the_sign_in_button_has_a_post_only_route() {
+        assert_eq!(route_write(&format!("/{TOKEN}/settings/authenticate"), Method::Post), Route::Authenticate);
+        assert_eq!(route_write(&format!("/{TOKEN}/settings/authenticate"), Method::Get), Route::MethodNotAllowed);
+        assert_eq!(route_write(&format!("/{TOKEN}/settings/other"), Method::Post), Route::NotFound);
+        assert_eq!(route_get(&format!("/{TOKEN}/settings/authenticate"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    }
+
+    #[test]
+    fn a_query_parameter_is_read_and_decoded() {
+        assert_eq!(query_value(Some("restart=a,b&signin=git%20hub"), "signin").as_deref(), Some("git hub"));
+        assert_eq!(query_value(Some("restart=a"), "signin"), None);
+        assert_eq!(query_value(None, "signin"), None);
+    }
+
+    /// Only the settings routes accept one. Everything else is a read.
     #[test]
     fn a_post_anywhere_else_is_rejected() {
         assert_eq!(
@@ -1212,7 +1331,7 @@ mod tests {
     /// header does.
     #[test]
     fn the_settings_document_declares_the_same_policy_as_its_response() {
-        let html = page::settings_page(&test_config(), "tok", &[]);
+        let html = page::settings_page(&test_config(), "tok", &[], &page::PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n" });
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#), "got {html}");
         assert!(!html.contains("no-referrer"));
     }

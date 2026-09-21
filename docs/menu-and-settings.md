@@ -7,7 +7,7 @@
 | **Install update: X.Y.Z** | A newer release exists | Shows what changed, then verifies, installs and restarts |
 | **GitHub is githubing again, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
 | *— separator —* | Something above **and** below it | |
-| **Authenticate GitHub PR Status** | PR status has no usable credential | Starts the sign-in flow |
+| **Authenticate GitHub PR Status** | PR status has no usable credential | Opens the settings page, where the sign-in button is |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
 | **Open Approved PRs (N)** | One of yours has been approved | Opens GitHoot's own page for exactly what the green bar counts |
 | **Open Work Required (N)** | An objection stands, a conflict is blocking one, or Copilot has open comments | Opens GitHoot's own page for exactly what the amber bar counts |
@@ -102,6 +102,28 @@ need a restart — the hoot and the Copilot rule take effect at once, everything
 
 If the local listener cannot start, the entry falls back to opening `config.txt` in an editor, since
 losing the only way into the configuration because a socket would not bind is the worse failure.
+
+**Portals sit at the top of the page**, one card per configured portal, saying how its sign-in stands:
+*Signed in*, *Not signed in*, the running sign-in itself, or the reason nothing can be seen.
+
+**Signing in happens on this page.** *Not signed in* offers **Sign in to GitHub**; *Signed in* offers
+**Sign out**, which deletes the saved credential (`pr_token.txt`) and puts the tray where a fresh
+install starts: bars dark, exclamation up, **Authenticate** back on the menu. It does not revoke the
+authorization on GitHub's side; that is done at github.com/settings/applications. The sign-in click
+only asks:
+the device flow runs on the poll thread, and within a moment the card shows the code to enter, a link
+to where to enter it (opened in a new tab, the one place this app does that, so this page stays put),
+how long the code is good for, a **Copy** button beside the code, and a **Cancel** button. The code
+is also on your clipboard already. While the
+flow runs the page reloads itself every few seconds, with no script, so the card turns to *Signed in*
+on its own when GitHub confirms, or back to *Not signed in* if you cancel or the code expires. The
+tray's **Authenticate** entry only opens this page; nothing starts a sign-in but the button. When the
+local listener cannot start at all, the entry falls back to running the flow with the old native
+dialog, since there is no page to show the code on.
+
+Cancel is polled, not pushed: the poll thread is inside the flow and reads no channel there, so it
+looks for the cancel between its polls, about once a second. Both buttons post to one route under the
+settings page, guarded by the same `Origin` check as a save → [Portals](portals.md).
 
 **Writing needs more than reading did**, so the page carries one guard the PR pages do not: a save is a
 `POST` and is refused unless the browser says the request came from this page itself. A form on another

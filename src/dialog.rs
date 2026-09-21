@@ -178,7 +178,7 @@ fn confirm(
 /// Copies `text` to the system clipboard. Best effort, like everything else here: a clipboard
 /// that cannot be reached (no X11/Wayland session, some sandboxed environment) must not stop the
 /// device flow, since the code is also always shown in the dialog/console text as a fallback.
-fn copy_to_clipboard(text: &str) {
+pub fn copy_to_clipboard(text: &str) {
     match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.to_string())) {
         Ok(()) => {}
         Err(e) => crate::errorln!("could not copy the device code to the clipboard: {e}"),
@@ -356,16 +356,6 @@ pub fn report(title: &str, msg: &str) {
         // place that knows how to find zenity or kdialog and whether a display exists at all.
         let _ = confirm(title, msg, "OK", "OK", false);
     }
-}
-
-/// Records that a Device Flow authorization succeeded. Log only, deliberately no dialog — a second
-/// "it worked!" box has nothing to say that the tray icon coming to life does not already say.
-///
-/// Nothing needs closing by the time this runs: the "Authorization Required" prompt is dismissed by
-/// the button click that opens the browser, which necessarily happens *before* the user authorizes
-/// anything. So there is no stale dialog to hold a handle to.
-pub fn show_auth_success(subject: &str) {
-    crate::infoln!("{subject}: authorization successful");
 }
 
 /// Escapes a string for embedding in an AppleScript string literal.

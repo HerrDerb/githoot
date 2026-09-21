@@ -10,8 +10,18 @@ use std::time::Duration;
 
 use super::{
     AuthError, AuthStyle, Capabilities, CredentialState, Health, HealthReport, PollOutcome, Portal,
-    PortalId, PortalInfo, PortalKind,
+    PortalId, PortalInfo, PortalKind, SignInProgress, SignInPrompt,
 };
+
+/// A `SignInProgress` that shows nothing and never cancels, for tests that only want the outcome.
+pub struct Silent;
+
+impl SignInProgress for Silent {
+    fn prompt(&self, _: SignInPrompt) {}
+    fn cancelled(&self) -> bool {
+        false
+    }
+}
 
 /// What the fake was asked to do, shared so a test can keep reading it after the fake has been
 /// boxed and handed to the scheduler.
@@ -21,6 +31,7 @@ pub struct FakeLog {
     pub asked: Vec<[bool; 3]>,
     pub authenticate_calls: u32,
     pub reauthenticate_calls: u32,
+    pub sign_out_calls: u32,
 }
 
 pub struct FakePortal {
@@ -95,10 +106,24 @@ impl Portal for FakePortal {
         Ok(self.credential.clone())
     }
 
-    fn authenticate(&mut self) -> Result<CredentialState, AuthError> {
+    fn authenticate(&mut self, progress: &dyn SignInProgress) -> Result<CredentialState, AuthError> {
         self.log.lock().unwrap().authenticate_calls += 1;
+        progress.prompt(SignInPrompt {
+            code: "FAKE-CODE".to_string(),
+            url: format!("{}device", self.info.link_prefix),
+            expires_at: 0,
+        });
+        if progress.cancelled() {
+            return Err(AuthError::Cancelled);
+        }
         self.credential = self.after_sign_in.clone();
         Ok(self.after_sign_in.clone())
+    }
+
+    fn sign_out(&mut self) -> Result<(), AuthError> {
+        self.log.lock().unwrap().sign_out_calls += 1;
+        self.credential = CredentialState::NeedsAuth;
+        Ok(())
     }
 
     fn needs_refresh(&self) -> bool {
@@ -115,6 +140,8 @@ impl Portal for FakePortal {
             Err(AuthError::Network(e)) => Err(AuthError::Network(e.clone())),
             Err(AuthError::Denied) => Err(AuthError::Denied),
             Err(AuthError::Expired) => Err(AuthError::Expired),
+            Err(AuthError::Cancelled) => Err(AuthError::Cancelled),
+            Err(AuthError::Storage(e)) => Err(AuthError::Storage(e.clone())),
             Err(AuthError::Portal { name, detail }) => {
                 Err(AuthError::Portal { name: name.clone(), detail: detail.clone() })
             }
@@ -190,8 +217,12 @@ mod tests {
         let log = portal.log();
         portal.credential = CredentialState::NeedsAuth;
         assert_eq!(portal.load_saved_credential().unwrap(), CredentialState::NeedsAuth);
-        assert_eq!(portal.authenticate().unwrap(), CredentialState::Ready);
+        assert_eq!(portal.authenticate(&Silent).unwrap(), CredentialState::Ready);
         assert_eq!(log.lock().unwrap().authenticate_calls, 1);
+
+        portal.sign_out().unwrap();
+        assert_eq!(portal.load_saved_credential().unwrap(), CredentialState::NeedsAuth, "signed out is not signed in");
+        assert_eq!(log.lock().unwrap().sign_out_calls, 1);
 
         portal.refresh_due = true;
         assert!(portal.needs_refresh());
@@ -205,6 +236,25 @@ mod tests {
         portal.health = Some(Ok(Health::Degraded { description: "Wobbly".to_string() }));
         let report = portal.health().unwrap().unwrap();
         assert_eq!(report.health, Health::Degraded { description: "Wobbly".to_string() });
+    }
+
+    /// The fake honours a cancel the way a real flow must: it hands out its prompt, then stops.
+    #[test]
+    fn a_cancelled_sign_in_hands_out_its_prompt_and_then_stops() {
+        struct Cancelling(std::sync::Mutex<Option<SignInPrompt>>);
+        impl SignInProgress for Cancelling {
+            fn prompt(&self, prompt: SignInPrompt) {
+                *self.0.lock().unwrap() = Some(prompt);
+            }
+            fn cancelled(&self) -> bool {
+                true
+            }
+        }
+        let progress = Cancelling(std::sync::Mutex::new(None));
+        let mut portal = FakePortal { credential: CredentialState::NeedsAuth, ..FakePortal::default() };
+        assert!(matches!(portal.authenticate(&progress), Err(AuthError::Cancelled)));
+        assert_eq!(progress.0.lock().unwrap().as_ref().map(|p| p.code.as_str()), Some("FAKE-CODE"));
+        assert_eq!(portal.credential, CredentialState::NeedsAuth, "a cancelled flow leaves nothing behind");
     }
 
     #[test]

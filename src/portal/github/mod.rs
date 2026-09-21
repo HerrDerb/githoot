@@ -23,7 +23,7 @@ use reqwest::blocking::Client;
 use super::types::{PollResponse, PollResult};
 use super::{
     AuthError, AuthStyle, Capabilities, CredentialState, HealthReport, PollOutcome, Portal, PortalId,
-    PortalInfo, PortalKind, StatusPage,
+    PortalInfo, PortalKind, SignInProgress, StatusPage,
 };
 use crate::state::PrAxis;
 use crate::{errorln, infoln};
@@ -274,9 +274,16 @@ impl Portal for GitHubPortal {
         }
     }
 
-    fn authenticate(&mut self) -> Result<CredentialState, AuthError> {
-        let store = auth::PrTokenStore::authenticate(&self.app_asset_path, &self.endpoints.oauth)?;
+    fn authenticate(&mut self, progress: &dyn SignInProgress) -> Result<CredentialState, AuthError> {
+        let store =
+            auth::PrTokenStore::authenticate(&self.app_asset_path, &self.endpoints.oauth, progress)?;
         Ok(self.adopt(store))
+    }
+
+    fn sign_out(&mut self) -> Result<(), AuthError> {
+        auth::forget_saved(&self.app_asset_path).map_err(|e| AuthError::Storage(e.to_string()))?;
+        self.store = None;
+        Ok(())
     }
 
     fn needs_refresh(&self) -> bool {
@@ -413,6 +420,26 @@ mod tests {
         assert_eq!(p.info().inbox_url, "https://ghe.example.com/pulls/inbox");
         assert!(p.info().status_page.is_none());
         assert!(p.health().is_none(), "no status page means no check, not a failed one");
+    }
+
+    /// Signing out deletes the file and forgets the store, and asks nothing of the network.
+    #[test]
+    fn signing_out_deletes_the_saved_token_and_forgets_it() {
+        let dir = std::env::temp_dir().join(format!("githoot-signout-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("pr_token.txt"), "ghu_x").unwrap();
+        let mut p = GitHubPortal::new(
+            PortalId("github".to_string()),
+            DEFAULT_BASE_URL,
+            Client::new(),
+            dir.clone(),
+            GitHubOptions { copilot_reviews: crate::config::Switch::new(true), status_components: Vec::new() },
+        );
+        p.sign_out().unwrap();
+        assert!(!dir.join("pr_token.txt").exists(), "the file is gone");
+        assert!(!p.needs_refresh(), "and nothing is held in memory");
+        p.sign_out().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Without a credential there is nothing to ask with, and the honest answer is the one variant
