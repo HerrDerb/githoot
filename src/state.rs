@@ -2501,4 +2501,73 @@ mod tests {
         let mut state = PollState::new([true; 3]);
         assert_eq!(state.take_pr_arrivals(), [false; 3]);
     }
+
+    // ─── Golden wording ──────────────────────────────────────────────────────
+    //
+    // What the tray says today, verbatim. These exist for the portal refactor: the promise there is
+    // "nothing visible changes for a GitHub-only user", and a promise is worth more as a test than
+    // as a sentence in a plan. Anything that moves one of these strings is a visible change and has
+    // to say so on purpose.
+
+    #[test]
+    fn golden_menu_constants() {
+        assert_eq!(AUTHENTICATE_MENU_LABEL, "Authenticate GitHub PR Status");
+        assert_eq!(STATUS_MENU_LABEL, "GitHub is githubing again, check status");
+        assert_eq!(PR_INBOX_URL, "https://github.com/pulls/inbox");
+        assert_eq!(PR_INBOX_MENU_LABEL, "Open PR inbox");
+        assert_eq!(REVIEWS_MENU_LABEL, "Open Requested Reviews");
+        assert_eq!(REPOSITORY_MENU_LABEL, "Open GitHoot on GitHub");
+    }
+
+    #[test]
+    fn golden_tooltip_with_an_outage_and_every_axis() {
+        let mut state = PollState::new([true; 3]);
+        state.set_status_degraded(Some("Actions down".to_string()));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        state.apply_pr(PrAxis::ReadyToMerge, fresh_count(1));
+        state.apply_pr(PrAxis::ChangesRequested, fresh_count(0));
+        assert_eq!(
+            state.tooltip(),
+            "GitHub: Actions down
+2 PR(s) awaiting your review
+1 PR(s) approved
+Nothing needing your work"
+        );
+    }
+
+    #[test]
+    fn golden_tooltip_with_an_update_waiting() {
+        let mut state = new_state(true);
+        state.set_update_available(Some("2.9.0".to_string()));
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(2));
+        assert_eq!(state.tooltip(), "2 PR(s) awaiting your review
+Update available: 2.9.0");
+        assert_eq!(state.update_menu_label().as_deref(), Some("Install update: 2.9.0"));
+    }
+
+    #[test]
+    fn golden_tooltip_after_a_rejected_credential() {
+        let mut state = new_state(true);
+        state.apply_pr(PrAxis::ReviewRequested, respond(PollResult::Unauthorized));
+        assert_eq!(state.tooltip(), "Review state unknown
+GitHub rejected the credential");
+    }
+
+    #[test]
+    fn golden_tooltip_before_authorization() {
+        let mut state = PollState::new([true; 3]);
+        state.require_pr_auth();
+        assert_eq!(state.tooltip(), "PR status: not authorized yet. Use the menu to authorize.");
+    }
+
+    #[test]
+    fn golden_menu_labels_with_counts() {
+        let mut state = PollState::new([true; 3]);
+        state.apply_pr(PrAxis::ReviewRequested, fresh_count(3));
+        state.apply_pr(PrAxis::ReadyToMerge, fresh_count(0));
+        state.apply_pr(PrAxis::ChangesRequested, transient());
+        assert_eq!(state.pr_menu_label(PrAxis::ReviewRequested), "Open Requested Reviews (3)");
+        assert_eq!(state.pr_menu_label(PrAxis::ReadyToMerge), "Open Approved PRs");
+        assert_eq!(state.pr_menu_label(PrAxis::ChangesRequested), "Open Work Required");
+    }
 }

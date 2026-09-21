@@ -1081,6 +1081,42 @@ mod tests {
     fn a_future_timestamp_reads_as_just_now() {
         assert_eq!(age("2026-09-15T09:12:33Z", 1_789_463_553 - 500), "just now");
     }
+
+    // ─── Golden markup ───────────────────────────────────────────────────────
+    //
+    // The refresh payload for one fully decorated card and for both empty states, verbatim. Same
+    // purpose as `state`'s golden wording: the portal refactor promises a GitHub-only user sees no
+    // difference, and the page is where most of the GitHub-shaped output lives.
+
+    #[test]
+    fn golden_items_json_for_a_decorated_card() {
+        let mut e = entry("https://github.com/qumea/care-api/pull/2204");
+        e.is_draft = true;
+        e.conflicting = true;
+        e.copilot_unresolved = 2;
+        e.checks = CheckRollup::Failure;
+        e.verdicts = vec![
+            crate::github::Verdict { login: "alice".into(), state: ReviewState::Approved },
+            crate::github::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
+        ];
+        e.pending = vec![Reviewer::User("carol".into()), Reviewer::Team("platform".into())];
+        let json = items_json(Some(&[e]), Some(Duration::from_secs(47)), NOW);
+        assert_eq!(json, r#"{"age":47,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2><a href=\"https://github.com/qumea/care-api/pull/2204\" rel=\"noreferrer\">Fix the bed-exit debounce</a></h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill draft\">Draft</span><span class=\"pill checks-failure\">Merge conflict</span><span class=\"pill checks-pending\">2 unresolved Copilot comments</span><span class=\"pill checks-failure\">Checks failing</span></div><ul class=\"who\"><li><span class=\"dot dot-ok\"></span>alice approved</li><li><span class=\"dot dot-no\"></span>bob requested changes</li><li><span class=\"dot dot-wait\"></span>carol re-review pending</li><li><span class=\"dot dot-wait\"></span>team platform re-review pending</li></ul></div>\n"}"#);
+    }
+
+    #[test]
+    fn golden_items_json_for_both_empty_states() {
+        assert_eq!(items_json(None, None, NOW), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(Some(&[]), Some(Duration::from_secs(5)), NOW), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+    }
+
+    #[test]
+    fn golden_unsafe_url_is_text_not_link() {
+        let mut e = entry("https://github.com.evil.com/x");
+        e.title = Some("t".into());
+        let json = items_json(Some(&[e]), None, NOW);
+        assert_eq!(json, r#"{"age":null,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2>t</h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill checks-success\">Checks passing</span></div></div>\n"}"#);
+    }
 }
 
 
