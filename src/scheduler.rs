@@ -436,10 +436,10 @@ fn run_poll_loop(
                         last_unmatched = Some(report.unmatched);
                     }
                     match report.health {
-                        crate::portal::statuspage::Health::Degraded { description } => {
+                        crate::portal::Health::Degraded { description } => {
                             state.set_status_degraded(Some(description));
                         }
-                        crate::portal::statuspage::Health::Fine => state.set_status_degraded(None),
+                        crate::portal::Health::Fine => state.set_status_degraded(None),
                     }
                 }
                 Err(e) => errorln!("could not read GitHub's status page: {e}"),

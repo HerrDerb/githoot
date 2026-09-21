@@ -54,6 +54,8 @@ use crate::infoln;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
+use super::{Health, HealthReport};
+
 const STATUS_URL: &str = "https://www.githubstatus.com/api/v2/status.json";
 
 /// The per-component view, read only when the user has named the components they care about. Bigger
@@ -73,29 +75,6 @@ const DEGRADED_INDICATORS: [&str; 3] = ["minor", "major", "critical"];
 /// and `maintenance` are left out above; an unrecognised status is left out by not being listed.
 const DEGRADED_COMPONENT_STATUSES: [&str; 3] =
     ["degraded_performance", "partial_outage", "major_outage"];
-
-/// What GitHub says about itself.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Health {
-    /// Operational, or scheduled maintenance.
-    Fine,
-    /// `minor`, `major` or `critical`. Carries Statuspage's own wording, so the tooltip quotes GitHub
-    /// rather than paraphrasing it — "Partially Degraded Service" is more use than anything this app
-    /// would invent.
-    Degraded { description: String },
-}
-
-/// A verdict, plus the configured names that matched no component GitHub publishes.
-///
-/// The two travel together because only the caller knows whether it has said so already: the check
-/// runs every few minutes and a typo is permanent, so complaining from in here would repeat the same
-/// line forever. See `scheduler`, which says it once and again only when it changes.
-#[derive(Debug)]
-pub struct Report {
-    pub health: Health,
-    /// Empty on the page-wide path, which has no names to match.
-    pub unmatched: Vec<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct StatusResponse {
@@ -127,7 +106,7 @@ struct StatusBody {
 /// `watched` is `config::Config::status_components`. Empty means the page-wide indicator; anything
 /// else means only those components count. The endpoint follows from that, so an unfiltered install
 /// still makes the same 219-byte request it always did.
-pub fn check(client: &Client, watched: &[String]) -> Result<Report, String> {
+pub fn check(client: &Client, watched: &[String]) -> Result<HealthReport, String> {
     let url = if watched.is_empty() { STATUS_URL } else { COMPONENTS_URL };
     let response = client
         .get(url)
@@ -145,7 +124,7 @@ pub fn check(client: &Client, watched: &[String]) -> Result<Report, String> {
 
     let body = response.text().map_err(|e| format!("could not read the status page: {e}"))?;
     if watched.is_empty() {
-        parse(&body).map(|health| Report { health, unmatched: Vec::new() })
+        parse(&body).map(|health| HealthReport { health, unmatched: Vec::new() })
     } else {
         parse_components(&body, watched)
     }
@@ -175,7 +154,7 @@ fn parse(body: &str) -> Result<Health, String> {
 
 /// Reads one `components.json` body against the names the user asked for. Split out from `check` for
 /// the same reason `parse` is: every branch is testable without a network.
-fn parse_components(body: &str, watched: &[String]) -> Result<Report, String> {
+fn parse_components(body: &str, watched: &[String]) -> Result<HealthReport, String> {
     let parsed: ComponentsResponse =
         serde_json::from_str(body).map_err(|e| format!("unparseable components payload: {e}"))?;
 
@@ -214,7 +193,7 @@ fn parse_components(body: &str, watched: &[String]) -> Result<Report, String> {
         infoln!("GitHub reports a watched component degraded: {description}");
         Health::Degraded { description }
     };
-    Ok(Report { health, unmatched })
+    Ok(HealthReport { health, unmatched })
 }
 
 /// The one comparison rule, in one place: case-insensitive and untrimmed, never partial.

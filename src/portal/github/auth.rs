@@ -77,34 +77,12 @@ fn client_id() -> String {
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
-pub enum AuthError {
-    Network(String),
-    Denied,
-    Expired,
-    Github(String),
-    /// Nothing left to try without the user: there is no refresh token, or GitHub rejected the one
-    /// we have. The only way forward is a device flow, which needs a browser and a human, so this
-    /// is reported rather than started — the caller raises the tray's Authenticate item and waits.
-    ///
-    /// Deliberately distinct from `Network`: unreachable is not the same as invalid, and a laptop
-    /// launched before its WiFi is up must not be told to sign in again.
-    AuthorizationRequired,
-}
+pub use crate::portal::AuthError;
 
-impl std::fmt::Display for AuthError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AuthError::Network(e) => write!(f, "network error during authorization: {e}"),
-            AuthError::Denied => write!(f, "authorization was denied"),
-            AuthError::Expired => write!(f, "device code expired before authorization completed"),
-            AuthError::Github(e) => write!(f, "GitHub reported: {e}"),
-            AuthError::AuthorizationRequired => write!(f, "authorization required"),
-        }
-    }
+/// GitHub answered, and the answer was a refusal or nonsense.
+fn github_error(detail: String) -> AuthError {
+    AuthError::Portal { name: "GitHub".to_string(), detail }
 }
-
-impl std::error::Error for AuthError {}
 
 // ── Device code / token responses ──────────────────────────────────────────────
 
@@ -274,11 +252,11 @@ fn refresh(http: &Client, refresh_token: &str) -> Result<Credential, AuthError> 
     let body = response.text().map_err(|e| AuthError::Network(e.to_string()))?;
 
     let resp: TokenPollResponse = serde_json::from_str(&body)
-        .map_err(|_| AuthError::Github(describe_oauth_failure(status, &body)))?;
+        .map_err(|_| github_error(describe_oauth_failure(status, &body)))?;
 
     match resp.access_token {
         Some(access_token) => Ok(to_credential(access_token, resp.expires_in, resp.refresh_token)),
-        None => Err(AuthError::Github(
+        None => Err(github_error(
             resp.error.unwrap_or_else(|| format!("refresh failed with no error given ({status})")),
         )),
     }
@@ -298,7 +276,7 @@ fn request_device_code(http: &Client) -> Result<DeviceCodeResponse, AuthError> {
     let status = response.status();
     let body = response.text().map_err(|e| AuthError::Network(e.to_string()))?;
 
-    serde_json::from_str(&body).map_err(|_| AuthError::Github(describe_oauth_failure(status, &body)))
+    serde_json::from_str(&body).map_err(|_| github_error(describe_oauth_failure(status, &body)))
 }
 
 /// Runs the full Device Flow and returns the resulting credential.
@@ -333,7 +311,7 @@ fn device_code_flow(http: &Client) -> Result<Credential, AuthError> {
         let status = response.status();
         let body = response.text().map_err(|e| AuthError::Network(e.to_string()))?;
         let resp: TokenPollResponse = serde_json::from_str(&body)
-            .map_err(|_| AuthError::Github(describe_oauth_failure(status, &body)))?;
+            .map_err(|_| github_error(describe_oauth_failure(status, &body)))?;
 
         if let Some(access_token) = resp.access_token {
             crate::dialog::show_auth_success(AUTH_SUBJECT);
@@ -346,7 +324,7 @@ fn device_code_flow(http: &Client) -> Result<Credential, AuthError> {
             Some("slow_down") => poll_interval += SLOW_DOWN_PENALTY,
             Some("expired_token") => return Err(AuthError::Expired),
             Some("access_denied") => return Err(AuthError::Denied),
-            Some(other) => return Err(AuthError::Github(other.to_string())),
+            Some(other) => return Err(github_error(other.to_string())),
         }
     }
 }
@@ -379,7 +357,7 @@ fn installation_count(http: &Client, token: &str) -> Result<u64, AuthError> {
     let body = response.text().map_err(|e| AuthError::Network(e.to_string()))?;
 
     let resp: InstallationsResponse = serde_json::from_str(&body)
-        .map_err(|_| AuthError::Github(describe_oauth_failure(status, &body)))?;
+        .map_err(|_| github_error(describe_oauth_failure(status, &body)))?;
     Ok(resp.total_count)
 }
 
