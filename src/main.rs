@@ -4,6 +4,7 @@
 //! Main entry point for the GitHoot Tray application.
 //! Handles cross-platform initialization and tray icon setup.
 
+mod api;
 mod autostart;
 mod config;
 mod dialog;
@@ -571,8 +572,16 @@ fn main() {
         app_asset_path: app_asset_path.clone(),
         sound: sound.clone(),
         copilot: copilot.clone(),
+        local_api: config.local_api,
         wake: std::sync::Mutex::new(wake_tx.clone()),
     });
+
+    // After `install`, never before: binding reads `SETTINGS` for both the setting and the path it
+    // writes `endpoint.json` to. A script has no menu to click, so without this the port it is told
+    // to read would never open.
+    if config.local_api && !serve::start_now() {
+        errorln!("localApi is on but the local listener could not start");
+    }
 
     indicator.set_menu(&mut menu);
 
@@ -1607,8 +1616,16 @@ fn main() {
         app_asset_path: app_asset_path.clone(),
         sound: sound.clone(),
         copilot: copilot.clone(),
+        local_api: config.local_api,
         wake: std::sync::Mutex::new(wake_tx.clone()),
     });
+
+    // After `install`, never before: binding reads `SETTINGS` for both the setting and the path it
+    // writes `endpoint.json` to. A script has no menu to click, so without this the port it is told
+    // to read would never open.
+    if config.local_api && !serve::start_now() {
+        errorln!("localApi is on but the local listener could not start");
+    }
 
     let mut app = App {
         tray,

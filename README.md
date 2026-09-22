@@ -151,6 +151,7 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [Portals](docs/portals.md) | The seam GitHub sits behind, and what GitLab and Bitbucket will have to bring to it |
 | [The PR page](docs/pr-page.md) | What the menu entries open, why it is served locally, and what guards it |
 | [Settings page](docs/menu-and-settings.md#the-settings-page) | Every setting as a form in your browser, and the guard writing needed |
+| [The local API](docs/local-api.md) | Serving the judged lists as JSON to your own scripts, off by default |
 | [The hoot](docs/hoot.md) | Exactly which transitions make a sound, and which stay quiet |
 | [Troubleshooting](docs/troubleshooting.md) | Tooltip meanings, the log, the Defender verdict |
 | [Updates and releases](docs/updates-and-releases.md) | Verification, recovery, immutable releases, signing keys |

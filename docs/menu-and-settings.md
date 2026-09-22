@@ -49,6 +49,7 @@ If the local listener cannot start at all, the entries open that inbox directly.
 |---|---|---|
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
 | ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
+| ☑ **Serve the lists as JSON to local scripts** | Opens the local port at startup and publishes its address, for your own tooling | `localApi` in `config.txt` |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
@@ -163,6 +164,7 @@ existed — the key is appended rather than the file regenerated.
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
+| `localApi` | `off` | Serve the judged lists as JSON to local scripts, and bind the local port at startup — see [The local API](local-api.md). The one key here that is off by default, and the one where a typo leaves it shut rather than open |
 
 Keys starting with `portal.` are **reserved** for naming portals other than GitHub, and are not read
 yet; the rule they will follow is written down in [Portals](portals.md#configuration).

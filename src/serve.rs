@@ -72,6 +72,12 @@ pub enum Route {
     Page(PrAxis),
     /// The refresh fragment behind a page: its age line and its list, as JSON.
     Items(PrAxis),
+    /// The same judged list, as structured JSON, for a script running as you on this machine.
+    ///
+    /// Distinct from `Items` because that one's `items` field is rendered HTML and is contracted to
+    /// the page's own five-second refresh. Served only while `localApi` is on; off, it answers
+    /// `NotFound`, because a door you may not open should be absent rather than refused.
+    Entries(PrAxis),
     /// The settings form.
     Settings,
     /// Applying a submitted settings form.
@@ -295,6 +301,11 @@ pub fn route_for(
         return match (PrAxis::from_slug(leaf), tail, method) {
             (Some(_), "items", Method::Post) => Route::MethodNotAllowed,
             (Some(axis), "items", _) => Route::Items(axis),
+            // Whether `localApi` is on is not `route_for`'s business: it is a pure function of the
+            // request, and threading config through it would put a setting in the way of every
+            // routing test. `handle` answers `NotFound` for this variant when the setting is off.
+            (Some(_), "entries", Method::Post) => Route::MethodNotAllowed,
+            (Some(axis), "entries", _) => Route::Entries(axis),
             _ => Route::NotFound,
         };
     }
@@ -388,6 +399,17 @@ pub fn not_modified_head(version: u64) -> String {
          Referrer-Policy: no-referrer\r\n\
          \r\n"
     )
+}
+
+/// Sends a `304` and closes.
+///
+/// Shared by the two conditional routes rather than written out in each, because a hand-copied
+/// close sequence in two places is a close sequence that will differ in them eventually.
+fn send_not_modified(stream: &mut TcpStream, version: u64) {
+    let head = not_modified_head(version);
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 /// The parts of a response head that vary between routes.
@@ -511,16 +533,31 @@ pub struct Settings {
     pub app_asset_path: std::path::PathBuf,
     pub sound: crate::config::Switch,
     pub copilot: crate::config::Switch,
+    /// Whether `Route::Entries` is served and the listener binds at boot. A plain `bool`, not a
+    /// `Switch`, because the bind happens once at startup: a control that claimed to take effect
+    /// mid-run would be exactly the broken switch `config::Switch` exists to prevent.
+    pub local_api: bool,
     pub wake: std::sync::Mutex<std::sync::mpsc::Sender<scheduler::Wake>>,
 }
 
 static SETTINGS: OnceLock<Settings> = OnceLock::new();
+
+/// Whether the machine-readable route is open.
+///
+/// Its own function rather than an inline read so the off path can be tested without installing
+/// `SETTINGS`, which is a `OnceLock` and therefore settable only once per test binary.
+fn entries_enabled() -> bool {
+    SETTINGS.get().is_some_and(|s| s.local_api)
+}
 
 /// Hands the server what it needs to serve and save settings. Called once, from `main`.
 ///
 /// Separate from `start` because the listener binds lazily on a menu click, while these exist from
 /// boot — and because a settings page that silently could not save would be worse than none.
 pub fn install(settings: Settings) {
+    // Before anything can bind, and whatever the setting says: a file naming a port this process
+    // does not hold is worse than no file at all.
+    clear_endpoint_file(&settings.app_asset_path);
     let _ = SETTINGS.set(settings);
 }
 
@@ -532,6 +569,107 @@ struct Server {
 
 /// Bound on the first menu click, never at boot, and never retried once it has failed.
 static SERVER: OnceLock<Option<Server>> = OnceLock::new();
+
+/// Where a local script finds the ephemeral port and this run's token.
+///
+/// Beside `config.txt` and `pr_token.txt`, and with `pr_token.txt`'s permissions, because it holds a
+/// credential of the same shape if not the same value.
+const ENDPOINT_FILE: &str = "endpoint.json";
+
+fn endpoint_path(app_asset_path: &std::path::Path) -> std::path::PathBuf {
+    app_asset_path.join(ENDPOINT_FILE)
+}
+
+/// Removes any endpoint file left behind. Nothing there is not an error: the outcome is the same.
+///
+/// Called unconditionally from `install`, which both platforms reach before a menu click is
+/// possible. Unconditional because the two cases that matter are a predecessor that crashed without
+/// one (there is no shutdown path, by design — see `start`) and a user who has just turned the
+/// setting off, and in both the right answer is that no address is published.
+fn clear_endpoint_file(app_asset_path: &std::path::Path) {
+    match std::fs::remove_file(endpoint_path(app_asset_path)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            errorln!("could not remove a stale {ENDPOINT_FILE}: {e}");
+        }
+        _ => {}
+    }
+}
+
+/// Publishes the address of the bound listener for a local script.
+///
+/// **This file is a hint, never a fact.** It outlives a crash, so a reader has to connect and treat
+/// a refused connection or a 404 as "GitHoot is not running" rather than acting on the contents.
+/// `pid` is advisory for the same reason: pids get reused.
+///
+/// The URLs name `127.0.0.1` rather than `githoot.localhost`. Browsers resolve every `.localhost`
+/// subdomain to loopback themselves; curl and most script HTTP clients do not, and both literals are
+/// in the `Host` allowlist, so publishing the numeric one is what makes the URL work with no
+/// `--resolve` and no `Host` override.
+fn write_endpoint_file(app_asset_path: &std::path::Path, port: u16, token: &str) {
+    let host_header = format!("127.0.0.1:{port}");
+    let base_url = format!("http://{host_header}/{token}");
+    let content = serde_json::json!({
+        "schema": 1,
+        "pid": std::process::id(),
+        "port": port,
+        "token": token,
+        "host_header": host_header,
+        "base_url": base_url,
+        // From `PrAxis::ALL`, so a bar cannot exist on the page and be missing here.
+        "axes": PrAxis::ALL
+            .iter()
+            .map(|axis| {
+                (axis.slug().to_string(), serde_json::json!(format!("{base_url}/{}/entries", axis.slug())))
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
+    })
+    .to_string();
+
+    let path = endpoint_path(app_asset_path);
+
+    // Owner-only, the same way and for the same reason as `save_credential` in
+    // `portal::github::auth`. Knowingly duplicated rather than shared: unifying them means editing
+    // the credential writer, and a security-sensitive rewrite does not belong in the same change as
+    // an additive feature.
+    #[cfg(unix)]
+    let written = {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let result = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut file| file.write_all(content.as_bytes()));
+
+        if result.is_ok() {
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        result
+    };
+
+    #[cfg(not(unix))]
+    let written = std::fs::write(&path, &content);
+
+    // Not fatal. The listener is up and the page works; only a script is left without an address,
+    // and it already has to cope with the file being absent between an update's exec and the
+    // successor's bind.
+    if let Err(e) = written {
+        errorln!("could not write {ENDPOINT_FILE}: {e}");
+    }
+}
+
+/// Binds the listener now rather than on the first menu click. `false` when it could not bind.
+///
+/// Only for `localApi`: a script has no menu to click, so without this the port a dispatcher is told
+/// to read would never open. It is opt-in and off by default because it reverses every argument in
+/// `start`'s own doc comment — a socket held open for days for someone who never clicks, a firewall
+/// or EDR reaction with no click to explain it, and this binary's history with Defender's ML
+/// heuristics. Read that comment before considering a different default.
+pub fn start_now() -> bool {
+    SERVER.get_or_init(start).is_some()
+}
 
 /// Opens `axis`'s GitHoot page, or GitHub's own search page when there is no server to serve one.
 ///
@@ -634,6 +772,16 @@ fn start() -> Option<Server> {
     }
 
     infoln!("PR page listening on http://{PAGE_HOST}:{port}/");
+
+    // Only when asked. A published address for a door that answers 404 would be a standing
+    // invitation to debug the wrong thing.
+    if let Some(settings) = SETTINGS.get()
+        && settings.local_api
+    {
+        write_endpoint_file(&settings.app_asset_path, port, &token);
+        infoln!("localApi is on: wrote {ENDPOINT_FILE} for local scripts");
+    }
+
     Some(Server { port, token })
 }
 
@@ -706,13 +854,33 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             // keeps ticking on its own — see `page::REFRESH_SCRIPT` for why that is what makes a
             // genuine `304` correct here rather than a lie about freshness.
             if tag_matches(request.if_none_match.as_deref(), version) {
-                let head = not_modified_head(version);
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.flush();
-                let _ = stream.shutdown(std::net::Shutdown::Both);
-                return;
+                return send_not_modified(&mut stream, version);
             }
             let json = page::items_json(&page::groups(&snapshot.groups), snapshot.polled_at, unix_now());
+            respond_as(
+                &mut stream,
+                200,
+                "application/json; charset=utf-8",
+                json.as_bytes(),
+                request.body_wanted,
+                Head::tagged(version),
+            )
+        }
+        Route::Entries(axis) => {
+            // Off means off. A URL that does not exist today must not start existing merely because
+            // the user once clicked a menu entry and bound the listener for the page's sake.
+            if !entries_enabled() {
+                return respond(&mut stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
+            }
+            let snapshot = scheduler::pr_snapshot(axis);
+            let version = snapshot.version;
+            // The same `version` as `Items` carries, which is correct rather than a collision: an
+            // `ETag` is scoped to its own URL, and both resources change exactly when the poll loop
+            // republishes the snapshot.
+            if tag_matches(request.if_none_match.as_deref(), version) {
+                return send_not_modified(&mut stream, version);
+            }
+            let json = crate::api::entries_json(axis, &snapshot, unix_now());
             respond_as(
                 &mut stream,
                 200,
@@ -1050,6 +1218,70 @@ mod tests {
             route_write(&format!("/{TOKEN}/approved"), Method::Post),
             Route::MethodNotAllowed
         );
+    }
+
+    // ── The localApi entries route ────────────────────────────────────────────
+
+    /// Every axis the page can render must also be readable as JSON, or a script and the page would
+    /// disagree about which bars exist. Built from `PrAxis::ALL` so a fourth axis cannot be added to
+    /// one and forgotten on the other.
+    #[test]
+    fn the_entries_route_is_parsed_for_every_axis() {
+        for axis in PrAxis::ALL {
+            let path = format!("/{TOKEN}/{}/entries", axis.slug());
+            assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::Entries(axis));
+        }
+    }
+
+    /// A wrong token must not get a different answer here than it gets anywhere else. `Forbidden`
+    /// would confirm that everything after the token was right, which is precisely what the page's
+    /// own routes refuse to do.
+    #[test]
+    fn the_entries_route_with_the_wrong_token_is_a_miss_not_a_refusal() {
+        let path = format!("/{TOKEN}/approved/entries");
+        assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    }
+
+    /// DNS rebinding. A hostile page that gets the browser to dial this port still cannot name us,
+    /// and the `Host` check runs before the path is looked at, so a rejected host never reveals
+    /// whether the route exists.
+    #[test]
+    fn the_entries_route_refuses_a_host_that_is_not_ours() {
+        let path = format!("/{TOKEN}/approved/entries");
+        for host in [
+            Some("evil.com"),
+            Some(&format!("localhost:{PORT}")[..]),
+            Some(&format!("[::1]:{PORT}")[..]),
+            Some(&format!("{PAGE_HOST}:{}", PORT + 1)[..]),
+            None,
+        ] {
+            assert_eq!(route_get(&path, host, TOKEN, PORT), Route::Forbidden, "{host:?} must not reach entries");
+        }
+    }
+
+    /// The whole design rests on this route never remembering anything. A `POST` here would be the
+    /// first step towards a claim endpoint, so it is the wrong method rather than a miss: the path
+    /// is real and saying otherwise would be a lie in the status line.
+    #[test]
+    fn a_post_to_the_entries_route_is_the_wrong_method_not_a_miss() {
+        assert_eq!(route_write(&format!("/{TOKEN}/approved/entries"), Method::Post), Route::MethodNotAllowed);
+    }
+
+    /// A polling dispatcher should be able to check the `ETag` without pulling the list, so `HEAD`
+    /// has to route exactly as `GET` does.
+    #[test]
+    fn a_head_of_the_entries_route_is_allowed() {
+        assert_eq!(route_write(&format!("/{TOKEN}/approved/entries"), Method::Head), Route::Entries(PrAxis::ReadyToMerge));
+    }
+
+    /// A near miss under a real axis must not fall through to the page's own refresh fragment, or a
+    /// typo would silently hand a script rendered HTML instead of data.
+    #[test]
+    fn an_unknown_tail_under_an_axis_is_still_a_miss() {
+        for tail in ["entriez", "entries2", ""] {
+            let path = format!("/{TOKEN}/approved/{tail}");
+            assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound, "tail {tail:?}");
+        }
     }
 
     /// The CSRF guard. A form on another site can make the browser send a cross-origin `POST` — the
@@ -1448,6 +1680,66 @@ mod tests {
         assert_ne!(a, b, "a hardcoded token would pass every other test here");
     }
 
+    // ── The endpoint file ─────────────────────────────────────────────────────
+
+    fn endpoint_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("githoot-endpoint-{}-{name}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// It holds this run's token. World-readable, it would hand every other account on the machine
+    /// the key to the loopback port, which is the one thing the per-run token was supposed to bound.
+    /// Same treatment, and the same reasoning, as `pr_token.txt`.
+    #[cfg(unix)]
+    #[test]
+    fn the_endpoint_file_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = endpoint_dir("owner-only");
+        write_endpoint_file(&dir, 49213, "0123456789abcdef0123456789abcdef");
+        let mode = std::fs::metadata(endpoint_path(&dir)).expect("written").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "endpoint.json must be readable by nobody else");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// There is no shutdown path by design, so a crash or a `kill -9` leaves this file behind with a
+    /// dead port and a worthless token. Removing it at the next start is what keeps a dispatcher
+    /// from being pointed at a port some *other* process has since been given.
+    ///
+    /// It also means turning the setting off and restarting takes the file away, rather than leaving
+    /// an address for a door that no longer opens.
+    #[test]
+    fn a_stale_endpoint_file_is_removed_before_the_listener_binds() {
+        let dir = endpoint_dir("stale");
+        std::fs::write(endpoint_path(&dir), "{\"port\":1,\"token\":\"dead\"}").expect("seed");
+        clear_endpoint_file(&dir);
+        assert!(!endpoint_path(&dir).exists(), "a predecessor's file must not outlive it");
+        // And a second clear is not an error: nothing there is the outcome we wanted anyway.
+        clear_endpoint_file(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Built from `PrAxis::ALL`, so a fourth bar cannot appear on the page and be missing from the
+    /// map a script reads. The URLs carry `127.0.0.1` rather than the page's own hostname because
+    /// curl and most script HTTP clients do not resolve `.localhost` the way browsers do.
+    #[test]
+    fn the_endpoint_file_names_every_axis_the_page_serves() {
+        let dir = endpoint_dir("axes");
+        write_endpoint_file(&dir, 49213, TOKEN);
+        let text = std::fs::read_to_string(endpoint_path(&dir)).expect("written");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        for axis in PrAxis::ALL {
+            let url = v["axes"][axis.slug()].as_str().unwrap_or_default().to_string();
+            assert_eq!(url, format!("http://127.0.0.1:49213/{TOKEN}/{}/entries", axis.slug()));
+        }
+        assert_eq!(v["port"], serde_json::json!(49213));
+        assert_eq!(v["token"], serde_json::json!(TOKEN));
+        assert_eq!(v["host_header"], serde_json::json!("127.0.0.1:49213"));
+        assert_eq!(v["pid"], serde_json::json!(std::process::id()));
+        assert_eq!(v["schema"], serde_json::json!(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── Over a real socket ────────────────────────────────────────────────────
     //
     // `read_head` and `respond` are the two functions the pure tests above cannot reach, and they are
@@ -1501,6 +1793,114 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
         assert!(!response.contains("<!doctype html>"), "a HEAD carries no body");
         assert!(response.contains("Content-Length: "), "but it still declares the length");
+    }
+
+    /// The off path, end to end. No test installs `SETTINGS`, so `entries_enabled` is genuinely
+    /// false here and this is the real shut door rather than a simulated one.
+    ///
+    /// This is the direction that matters. Serving when the setting is on is the harmless failure;
+    /// serving when it is off would mean a URL that does not exist today starts existing the moment
+    /// somebody clicks a menu entry for the page's sake. The 404 also has to leak nothing: a 403
+    /// would confirm the route is real and merely closed.
+    #[test]
+    fn the_entries_route_is_not_served_when_the_setting_is_off() {
+        assert!(
+            !entries_enabled(),
+            "no ordinary test installs SETTINGS, so the door must read as shut. If this fired, \
+             something ran the #[ignore]d `the_local_api_answers_over_a_real_loopback_connection` \
+             in the same process — see its doc comment; run it on its own with --ignored."
+        );
+        let response = round_trip(&format!(
+            "GET /{TOKEN}/approved/entries HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"
+        ));
+        assert!(response.starts_with("HTTP/1.1 404 "), "{response}");
+        assert!(!response.contains("application/json"), "a shut door describes nothing: {response}");
+        assert!(!response.contains("\"schema\""));
+    }
+
+    /// The guard rail against this ever growing a claim endpoint, proved over a real socket rather
+    /// than only in `route_for`. The moment a dispatcher can tell GitHoot which pull requests it has
+    /// taken, GitHoot is persisting PR state and the whole design is broken.
+    ///
+    /// Refused before the setting is even consulted, so it holds whether the door is open or shut.
+    #[test]
+    fn a_real_post_to_the_entries_route_is_refused_end_to_end() {
+        let response = round_trip(&format!(
+            "POST /{TOKEN}/approved/entries HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Content-Length: 2\r\n\r\n{{}}"
+        ));
+        assert!(response.starts_with("HTTP/1.1 405 "), "{response}");
+    }
+
+    /// The `Host` allowlist runs before the path is examined, so a hostile page that reached this
+    /// port learns nothing about whether the machine-readable route exists.
+    #[test]
+    fn a_real_entries_request_with_a_hostile_host_leaks_nothing() {
+        for host in ["evil.com", "localhost:{PORT}"] {
+            let response = round_trip(&format!(
+                "GET /{TOKEN}/approved/entries HTTP/1.1\r\nHost: {host}\r\n\r\n"
+            ));
+            assert!(response.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{host}: {response}");
+            assert!(!response.contains("application/json"), "{host}: {response}");
+        }
+    }
+
+    /// The whole `localApi` path with nothing faked: install the real settings, bind the real
+    /// listener through `start_now`, read the address back out of the real `endpoint.json`, and ask
+    /// for it over a real socket exactly as `curl` would.
+    ///
+    /// **`#[ignore]`d because it installs `SETTINGS`**, which is a `OnceLock` and therefore settable
+    /// once per process. Running it alongside `the_entries_route_is_not_served_when_the_setting_is_off`
+    /// would leave that test looking at an open door. `cargo test -- --ignored` runs only the
+    /// ignored tests, so the two never meet; `--include-ignored` would make them, and the other
+    /// test says so when it fires.
+    ///
+    /// Run it with:
+    /// `cargo test --bin githoot-tray the_local_api_answers_over_a_real_loopback_connection -- --ignored --exact`
+    #[test]
+    #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
+    fn the_local_api_answers_over_a_real_loopback_connection() {
+        let dir = endpoint_dir("live");
+        let (wake_tx, _wake_rx) = std::sync::mpsc::channel();
+        install(Settings {
+            app_asset_path: dir.clone(),
+            sound: crate::config::Switch::new(false),
+            copilot: crate::config::Switch::new(false),
+            local_api: true,
+            wake: std::sync::Mutex::new(wake_tx),
+        });
+        assert!(start_now(), "the loopback listener should bind");
+
+        // Everything from here on is what a dispatcher does: read the file, dial the address.
+        let published: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(endpoint_path(&dir)).expect("endpoint.json"))
+                .expect("valid JSON");
+        let port = published["port"].as_u64().expect("a port") as u16;
+        let url = published["axes"]["approved"].as_str().expect("an approved URL").to_string();
+        let path = url.split_once(&format!("127.0.0.1:{port}")).expect("the published host").1;
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        client
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
+            )
+            .expect("write");
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.contains("Content-Type: application/json; charset=utf-8"), "{response}");
+        assert!(response.contains("ETag: "), "a dispatcher polls conditionally: {response}");
+
+        let body = response.split_once("\r\n\r\n").expect("a body").1;
+        let v: serde_json::Value = serde_json::from_str(body).expect("the body is JSON");
+        assert_eq!(v["axis"], serde_json::json!("approved"));
+        assert_eq!(v["schema"], serde_json::json!(1));
+        // No poll has run in a test process, so the only honest answer is "not known" — and this is
+        // the case a dispatcher must not mistake for an empty board.
+        assert_eq!(v["known"], serde_json::json!(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

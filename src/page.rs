@@ -529,6 +529,13 @@ pub fn settings_page(
     h.push_str(&checkbox("copilotReviews", "Count Copilot's unresolved comments as work", cfg.copilot_reviews));
     h.push_str(&checkbox("sound", "Hoot when a pull request needs you", cfg.sound));
     h.push_str(&checkbox("updateCheck", "Check for a newer release", cfg.update_check));
+    // The label says what it opens, not just what it offers. An EDR or firewall prompt at the next
+    // launch has to be traceable to a box somebody deliberately ticked.
+    h.push_str(&checkbox(
+        "localApi",
+        "Serve the lists as JSON to local scripts (opens the local port at startup)",
+        cfg.local_api,
+    ));
     h.push_str("</div>\n");
 
     h.push_str("<h2 class=\"section\">Log detail</h2><div class=\"card\">");

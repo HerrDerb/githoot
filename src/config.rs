@@ -35,6 +35,7 @@ const KEY_LOG_LEVEL: &str = "logLevel";
 const KEY_SOUND: &str = "sound";
 const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
+const KEY_LOCAL_API: &str = "localApi";
 
 /// Every component GitHub publishes on its status page, in the order the page lists them.
 ///
@@ -183,6 +184,13 @@ pub struct Config {
     /// invisible to the amber bar. On by default; some teams treat its comments as suggestions rather
     /// than work, and for them this is noise.
     pub copilot_reviews: bool,
+    /// Whether the judged lists are served as JSON to scripts running as you on this machine.
+    ///
+    /// The only default-off setting in this file, and the only one that changes when the loopback
+    /// listener binds: on, it binds at startup instead of on the first menu click, and writes
+    /// `endpoint.json` so a script can find the ephemeral port and this run's token. Off, the route
+    /// answers 404 and nothing is written, which is exactly how the app behaved before it existed.
+    pub local_api: bool,
 }
 
 /// Where the settings file lives.
@@ -242,7 +250,7 @@ pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
 /// Public because the settings page renders from it: one list, so a key cannot appear in the form
 /// without the page knowing whether to warn about it, and cannot be added to the file without
 /// appearing in the form.
-pub const WRITABLE_KEYS: [(&str, bool); 8] = [
+pub const WRITABLE_KEYS: [(&str, bool); 9] = [
     (KEY_REVIEW_REQUESTED, false),
     (KEY_READY_TO_MERGE, false),
     (KEY_CHANGES_REQUESTED, false),
@@ -251,6 +259,8 @@ pub const WRITABLE_KEYS: [(&str, bool); 8] = [
     (KEY_UPDATE_CHECK, false),
     (KEY_LOG_LEVEL, false),
     (KEY_STATUS_COMPONENTS, false),
+    // Not live: the listener binds once, at startup.
+    (KEY_LOCAL_API, false),
 ];
 
 /// Every component GitHub publishes, for the settings page's checkboxes.
@@ -266,6 +276,7 @@ fn value_of(wanted: &Config, key: &str) -> String {
         KEY_READY_TO_MERGE => flag(wanted.pr_enabled[1]),
         KEY_CHANGES_REQUESTED => flag(wanted.pr_enabled[2]),
         KEY_COPILOT_REVIEWS => flag(wanted.copilot_reviews),
+        KEY_LOCAL_API => flag(wanted.local_api),
         KEY_SOUND => flag(wanted.sound),
         KEY_UPDATE_CHECK => flag(wanted.update_check),
         KEY_LOG_LEVEL => match wanted.log_level {
@@ -434,6 +445,7 @@ impl Config {
             pr_enabled: PrAxis::ALL.map(|axis| form.ticked(pr_key(axis))),
             sound: form.ticked(KEY_SOUND),
             copilot_reviews: form.ticked(KEY_COPILOT_REVIEWS),
+            local_api: form.ticked(KEY_LOCAL_API),
             log_level: form
                 .get(KEY_LOG_LEVEL)
                 .and_then(|v| Level::parse(v))
@@ -474,6 +486,10 @@ impl Config {
             // them, and an amber bar that cannot see them is the state this key was added to fix.
             // `is_off` rather than `!is_on`, so a typo leaves the default standing.
             copilot_reviews: !values.get(KEY_COPILOT_REVIEWS).is_some_and(|v| is_off(v)),
+            // Default **off**, alone in this file, because it opens a listening socket at boot and
+            // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
+            // *missing* key as on and open the door on every install that never asked.
+            local_api: values.get(KEY_LOCAL_API).is_some_and(|v| is_on(v)),
         }
     }
 
@@ -578,7 +594,18 @@ fn default_config() -> String {
          # Also available: {others}\n\
          #\n\
          # Names must match GitHub's exactly, bar case. An empty list watches the whole page.\n\
-         {KEY_STATUS_COMPONENTS}={components}\n"
+         {KEY_STATUS_COMPONENTS}={components}\n\
+         \n\
+         # Serve the judged pull-request lists as JSON to scripts running as you on this machine.\n\
+         #\n\
+         # The only setting here that is off by default, and the only one that needs an explicit\n\
+         # on: unlike every other line in this file, a typo leaves it shut rather than open.\n\
+         #\n\
+         # On, the local port opens at startup instead of on your first menu click, and\n\
+         # endpoint.json is written beside this file (owner-only) with that port and this run's\n\
+         # token, so a script can find the address. Off, nothing is written and the route answers\n\
+         # 404. Restart to apply.\n\
+         {KEY_LOCAL_API}=off\n"
     )
 }
 
@@ -627,6 +654,10 @@ fn warn_about_renamed_keys(values: &std::collections::HashMap<&str, &str>) {
 /// has to mean on, so only an explicit off may turn it off. Deliberately not `!is_on(v)` — that would
 /// make a typo like `updateCheck=yse` read as off, silently disabling a feature the user was trying to
 /// confirm. An unrecognised value leaves the default alone.
+fn is_on(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes")
+}
+
 fn is_off(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no")
 }
@@ -859,8 +890,10 @@ mod tests {
         // The one key whose written value is not its absent-key default: see
         // `the_template_is_explicit_where_an_absent_key_is_not`.
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
+        // The one key shipped off. Written explicitly anyway, so the file says the door exists.
+        assert_eq!(values.get(KEY_LOCAL_API), Some(&"off"));
         // And nothing else, so a key added to the template without being read is caught.
-        assert_eq!(values.len(), 8, "unexpected keys in the template: {values:?}");
+        assert_eq!(values.len(), 9, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -915,11 +948,48 @@ mod tests {
             KEY_SOUND,
             KEY_STATUS_COMPONENTS,
             KEY_COPILOT_REVIEWS,
+            KEY_LOCAL_API,
         ];
         let text = default_config();
         for key in parse(&text).keys() {
             assert!(known.contains(key), "{key:?} is written but never read");
         }
+    }
+
+    // ── localApi ────────────────────────────────────────────────────────────
+
+    /// The only default-**off** key in the file, and it has to stay that way: it opens a listening
+    /// socket at boot and writes this run's token to disk. Every other setting here can be wrong in
+    /// the user's favour; this one cannot.
+    ///
+    /// Also pins the typo direction. `copilotReviews` uses `is_off` so a typo leaves a default-on
+    /// setting on; this one uses `is_on` so a typo leaves a default-off setting off. Both mean "an
+    /// unrecognised value never moves the setting", which `!is_off` would get backwards here by
+    /// turning *absence* into on.
+    #[test]
+    fn the_local_api_setting_defaults_to_off() {
+        assert!(!values("").local_api, "an empty config must leave the local API shut");
+        assert!(!values("localApi=off").local_api);
+        assert!(!values("localApi=yeah nah").local_api, "an unrecognised value must not open it");
+        assert!(values("localApi=on").local_api, "only an explicit on opens it");
+        assert!(values("localApi=true").local_api);
+    }
+
+    /// The nine-site wiring, end to end through the file: a `value_of` arm pointed at the wrong
+    /// field, or a missing `WRITABLE_KEYS` entry, both show up here as a value that will not stick.
+    #[test]
+    fn the_local_api_setting_round_trips_through_a_save() {
+        let dir = temp_dir("local-api-round-trip");
+        let _ = std::fs::create_dir_all(&dir);
+        let (mut cfg, _) = Config::load(&dir);
+        assert!(!cfg.local_api, "a fresh config.txt must ship it off");
+
+        cfg.local_api = true;
+        let written = save(&dir, &cfg).expect("save should succeed");
+        assert!(written.contains(&KEY_LOCAL_API), "the key must actually be written");
+        assert!(Config::load(&dir).0.local_api, "and must survive a reload");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── The hoot switch ─────────────────────────────────────────────────────

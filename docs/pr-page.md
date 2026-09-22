@@ -18,7 +18,7 @@ reviewer's standing verdict.
 | | |
 |---|---|
 | Address | `http://githoot.localhost:<port>/<token>/<bar>`, plus `/items` and `/settings` |
-| Bound | On the first click, never at startup |
+| Bound | On the first click, never at startup, unless [`localApi`](local-api.md) is on |
 | Port and token | New on every run |
 | Contents | Title, repo, number, author, age, draft, checks, merge conflict, open comments from the portal's automatic reviewer (Copilot on GitHub), per-reviewer verdicts |
 
@@ -136,3 +136,8 @@ once, with the operating system's own error, and not retried, since nothing that
 between two clicks.
 
 The listener stops when GitHoot does. There is nothing to clean up, and nothing is written to disk.
+
+**One setting changes both halves of that sentence.** With [`localApi`](local-api.md) on, the
+listener binds at startup rather than on a click, and the port and token are written to
+`~/.githoot-tray/endpoint.json` so a script can find them. It ships off, and off it changes nothing
+here.
