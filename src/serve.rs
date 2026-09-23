@@ -1173,6 +1173,7 @@ fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &
 /// `page::DispatcherView` can point into it. `None` off Linux, and `None` while `localApi` is off,
 /// because a section offering to install a consumer of an API that is shut would be a promise
 /// with nothing behind it.
+#[cfg(target_os = "linux")]
 struct DispatcherState {
     status: crate::dispatcher::Status,
     missing: Vec<&'static str>,
@@ -1226,6 +1227,11 @@ fn dispatcher_view(cfg: &crate::config::Config, query: Option<&str>) -> Option<D
 fn dispatcher_view(_: &crate::config::Config, _: Option<&str>) -> Option<DispatcherState> {
     None
 }
+
+/// Off Linux there is no dispatcher, and so nothing to hold. Only exists so the page handler that
+/// asks for one compiles on every platform; `dispatcher_view` never builds it there.
+#[cfg(not(target_os = "linux"))]
+struct DispatcherState;
 
 #[cfg(not(target_os = "linux"))]
 impl DispatcherState {
