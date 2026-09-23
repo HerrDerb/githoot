@@ -203,48 +203,13 @@ lists owns its own bookkeeping, where it can be inspected and reset. A test asse
 **Not a push.** The poll floor is 60 seconds (→ [Troubleshooting](troubleshooting.md)), so a reader
 learns about a change up to a minute after GitHub did, and no sooner than GitHoot itself.
 
-## A worked reader
+## The dispatcher, if you want one
 
-The lists say what is in each bar. They do not say what is already being dealt with, and GitHoot
-deliberately does not know. Whatever reads them has to answer that itself.
+Reading the bars is the general thing. Turning them into agents is one particular use of it, and
+GitHoot ships that too, as a separate, unsupported, Linux-only piece: `ght-dispatch`, installed with
+one button from the settings page once `localApi` is on. It keeps its own small state file, asks
+Herdr who is already working what, and starts one agent per pull request with a prompt you own.
 
-This one asks a terminal workspace manager which agents are already running, and keys the claim on a
-worktree path, so the live process list *is* the ledger. A lock file would go stale and lie; an agent
-that has exited is simply not in the list.
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-f=~/.githoot-tray/endpoint.json
-[ -f "$f" ] || exit 0                       # GitHoot is not running
-PORT=$(jq -r .port "$f"); TOK=$(jq -r .token "$f")
-
-axis=requested-reviews
-body=$(curl -sS --fail-with-body "http://127.0.0.1:${PORT}/${TOK}/${axis}/entries") || exit 0
-
-# The honesty gate, before anything else.
-[ "$(jq -r .known <<<"$body")" = true ] || exit 0
-
-busy=$(herdr agent list | jq -r '.result.agents[].cwd')
-
-jq -r '.portals[] | select(.known) | .entries[] | [.repo, .number, .url] | @tsv' <<<"$body" |
-while IFS=$'\t' read -r repo number url; do
-  slug="pr-${repo//\//-}-${number}"
-  wt="$HOME/worktrees/$slug"
-  grep -qxF "$wt" <<<"$busy" && continue    # already being worked
-
-  herdr worktree create --path "$wt"
-  herdr agent start "$slug" --kind claude --pane "$(herdr pane current)"
-  herdr agent prompt "$slug" \
-    "Review $url. Summarise it, then say plainly whether it is complex enough that I should read it
-     myself. Use gh to fetch the diff and the review comments."
-done
-```
-
-Run it from a timer. There is no point going faster than the 60-second poll floor.
-
-For `work-required`, only the axis and the prompt change: read the review comments with `gh`,
-challenge each on its merits, then propose the changes.
-
-Nothing here ships with GitHoot. It is an example, and the pieces it leans on are yours to choose.
+Everything about it, including what the button writes and the one guard rail that actually holds,
+is in [`contrib/README.md`](../contrib/README.md). It is documented there rather than here on
+purpose: this page is the contract, and the dispatcher is one caller of it.

@@ -8,6 +8,8 @@ mod api;
 mod autostart;
 mod config;
 mod dialog;
+#[cfg(target_os = "linux")]
+mod dispatcher;
 mod icons;
 mod log;
 mod overview;

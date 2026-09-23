@@ -84,6 +84,10 @@ pub enum Route {
     SaveSettings,
     /// Starting a portal's sign-in from the settings page.
     Authenticate,
+    /// Installing or removing the shipped dispatcher from the settings page. Linux only; on any
+    /// other platform the path is simply a miss, because the feature does not exist there.
+    #[cfg(target_os = "linux")]
+    Dispatcher,
     Owl,
     /// The path exists but not for this method.
     MethodNotAllowed,
@@ -295,6 +299,13 @@ pub fn route_for(
         if (leaf, tail) == ("settings", "authenticate") {
             return match method {
                 Method::Post => Route::Authenticate,
+                _ => Route::MethodNotAllowed,
+            };
+        }
+        #[cfg(target_os = "linux")]
+        if (leaf, tail) == ("settings", "dispatcher") {
+            return match method {
+                Method::Post => Route::Dispatcher,
                 _ => Route::MethodNotAllowed,
             };
         }
@@ -819,6 +830,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                             signed_out: query_value(query, "signout").as_deref(),
                             now_unix: unix_now(),
                             nonce: &nonce,
+                            dispatcher: dispatcher_view(&cfg, query).as_ref().map(|d| d.view()),
                         },
                     )
                 }
@@ -841,6 +853,8 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
         }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
         Route::Authenticate => start_sign_in(&mut stream, &head, &request, token, port),
+        #[cfg(target_os = "linux")]
+        Route::Dispatcher => dispatcher_action(&mut stream, &head, &request, token, port),
         Route::MethodNotAllowed => {
             respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
         }
@@ -1066,6 +1080,143 @@ fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &
 /// Only *asks*: the flow runs on the poll thread, where the credential lives and where blocking for
 /// as long as the user takes costs nothing but a paused poll. The redirect back names the portal so
 /// the page can say the sign-in has started even before the poll thread has published "in progress".
+/// Everything the settings page needs to draw the dispatcher section, owned so the borrowed
+/// `page::DispatcherView` can point into it. `None` off Linux, and `None` while `localApi` is off,
+/// because a section offering to install a consumer of an API that is shut would be a promise
+/// with nothing behind it.
+struct DispatcherState {
+    status: crate::dispatcher::Status,
+    missing: Vec<&'static str>,
+    message: Option<String>,
+    prompts: Vec<page::PromptRow>,
+}
+
+#[cfg(target_os = "linux")]
+impl DispatcherState {
+    fn view(&self) -> page::DispatcherView<'_> {
+        page::DispatcherView {
+            installed: self.status.installed.as_deref(),
+            shipped: self.status.shipped,
+            outdated: self.status.is_outdated(),
+            running: self.status.service_active,
+            missing: &self.missing,
+            message: self.message.as_deref(),
+            prompts: &self.prompts,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn dispatcher_view(cfg: &crate::config::Config, query: Option<&str>) -> Option<DispatcherState> {
+    if !cfg.local_api {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let message = match query_value(query, "dispatcher").as_deref() {
+        Some("installed") => Some(match query_value(query, "kept") {
+            Some(kept) => format!("Installed and running. Kept your edited prompts: {}.", kept.replace(',', ", ")),
+            None => "Installed and running. Prompts are current.".to_string(),
+        }),
+        Some("removed") => Some("Removed.".to_string()),
+        Some("prompts") => Some("Prompts saved. The next tick uses them.".to_string()),
+        Some("failed") => Some(format!("Failed: {}", query_value(query, "why").unwrap_or_default())),
+        _ => None,
+    };
+    Some(DispatcherState {
+        status: crate::dispatcher::status(&home),
+        missing: crate::dispatcher::preflight(&home).missing,
+        message,
+        prompts: crate::dispatcher::prompts(&home)
+            .into_iter()
+            .map(|p| page::PromptRow { name: p.name, text: p.text, is_default: p.is_default })
+            .collect(),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn dispatcher_view(_: &crate::config::Config, _: Option<&str>) -> Option<DispatcherState> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+impl DispatcherState {
+    fn view(&self) -> page::DispatcherView<'_> {
+        unreachable!("no dispatcher state is ever built off Linux")
+    }
+}
+
+/// The install and uninstall buttons.
+///
+/// The same guards as every other write, then one more: `404` unless `localApi` is on, because the
+/// dispatcher is a consumer of that API and installing one against a shut door would only ever fail.
+/// The form names an action and nothing else; there is no field that could steer what gets written
+/// or where, which is the property `contrib/README.md` promises.
+#[cfg(target_os = "linux")]
+fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+    if !origin_is_ours(request.origin.as_deref(), port) {
+        return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
+    }
+    if !entries_enabled() {
+        return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", true);
+    }
+    let Some(home) = dirs::home_dir() else {
+        return respond(stream, 503, "text/plain; charset=utf-8", b"No home directory", true);
+    };
+    let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
+    let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
+        Ok(body) => body,
+        Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
+    };
+    let form = parse_form(&body);
+    let outcome = match form.get("action").map(|a| a.as_ref()) {
+        Some("install") => {
+            infoln!("settings page asked to install the dispatcher");
+            crate::dispatcher::install(&home).map(|kept| {
+                if kept.is_empty() { "installed".to_string() } else { format!("installed&kept={}", kept.join(",")) }
+            })
+        }
+        Some("uninstall") => {
+            infoln!("settings page asked to remove the dispatcher");
+            crate::dispatcher::uninstall(&home).map(|()| "removed".to_string())
+        }
+        // Only the four known names are read off the form, by name; nothing the form invents can
+        // become a filename. See `dispatcher::save_prompts`.
+        Some("prompts") => {
+            infoln!("settings page saved the dispatcher prompts");
+            let given: Vec<(String, String)> = crate::dispatcher::DEFAULT_PROMPTS
+                .iter()
+                .filter_map(|(name, _)| {
+                    form.get(&format!("prompt_{name}")).map(|v| (name.to_string(), v.to_string()))
+                })
+                .collect();
+            crate::dispatcher::save_prompts(&home, &given)
+                .map(|()| "prompts".to_string())
+                .map_err(|e| format!("could not write the prompts: {e}"))
+        }
+        _ => return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
+    };
+    match outcome {
+        Ok(what) => redirect(stream, &format!("/{token}/settings?dispatcher={what}")),
+        Err(why) => {
+            errorln!("dispatcher: {why}");
+            redirect(stream, &format!("/{token}/settings?dispatcher=failed&why={}", encode_query_value(&why)))
+        }
+    }
+}
+
+/// Percent-encodes a value for a query string. Only what a redirect after an error needs.
+#[cfg(target_os = "linux")]
+fn encode_query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn start_sign_in(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
     if !origin_is_ours(request.origin.as_deref(), port) {
         return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
@@ -1282,6 +1433,42 @@ mod tests {
             let path = format!("/{TOKEN}/approved/{tail}");
             assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound, "tail {tail:?}");
         }
+    }
+
+    // ── The dispatcher install route ──────────────────────────────────────────
+
+    /// A `GET` here must never install anything, and a wrong token must not learn the route exists.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_dispatcher_route_is_post_only_and_token_gated() {
+        let path = format!("/{TOKEN}/settings/dispatcher");
+        assert_eq!(route_write(&path, Method::Post), Route::Dispatcher);
+        assert_eq!(route_write(&path, Method::Get), Route::MethodNotAllowed);
+        assert_eq!(route_write(&path, Method::Head), Route::MethodNotAllowed);
+        assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
+        assert_eq!(route_get(&path, Some("evil.com"), TOKEN, PORT), Route::Forbidden);
+    }
+
+    /// The guard order over a real socket. `Origin` is checked before anything else, so a
+    /// cross-site form gets `403` and nothing is written; with our own `Origin` but the setting
+    /// off, `404`, the same answer the entries route gives. Neither reaches `install`, which is the
+    /// only thing that would touch the real home directory, and why the success path is not driven
+    /// over a socket from a test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dispatcher_post_is_refused_before_it_can_write_anything() {
+        assert!(!entries_enabled(), "no ordinary test installs SETTINGS; the door must read as shut");
+        let hostile = round_trip(&format!(
+            "POST /{TOKEN}/settings/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: https://evil.com\r\nContent-Length: 14\r\n\r\naction=install"
+        ));
+        assert!(hostile.starts_with("HTTP/1.1 403 "), "{hostile}");
+
+        let shut = round_trip(&format!(
+            "POST /{TOKEN}/settings/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 14\r\n\r\naction=install"
+        ));
+        assert!(shut.starts_with("HTTP/1.1 404 "), "{shut}");
     }
 
     /// The CSRF guard. A form on another site can make the browser send a cross-origin `POST` — the
@@ -1563,7 +1750,7 @@ mod tests {
     /// header does.
     #[test]
     fn the_settings_document_declares_the_same_policy_as_its_response() {
-        let html = page::settings_page(&test_config(), "tok", &[], &page::PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n" });
+        let html = page::settings_page(&test_config(), "tok", &[], &page::PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n", dispatcher: None });
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#), "got {html}");
         assert!(!html.contains("no-referrer"));
     }
@@ -1899,6 +2086,74 @@ mod tests {
         // No poll has run in a test process, so the only honest answer is "not known" — and this is
         // the case a dispatcher must not mistake for an empty board.
         assert_eq!(v["known"], serde_json::json!(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dispatcher card as this machine would actually see it: real preflight against the real
+    /// `PATH` and home, real `systemctl --user is-active`, rendered through the real handler over a
+    /// real socket. Read-only: nothing is installed. It asserts the button is *offered*, which is the
+    /// same as asserting preflight found every tool, so a machine missing `herdr` fails here loudly
+    /// rather than silently showing a card with no button.
+    ///
+    /// `#[ignore]`d for the same reason as the test above: it installs the process-wide `SETTINGS`.
+    /// Tolerates running after that test by recreating whatever directory `SETTINGS` points at.
+    /// Prints the card so `--nocapture` shows what a user would see.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
+    fn the_dispatcher_card_renders_for_this_machine_over_a_real_connection() {
+        let dir = endpoint_dir("card");
+        let (wake_tx, _wake_rx) = std::sync::mpsc::channel();
+        install(Settings {
+            app_asset_path: dir.clone(),
+            sound: crate::config::Switch::new(false),
+            copilot: crate::config::Switch::new(false),
+            local_api: true,
+            wake: std::sync::Mutex::new(wake_tx),
+        });
+        // The page reads `localApi` from config.txt, so it has to be on in whatever directory
+        // SETTINGS actually holds, which may be another ignored test's if both ran.
+        let cfg_dir = settings_path();
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.txt"), "localApi=on\n").unwrap();
+        assert!(start_now(), "the loopback listener should bind");
+
+        let published: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(endpoint_path(&cfg_dir)).expect("endpoint.json"))
+                .expect("valid JSON");
+        let port = published["port"].as_u64().expect("a port") as u16;
+        let token = published["token"].as_str().expect("a token");
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        client
+            .write_all(format!("GET /{token}/settings HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+            .expect("write");
+        let mut response = String::new();
+        client.read_to_string(&mut response).expect("read");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        let start = response.find("Agent dispatcher").expect("the card must render while localApi is on");
+        // Through the prompts card when there is one, else through the dispatcher card alone.
+        let end = response[start..]
+            .find("Save prompts</button></form></div>\n")
+            .map(|i| start + i + "Save prompts</button></form></div>\n".len())
+            .or_else(|| response[start..].find("</div>\n").map(|i| start + i + 7))
+            .unwrap_or(response.len());
+        let card = &response[start..end];
+        println!("\n{card}\n");
+        assert!(
+            card.contains(r#"value="install""#),
+            "no install button: preflight found a tool missing on this machine, or the card is broken:\n{card}"
+        );
+        assert!(!card.contains("Cannot install"), "{card}");
+        // With the dispatcher installed on this machine, the four prompt boxes must be offered too.
+        if card.contains("portal-status\">Installed") {
+            assert!(card.contains("Dispatcher prompts"), "installed but no prompt boxes:\n{card}");
+            for name in ["work-required", "requested-reviews", "approved", "update"] {
+                assert!(card.contains(&format!("name=\"prompt_{name}\"")), "no box for {name}");
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

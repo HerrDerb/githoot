@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# ght-dispatch-loop — run the dispatcher over each bar, forever.
+#
+# Deliberately NOT `set -e`: one bad tick must never kill the loop. Every expected failure in
+# ght-dispatch already exits 0 quietly (no GitHoot, no herdr, list not known). A non-zero
+# exit here is something genuinely unexpected, and the right answer is still to try again in
+# a few seconds rather than to die and wait for systemd to restart us.
+#
+# The interval is cheap because it is loopback and almost every tick is a bodyless 304. It
+# does NOT make you fresher than GitHoot, which polls GitHub at most once a minute; it only
+# removes the lag between GitHoot learning something and this noticing.
+#
+# ght-dispatch-loop shipped with GitHoot @GHT_VERSION@
+
+set -uo pipefail
+
+INTERVAL="${GHT_INTERVAL:-5}"
+AXES="${GHT_AXES:-work-required requested-reviews}"
+
+while :; do
+  for axis in $AXES; do
+    ght-dispatch "$axis" || true
+  done
+  sleep "$INTERVAL"
+done

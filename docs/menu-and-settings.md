@@ -50,6 +50,8 @@ If the local listener cannot start at all, the entries open that inbox directly.
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
 | ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
 | ☑ **Serve the lists as JSON to local scripts** | Opens the local port at startup and publishes its address, for your own tooling | `localApi` in `config.txt` |
+| **Agent dispatcher** card | Install, update or remove the shipped `ght-dispatch`, which turns the bars into Herdr agents. Refuses while a required tool is missing, and names it | No key. Linux only, and shown only while `localApi` is on → [the dispatcher](../contrib/README.md) |
+| **Dispatcher prompts** boxes | Edit what each dispatched agent is told, one box per bar plus the nudge. Clear a box to return to the shipped default | Files under `~/.config/ght-dispatch/prompts/`. Shown once the dispatcher is installed |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |

@@ -23,6 +23,33 @@ pub struct PortalsView<'a> {
     pub now_unix: u64,
     /// Names the copy button's script in the CSP. Empty means no script is emitted.
     pub nonce: &'a str,
+    /// The agent dispatcher section. `None` hides it: off Linux, and while `localApi` is off.
+    pub dispatcher: Option<DispatcherView<'a>>,
+}
+
+/// How the shipped dispatcher stands, as plain data so this module needs no platform gate.
+#[derive(Clone, Copy)]
+pub struct DispatcherView<'a> {
+    /// The GitHoot version the installed script came from. `None` when nothing is installed.
+    pub installed: Option<&'a str>,
+    /// What this GitHoot would install.
+    pub shipped: &'a str,
+    pub outdated: bool,
+    pub running: bool,
+    /// Required tools not found. Non-empty hides the install button and says why.
+    pub missing: &'a [&'a str],
+    /// The outcome of the last button press, from the redirect's query.
+    pub message: Option<&'a str>,
+    /// The dispatcher's prompts, one per bar plus the nudge, as the edit boxes show them.
+    pub prompts: &'a [PromptRow],
+}
+
+/// One editable prompt. `is_default` means no file of the user's exists yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptRow {
+    pub name: &'static str,
+    pub text: String,
+    pub is_default: bool,
 }
 
 /// One portal's share of an axis page: who it is, and what it last confirmed.
@@ -218,6 +245,12 @@ margin:1.5rem 0 .5rem;font-weight:600}\
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
 font:inherit;font-weight:600;cursor:pointer}\
 code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}\
+.actions{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-top:.6rem}\
+.actions form{margin:0}\
+.small{padding:.4rem 1rem;font-size:.9rem}\
+textarea{display:block;box-sizing:border-box;width:100%;min-height:14rem;margin:.3rem 0 1rem;\
+padding:.6rem .7rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:inherit;\
+font:.9rem/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}\
 .code-row{display:flex;gap:.6rem;align-items:stretch;margin:.6rem 0}\
 .code-row input{flex:0 0 auto;width:11ch;box-sizing:content-box;text-align:center;font:inherit;\
 font-size:1.5rem;font-weight:700;letter-spacing:.15em;padding:.55rem .6rem;border:1px solid var(--line);\
@@ -466,7 +499,7 @@ pub fn settings_page(
     restarts: &[&str],
     view: &PortalsView,
 ) -> String {
-    let PortalsView { portals, signin_started, signed_out, now_unix, nonce } = *view;
+    let PortalsView { portals, signin_started, signed_out, now_unix, nonce, ref dispatcher } = *view;
     // Reload every few seconds while a sign-in is in flight, or has just been asked for, so the
     // code appears without a click and the card turns to "Signed in" on its own.
     // A redirect marker means the poll thread was just asked for something and the page should
@@ -511,6 +544,10 @@ pub fn settings_page(
     for portal in portals {
         h.push_str(&portal_card(portal, token, now_unix));
         code_on_screen |= matches!(portal.auth, AuthStatus::SigningIn(Some(_)));
+    }
+
+    if let Some(d) = dispatcher {
+        h.push_str(&dispatcher_card(d, token));
     }
 
     h.push_str(&format!("<form method=\"post\" action=\"/{}/settings\">\n", esc(token)));
@@ -691,6 +728,95 @@ pub fn settings_unavailable(token: &str) -> String {
     h.push_str(
         "<div class=\"empty\">Settings are not available in this run.</div>\n</main>\n</body>\n</html>\n",
     );
+    h
+}
+
+/// The agent dispatcher: what is installed, whether it runs, and the one button that changes that.
+///
+/// Its own form, outside the settings form, because a form cannot nest and because pressing it must
+/// never also save half-edited settings. The button is offered only when every required tool is
+/// present; otherwise the card names what is missing and offers nothing, since an installed
+/// dispatcher that fails every five seconds is worse than a card that says what to install first.
+fn dispatcher_card(d: &DispatcherView, token: &str) -> String {
+    let status = match (d.installed, d.running) {
+        (None, _) => "Not installed".to_string(),
+        // Running but unable to do anything is not "running" in any sense that matters.
+        (Some(v), _) if !d.missing.is_empty() => format!(
+            "Installed from {}, but not dispatching: missing {}",
+            esc(v),
+            d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join(", ")
+        ),
+        (Some(v), true) if d.outdated => format!("Installed from {}, running. {} available.", esc(v), esc(d.shipped)),
+        (Some(v), false) if d.outdated => format!("Installed from {}, not running. {} available.", esc(v), esc(d.shipped)),
+        (Some(v), true) => format!("Installed from {}, running", esc(v)),
+        (Some(v), false) => format!("Installed from {}, not running", esc(v)),
+    };
+    let action = |what: &str, label: &str| {
+        format!(
+            "<form method=\"post\" action=\"/{}/settings/dispatcher\"><input type=\"hidden\" \
+             name=\"action\" value=\"{what}\"><button class=\"small\" type=\"submit\">{label}</button></form>",
+            esc(token)
+        )
+    };
+    let mut buttons = String::new();
+    if d.missing.is_empty() {
+        let label = match (d.installed, d.outdated) {
+            (None, _) => "Install",
+            (Some(_), true) => "Update",
+            (Some(_), false) => "Reinstall",
+        };
+        buttons.push_str(&action("install", label));
+    } else {
+        buttons.push_str(&format!(
+            "<p class=\"sub\">Cannot install: missing <code>{}</code>. Put them on your PATH or in <code>~/.local/bin</code>.</p>",
+            d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
+        ));
+        // Herdr is the one a user is least likely to have, so it gets a way to fix it.
+        if d.missing.contains(&"herdr") {
+            buttons.push_str("<p class=\"sub\"><a href=\"https://herdr.dev/docs/install/\">How to install Herdr</a></p>");
+        }
+    }
+    if d.installed.is_some() {
+        buttons.push_str(&action("uninstall", "Uninstall"));
+    }
+    let message = d.message.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
+    let prompts = if d.installed.is_some() { prompts_card(d, token) } else { String::new() };
+    format!(
+        "<h2 class=\"section\">Agent dispatcher</h2>\n\
+         <div class=\"card\"><div class=\"row\"><strong>ght-dispatch</strong> · <span class=\"portal-status\">{status}</span></div>\
+         <p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request that needs you, \
+         through the local API. Linux only. Installs to <code>~/.local/bin</code> and enables a user service; \
+         writes an executable, so read <a href=\"https://github.com/HerrDerb/githoot-tray/blob/main/contrib/README.md\">what it does</a> first.</p>\
+         {message}<div class=\"actions\">{buttons}</div></div>\n{prompts}"
+    )
+}
+
+/// The dispatcher's prompts as edit boxes, one form, one Save. Shown only once the dispatcher is
+/// installed, because until then there is nothing that reads them.
+///
+/// An emptied box is the reset: the file is removed and the shipped default comes back on the next
+/// tick. Said on the card, because a blank box that silently keeps the old text would be worse.
+fn prompts_card(d: &DispatcherView, token: &str) -> String {
+    let mut h = format!(
+        "<h2 class=\"section\">Dispatcher prompts</h2>\n<div class=\"card\">\
+         <form method=\"post\" action=\"/{}/settings/dispatcher\"><input type=\"hidden\" name=\"action\" value=\"prompts\">\
+         <p class=\"sub\">What the agent is told, per bar, plus the nudge it gets when a pull request changes under it. \
+         Placeholders: <code>{{url}}</code> <code>{{repo}}</code> <code>{{number}}</code> <code>{{branch}}</code> \
+         <code>{{title}}</code> <code>{{author}}</code>. The last two are written by whoever opened the pull request: \
+         keep them in the labelled data block. Clear a box to go back to the shipped default.</p>",
+        esc(token)
+    );
+    for p in d.prompts {
+        h.push_str(&format!(
+            "<label class=\"row\"><strong>{}</strong> <span class=\"sub\">{}</span></label>\
+             <textarea name=\"prompt_{}\" rows=\"14\" spellcheck=\"false\">{}</textarea>",
+            esc(p.name),
+            if p.is_default { "shipped default" } else { "yours" },
+            esc(p.name),
+            esc(&p.text),
+        ));
+    }
+    h.push_str("<button class=\"small\" type=\"submit\">Save prompts</button></form></div>\n");
     h
 }
 
@@ -1273,13 +1399,13 @@ mod tests {
     /// The settings page has a form and no list, so it gets no refresh loop.
     #[test]
     fn the_settings_page_has_no_refresh_script() {
-        assert!(!settings_page(&default_cfg(), "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n" }).contains("<script"));
+        assert!(!settings_page(&default_cfg(), "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n", dispatcher: None }).contains("<script"));
     }
 
     // ── The settings page ─────────────────────────────────────────────────────
 
     fn settings(cfg: &crate::config::Config) -> String {
-        settings_page(cfg, "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n" })
+        settings_page(cfg, "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n", dispatcher: None })
     }
 
     fn portal(auth: AuthStatus) -> PortalStatus {
@@ -1287,7 +1413,96 @@ mod tests {
     }
 
     fn view<'a>(portals: &'a [PortalStatus], signin: Option<&'a str>) -> PortalsView<'a> {
-        PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n" }
+        PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n", dispatcher: None }
+    }
+
+    // ── The dispatcher card ───────────────────────────────────────────────────
+
+    fn dispatcher(installed: Option<&'static str>, missing: &'static [&'static str]) -> DispatcherView<'static> {
+        DispatcherView {
+            installed,
+            shipped: "2.3.0",
+            outdated: installed.is_some_and(|v| v != "2.3.0"),
+            running: installed.is_some(),
+            missing,
+            message: None,
+            prompts: &[],
+        }
+    }
+
+    /// Hidden entirely unless asked for: off Linux, and while `localApi` is off, the page must not
+    /// mention a feature that cannot be used.
+    #[test]
+    fn the_dispatcher_card_is_absent_unless_a_view_is_given() {
+        assert!(!settings_page(&default_cfg(), "tok", &[], &view(&[], None)).contains("Agent dispatcher"));
+    }
+
+    /// Nothing installed and every tool present: one Install button, no Uninstall.
+    #[test]
+    fn a_fresh_machine_is_offered_install_and_nothing_else() {
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(None, &[])), ..view(&[], None) });
+        assert!(html.contains("Agent dispatcher") && html.contains("Not installed"));
+        assert!(html.contains(r#"value="install""#) && html.contains(">Install<"));
+        assert!(!html.contains(r#"value="uninstall""#));
+    }
+
+    /// A missing tool hides the button and names the tool. An installed dispatcher that fails every
+    /// five seconds is worse than a card that says what to install first.
+    #[test]
+    fn a_missing_tool_withholds_the_button_and_names_itself() {
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(None, &["herdr", "jq"])), ..view(&[], None) });
+        assert!(!html.contains(r#"value="install""#));
+        assert!(html.contains("Cannot install"));
+        assert!(html.contains("<code>herdr</code>") && html.contains("<code>jq</code>"));
+        assert!(html.contains(r#"href="https://herdr.dev/docs/install/""#), "a missing herdr must link to its install guide");
+    }
+
+    /// Installed and running with herdr gone must not read as healthy.
+    #[test]
+    fn an_install_missing_a_tool_says_it_is_not_dispatching() {
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(Some("2.3.0"), &["herdr"])), ..view(&[], None) });
+        assert!(html.contains("but not dispatching: missing herdr"), "{html}");
+        assert!(html.contains(r#"value="uninstall""#) && !html.contains(r#"value="install""#));
+    }
+
+    /// An older install gets Update, not Install, plus Uninstall, and says both versions.
+    #[test]
+    fn an_outdated_install_is_offered_update_and_uninstall() {
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(Some("2.2.0"), &[])), ..view(&[], None) });
+        assert!(html.contains(">Update<") && html.contains(r#"value="uninstall""#));
+        assert!(html.contains("2.2.0") && html.contains("2.3.0 available"));
+    }
+
+    /// The card's forms post to their own route and stand before the settings form opens. A form
+    /// cannot nest, and pressing Install must never also submit half-edited settings.
+    #[test]
+    fn the_dispatcher_forms_stand_outside_the_settings_form() {
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(Some("2.3.0"), &[])), ..view(&[], None) });
+        let card = html.find("Agent dispatcher").expect("card");
+        let form = html.find(r#"action="/tok/settings">"#).expect("settings form");
+        assert!(card < form, "the card must come before the settings form opens");
+        assert!(html.contains(r#"action="/tok/settings/dispatcher""#));
+    }
+
+    /// No dispatcher, no prompt boxes: nothing would read them.
+    #[test]
+    fn prompt_boxes_appear_only_once_the_dispatcher_is_installed() {
+        let rows = [PromptRow { name: "approved", text: "x {url}".into(), is_default: true }];
+        let none = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(DispatcherView { prompts: &rows, ..dispatcher(None, &[]) }), ..view(&[], None) });
+        assert!(!none.contains("Dispatcher prompts"));
+        let some = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), ..view(&[], None) });
+        assert!(some.contains("Dispatcher prompts") && some.contains(r#"name="prompt_approved""#));
+        assert!(some.contains("shipped default"));
+    }
+
+    /// Prompt text is user content going into an HTML attribute-free element: it must still be
+    /// escaped, or a `</textarea>` in a prompt would break out of its box.
+    #[test]
+    fn prompt_text_is_escaped_inside_its_box() {
+        let rows = [PromptRow { name: "update", text: "</textarea><script>1</script> & {url}".into(), is_default: false }];
+        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), ..view(&[], None) });
+        assert!(!html.contains("</textarea><script>"));
+        assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
     }
 
     fn settings_with(portals: &[PortalStatus], signin: Option<&str>) -> String {
