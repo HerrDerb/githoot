@@ -12,6 +12,7 @@ mod dialog;
 mod dispatcher;
 mod icons;
 mod log;
+mod mute;
 mod overview;
 mod page;
 mod portal;
@@ -249,6 +250,7 @@ fn main() {
         }
     };
     log::init(&app_asset_path);
+    mute::init(&app_asset_path);
     // After `log::init` so its findings are recorded, and at startup rather than at the end of an
     // install: on Windows the previous `.exe` cannot be deleted until the process holding it has gone,
     // and that process is this one's predecessor.
@@ -334,7 +336,7 @@ fn main() {
         // Only opens the page. Signing in is started by the button there, never by this entry:
         // a click that opened a browser *and* began a device flow read as the flow starting on its
         // own. If the page cannot be served at all, the old wake runs the flow with its dialog.
-        if !serve::open_settings_page() {
+        if !serve::open_accounts_page() {
             let _ = authenticate_wake_tx.send(scheduler::Wake::Authenticate(None));
         }
     });
@@ -734,6 +736,7 @@ fn main() {
         }
     };
     log::init(&app_asset_path);
+    mute::init(&app_asset_path);
     // After `log::init` so its findings are recorded, and at startup rather than at the end of an
     // install: on Windows the previous `.exe` cannot be deleted until the process holding it has gone,
     // and that process is this one's predecessor.
@@ -1139,7 +1142,7 @@ fn main() {
                 // `scheduler::Wake::Authenticate`), because it blocks for as long as the user takes
                 // and doing that here would freeze the event loop and the tray with it.
                 // Only opens the page; see the Linux entry point for why.
-                if !serve::open_settings_page() {
+                if !serve::open_accounts_page() {
                     let _ = self.wake_tx.send(scheduler::Wake::Authenticate(None));
                 }
             } else if *id == tray.update_item_id {

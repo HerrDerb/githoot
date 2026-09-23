@@ -15,6 +15,9 @@ every one of them is news. Signing in works the same way. An axis recovering fro
 on the same PRs is silent, because they are the same PRs; anything that turned up while the poll was
 down hoots, and should.
 
+**A muted pull request is silent while muted, and hoots when the mute ends**, by the Unmute link or by
+time. Muting drops it from the ledger, so it comes back as one never seen → [muting](pr-page.md#muting-a-pull-request).
+
 ## Why it is not "the count went up"
 
 It was, until 2.0.0, and that was only ever a proxy for the thing the sound means.

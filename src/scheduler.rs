@@ -547,7 +547,14 @@ fn snapshot_of(runs: &[PortalRun]) -> Vec<PortalSnapshot> {
         .map(|run| PortalSnapshot {
             info: run.portal.info().clone(),
             auth: run.auth_status(),
-            axes: PrAxis::ALL.map(|axis| run.state.pr_entries(axis)),
+            // Muted pull requests ride along with the rest: the page and the API split them out live,
+            // against the mute file, so a click shows at once rather than at the next poll.
+            axes: PrAxis::ALL.map(|axis| {
+                run.state.pr_entries(axis).map(|mut list| {
+                    list.extend_from_slice(run.state.pr_muted(axis));
+                    list
+                })
+            }),
         })
         .collect()
 }

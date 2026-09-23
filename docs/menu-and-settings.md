@@ -7,7 +7,7 @@
 | **Install update: X.Y.Z** | A newer release exists | Shows what changed, then verifies, installs and restarts |
 | **GitHub is githubing again, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
 | *— separator —* | Something above **and** below it | |
-| **Authenticate GitHub PR Status** | PR status has no usable credential | Opens the settings page, where the sign-in button is |
+| **Authenticate GitHub PR Status** | PR status has no usable credential | Opens the Accounts page, where the sign-in button is |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
 | **Open Approved PRs (N)** | One of yours has been approved | Opens GitHoot's own page for exactly what the green bar counts |
 | **Open Work Required (N)** | An objection stands, a conflict is blocking one, or Copilot has open comments | Opens GitHoot's own page for exactly what the amber bar counts |
@@ -50,8 +50,6 @@ If the local listener cannot start at all, the entries open that inbox directly.
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
 | ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
 | ☑ **Serve the lists as JSON to local scripts** | Opens the local port at startup and publishes its address, for your own tooling | `localApi` in `config.txt` |
-| **Agent dispatcher** card | Install, update or remove the shipped `ght-dispatch`, which turns the bars into Herdr agents. Refuses while a required tool is missing, and names it | No key. Linux only, and shown only while `localApi` is on → [the dispatcher](../contrib/README.md) |
-| **Dispatcher prompts** boxes | Edit what each dispatched agent is told, one box per bar plus the nudge. Clear a box to return to the shipped default | Files under `~/.config/ght-dispatch/prompts/`. Shown once the dispatcher is installed |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
@@ -106,8 +104,24 @@ need a restart — the hoot and the Copilot rule take effect at once, everything
 If the local listener cannot start, the entry falls back to opening `config.txt` in an editor, since
 losing the only way into the configuration because a socket would not bind is the worse failure.
 
-**Portals sit at the top of the page**, one card per configured portal, saying how its sign-in stands:
-*Signed in*, *Not signed in*, the running sign-in itself, or the reason nothing can be seen.
+**Four pages, one line of tabs:** *Settings · Accounts · Muted · Dispatcher*, on each of them.
+
+| Page | Holds |
+|---|---|
+| Settings | the settings form and its Save, and nothing else |
+| Accounts | one card per portal, and signing in and out |
+| Muted | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
+| Dispatcher | install, update and prompts for the shipped dispatcher. Only on Linux with `localApi` on → [the dispatcher](../contrib/README.md) |
+
+**They used to be one page, and that cost edits.** A running sign-in reloads its page every few seconds,
+and the dispatcher's buttons reload theirs; on a shared page either one threw away whatever you were
+halfway through in the settings form. Now anything that reloads lives on a page with no form of yours
+on it.
+
+## Accounts
+
+**One card per configured portal**, saying how its sign-in stands: *Signed in*, *Not signed in*, the
+running sign-in itself, or the reason nothing can be seen.
 
 **Signing in happens on this page.** *Not signed in* offers **Sign in to GitHub**; *Signed in* offers
 **Sign out**, which deletes the saved credential (`pr_token.txt`) and puts the tray where a fresh
@@ -125,8 +139,8 @@ local listener cannot start at all, the entry falls back to running the flow wit
 dialog, since there is no page to show the code on.
 
 Cancel is polled, not pushed: the poll thread is inside the flow and reads no channel there, so it
-looks for the cancel between its polls, about once a second. Both buttons post to one route under the
-settings page, guarded by the same `Origin` check as a save → [Portals](portals.md).
+looks for the cancel between its polls, about once a second. Both buttons post to one route, guarded
+by the same `Origin` check as a save → [Portals](portals.md).
 
 **Writing needs more than reading did**, so the page carries one guard the PR pages do not: a save is a
 `POST` and is refused unless the browser says the request came from this page itself. A form on another

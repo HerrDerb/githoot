@@ -461,7 +461,9 @@ while IFS=$'\t' read -r key repo number url updated title author; do
   log "  started $slug in $pane, on branch $own"
   acted=$((acted + 1))
 
-done < <(jq -r '.portals[] | select(.known) | .entries[] | [.key, .repo, .number, .url, (.updated_at // ""), (.title // ""), (.author // "")] | @tsv' <<<"$body")
+# Muted pull requests (muted from the PR page) are skipped and so fall out of the state file. That is
+# what makes an unmute count as new here too: the pull request comes back as one never seen.
+done < <(jq -r '.portals[] | select(.known) | .entries[] | select(.muted != true) | [.key, .repo, .number, .url, (.updated_at // ""), (.title // ""), (.author // "")] | @tsv' <<<"$body")
 finished=1
 
 

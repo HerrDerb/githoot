@@ -111,11 +111,12 @@ page, and each one stops something the others do not.
 
 Two more things about what leaves the page:
 
-- **`Referrer-Policy: no-referrer`** on the PR pages, plus the same in a `<meta>` and `rel="noreferrer"`
-  on every link. Without it the first click through to a pull request would hand GitHub this page's
-  URL, token and all, in the `Referer` header.
+- **`rel="noreferrer"` on every link out, and `Referrer-Policy: same-origin`** on every page. Without
+  them the first click through to a pull request would hand GitHub this page's URL, token and all, in
+  the `Referer` header. `same-origin` sends nothing to another site, and the `rel` covers the link
+  itself, so GitHub still sees nothing.
 
-  **The settings page uses `same-origin` instead, and must.** `no-referrer` does more than suppress
+  **Not `no-referrer`, which the PR pages used until they gained mute links.** `no-referrer` does more than suppress
   `Referer`: per the Fetch standard a non-`GET`/`HEAD` request under that policy has its `Origin`
   serialized as `null`, so the page could not tell us it had submitted its own form and every save was
   refused. `same-origin` still sends nothing to another site — the token is exactly as protected —
@@ -127,6 +128,33 @@ Two more things about what leaves the page:
 Only `GET`, `HEAD` and — on the settings route alone — `POST` are answered. There is no keep-alive, the
 request head is capped at 8 KiB and a form body at 64 KiB, and both have a five-second timeout, so a
 client that connects and says nothing cannot wedge the listener.
+
+## Muting a pull request
+
+**Every row offers "Mute for 3 days · 7 days · 30 days".** A muted pull request drops out of its bar:
+it does not light the icon, does not count on the menu entry or the page, and does not hoot. It is not
+hidden. It moves to a **Muted** section at the bottom of the same page, saying how long is left and
+offering **Unmute**.
+
+**Every muted pull request is on one page too**, `/<token>/muted`, the **Muted** tab on every one of
+GitHoot's own pages, and linked from the Muted heading of any bar. It is the only way to
+a muted pull request whose bar is otherwise empty, because an empty bar's menu entry is hidden. Pull
+requests no bar holds any more, merged or closed while muted, are listed by id so they can still be
+unmuted; their mute ends by itself otherwise.
+
+**It comes back as a new pull request.** When the mute ends, by the link or by time, the pull request
+arrives as if never seen: the bar lights and the owl hoots. A mute is a snooze, and a snooze that
+ended in silence would be a way to lose a review.
+
+**Mutes are kept on disk**, in `~/.githoot-tray/muted.txt`, one pull request per line, because a mute
+measured in days has to survive the restarts a self-update causes. Expired lines are dropped whenever
+the file is read or written. The links are forms, not links, so a mute is a `POST` behind the same
+`Origin` check as the settings page, and it accepts only the three offered durations and only a pull
+request that is on the page right now. The icon catches up within seconds, because a mute wakes the
+poll loop.
+
+The [local API](local-api.md) still serves muted pull requests, marked `"muted": true`, and the
+shipped dispatcher skips them.
 
 ## When it cannot start
 

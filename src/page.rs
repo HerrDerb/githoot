@@ -23,8 +23,50 @@ pub struct PortalsView<'a> {
     pub now_unix: u64,
     /// Names the copy button's script in the CSP. Empty means no script is emitted.
     pub nonce: &'a str,
-    /// The agent dispatcher section. `None` hides it: off Linux, and while `localApi` is off.
-    pub dispatcher: Option<DispatcherView<'a>>,
+}
+
+/// Which of GitHoot's own pages is showing. They share one line of links at the top.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Settings,
+    Accounts,
+    Muted,
+    Dispatcher,
+}
+
+/// The nav line, shared by the four pages so each can be single-purpose and still one click from
+/// the others.
+///
+/// **Why four pages and not one.** They used to share the settings page, and two of them fought the
+/// settings form: a sign-in's auto-refresh reloaded the page under a half-edited form, and the
+/// dispatcher's own buttons reloaded it too. Anything that reloads now lives on a page with no form
+/// of yours on it.
+#[derive(Clone, Copy, Debug)]
+pub struct Nav {
+    pub current: Tab,
+    /// How many pull requests are muted, shown on the tab when there are any.
+    pub muted: usize,
+    /// Whether the dispatcher tab exists: Linux, with `localApi` on.
+    pub dispatcher: bool,
+}
+
+fn nav(token: &str, n: &Nav) -> String {
+    let muted = if n.muted > 0 { format!("Muted ({})", n.muted) } else { "Muted".to_string() };
+    let mut tabs = vec![(Tab::Settings, "settings", "Settings".to_string()), (Tab::Accounts, "accounts", "Accounts".to_string()), (Tab::Muted, "muted", muted)];
+    if n.dispatcher {
+        tabs.push((Tab::Dispatcher, "dispatcher", "Dispatcher".to_string()));
+    }
+    let links: Vec<String> = tabs
+        .into_iter()
+        .map(|(tab, path, label)| {
+            if tab == n.current {
+                format!("<span class=\"on\" aria-current=\"page\">{}</span>", esc(&label))
+            } else {
+                format!("<a href=\"/{}/{path}\">{}</a>", esc(token), esc(&label))
+            }
+        })
+        .collect();
+    format!("<nav class=\"tabs\">{}</nav>\n", links.join(""))
 }
 
 /// How the shipped dispatcher stands, as plain data so this module needs no platform gate.
@@ -50,6 +92,23 @@ pub struct PromptRow {
     pub name: &'static str,
     pub text: String,
     pub is_default: bool,
+}
+
+/// What a PR page needs to offer mute links: where to post them, and which pull requests are muted
+/// right now and until when. `None` wherever a page is rendered without them (most tests), which
+/// renders exactly what the page rendered before mutes existed.
+#[derive(Clone, Copy)]
+pub struct Mutes<'a> {
+    pub token: &'a str,
+    pub axis: PrAxis,
+    pub now_unix: u64,
+    pub until: &'a dyn Fn(&str) -> Option<u64>,
+}
+
+impl Mutes<'_> {
+    fn of(&self, e: &PrEntry) -> Option<u64> {
+        (self.until)(e.key())
+    }
 }
 
 /// One portal's share of an axis page: who it is, and what it last confirmed.
@@ -246,6 +305,16 @@ button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6
 font:inherit;font-weight:600;cursor:pointer}\
 code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}\
 .actions{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-top:.6rem}\
+.tabs{display:flex;flex-wrap:wrap;gap:1.2rem;margin:.2rem 0 1.2rem;padding-bottom:.4rem;border-bottom:1px solid var(--line)}\
+.tabs a{color:var(--dim);text-decoration:none}\
+.tabs a:hover{color:var(--ink)}\
+.tabs .on{color:var(--ink);font-weight:600;box-shadow:0 .45rem 0 -.25rem var(--accent)}\
+.mute{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin-top:.5rem;font-size:.85rem;color:var(--dim)}\
+.mute form{display:inline;margin:0}\
+button.link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-weight:400;\
+text-decoration:underline;cursor:pointer}\
+button.link:hover{color:var(--ink)}\
+.muted-head{margin-top:1.6rem}\
 .actions form{margin:0}\
 .small{padding:.4rem 1rem;font-size:.9rem}\
 textarea{display:block;box-sizing:border-box;width:100%;min-height:14rem;margin:.3rem 0 1rem;\
@@ -299,9 +368,13 @@ const REFRESH_SCRIPT: &str = "(function(){var asof=document.getElementById('asof
 /// Separate from the age because the two change on different clocks: the count only when a poll
 /// publishes, the age every second. Keeping them apart is what lets the age tick locally while the
 /// server answers `304`.
-fn count_text(groups: &[PortalGroup]) -> String {
+fn count_text(groups: &[PortalGroup], mutes: Option<&Mutes>) -> String {
     // Only confirmed lists are counted, and a page with none confirmed says nothing rather than "0".
-    let confirmed: Vec<usize> = groups.iter().filter_map(|g| g.entries.map(<[PrEntry]>::len)).collect();
+    // Muted pull requests are listed but not counted, the same as on the icon.
+    let confirmed: Vec<usize> = groups
+        .iter()
+        .filter_map(|g| g.entries.map(|list| list.iter().filter(|e| mutes.and_then(|m| m.of(e)).is_none()).count()))
+        .collect();
     if confirmed.is_empty() {
         String::new()
     } else {
@@ -324,19 +397,19 @@ fn age_text(polled: Option<Duration>) -> String {
 /// placed, and each its own empty state, so "nothing here" is said per portal rather than once for
 /// all of them. No groups at all — nothing configured, or nothing published yet — is the "not
 /// known" state with nowhere to send anyone.
-fn items(groups: &[PortalGroup], now_unix: u64) -> String {
+fn items(groups: &[PortalGroup], now_unix: u64, mutes: Option<&Mutes>) -> String {
     match groups {
         [] => "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
                no answer it still stands behind for this bar.</p></div>\n"
             .to_string(),
-        [one] => group_items(one, now_unix),
+        [one] => group_items(one, now_unix, mutes),
         many => many
             .iter()
             .map(|g| {
                 format!(
                     "<h2 class=\"portal\">{}</h2>\n{}",
                     esc(&g.info.display_name),
-                    group_items(g, now_unix)
+                    group_items(g, now_unix, mutes)
                 )
             })
             .collect(),
@@ -344,7 +417,7 @@ fn items(groups: &[PortalGroup], now_unix: u64) -> String {
 }
 
 /// One portal's cards, or its empty state, with its own inbox as the way out.
-fn group_items(g: &PortalGroup, now_unix: u64) -> String {
+fn group_items(g: &PortalGroup, now_unix: u64, mutes: Option<&Mutes>) -> String {
     let inbox = || {
         portal_link(
             &g.info.link_prefix,
@@ -359,13 +432,57 @@ fn group_items(g: &PortalGroup, now_unix: u64) -> String {
              no answer it still stands behind for this bar.</p><p>{}</p></div>\n",
             inbox()
         ),
-        Some([]) => format!(
-            "<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n",
-            inbox()
-        ),
         Some(list) => {
-            newest_first(list).into_iter().map(|e| card(e, &g.info.link_prefix, now_unix)).collect()
+            let (held, active): (Vec<&PrEntry>, Vec<&PrEntry>) =
+                newest_first(list).into_iter().partition(|e| mutes.and_then(|m| m.of(e)).is_some());
+            let mut h = if active.is_empty() {
+                format!("<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n", inbox())
+            } else {
+                active.iter().map(|e| card(e, &g.info.link_prefix, now_unix, &mute_links(mutes, e))).collect()
+            };
+            // At the bottom and under a heading of its own: still on the page, so nothing is hidden,
+            // but out of the way of what actually needs you.
+            if !held.is_empty() {
+                h.push_str(&format!(
+                    "<h2 class=\"section muted-head\">Muted · <a href=\"/{}/muted\">all muted</a></h2>\n",
+                    esc(mutes.map_or("", |m| m.token))
+                ));
+                for e in held {
+                    h.push_str(&card(e, &g.info.link_prefix, now_unix, &mute_links(mutes, e)));
+                }
+            }
+            h
         }
+    }
+}
+
+/// "Mute for 3 days · 7 days · 30 days", or "Muted, back in 5 days · Unmute".
+///
+/// Forms styled as links, not links: a mute changes state, so it is a `POST` behind the same `Origin`
+/// check as every other write, and a `GET` that a prefetcher could follow must never mute anything.
+fn mute_links(mutes: Option<&Mutes>, e: &PrEntry) -> String {
+    let Some(m) = mutes else { return String::new() };
+    let form = |days: u64, label: &str| {
+        format!(
+            "<form method=\"post\" action=\"/{}/{}/mute\"><input type=\"hidden\" name=\"key\" value=\"{}\">\
+             <input type=\"hidden\" name=\"days\" value=\"{days}\"><button class=\"link\" type=\"submit\">{label}</button></form>",
+            esc(m.token),
+            m.axis.slug(),
+            esc(e.key()),
+        )
+    };
+    match m.of(e) {
+        None => format!(
+            "<div class=\"mute\">Mute for {} · {} · {}</div>",
+            form(3, "3 days"),
+            form(7, "7 days"),
+            form(30, "30 days")
+        ),
+        Some(until) => format!(
+            "<div class=\"mute\">Muted, back in {} · {}</div>",
+            esc(&crate::mute::remaining(until, m.now_unix)),
+            form(0, "Unmute")
+        ),
     }
 }
 
@@ -374,13 +491,13 @@ fn group_items(g: &PortalGroup, now_unix: u64) -> String {
 /// JSON rather than a bare HTML fragment precisely so the two can travel separately. `serde_json`
 /// does the escaping, which is what makes it safe to build by hand from strings that already contain
 /// markup.
-pub fn items_json(groups: &[PortalGroup], polled: Option<Duration>, now_unix: u64) -> String {
+pub fn items_json(groups: &[PortalGroup], polled: Option<Duration>, now_unix: u64, mutes: Option<&Mutes>) -> String {
     serde_json::json!({
         // How old the data was *at this instant*, not a rendered age. The page anchors its own clock
         // to it, so the line keeps counting between polls without asking again.
         "age": polled.map(|d| d.as_secs()),
-        "count": count_text(groups),
-        "items": items(groups, now_unix),
+        "count": count_text(groups, mutes),
+        "items": items(groups, now_unix, mutes),
     })
     .to_string()
 }
@@ -392,6 +509,7 @@ pub fn axis_page(
     token: &str,
     now_unix: u64,
     nonce: &str,
+    mutes: Option<&Mutes>,
 ) -> String {
     let mut h = String::with_capacity(4096);
     let title = heading(axis);
@@ -401,7 +519,10 @@ pub fn axis_page(
     h.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n");
     // Belt and braces with the `Referrer-Policy` header: without either, the first click through to
     // github.com hands GitHub this page's URL, token included.
-    h.push_str("<meta name=\"referrer\" content=\"no-referrer\">\n");
+    // `same-origin`, not `no-referrer`: under `no-referrer` a form POST carries `Origin: null` and the
+    // mute links would be refused by the CSRF check. Nothing reaches github.com either way, because
+    // `same-origin` sends nothing cross-origin and every outbound link carries `rel="noreferrer"`.
+    h.push_str("<meta name=\"referrer\" content=\"same-origin\">\n");
     h.push_str(&format!("<title>{} — GitHoot</title>\n", esc(title)));
     h.push_str(&format!("<link rel=\"icon\" href=\"/{}/owl.png\">\n", esc(token)));
     // The accent goes last: later wins, and this is the only definition of `--accent` there is.
@@ -416,11 +537,11 @@ pub fn axis_page(
 
     h.push_str(&format!(
         "<p class=\"sub\"><span id=\"count\">{}</span><span id=\"asof\">{}</span></p>\n",
-        esc(&count_text(groups)),
+        esc(&count_text(groups, mutes)),
         esc(&age_text(polled))
     ));
     h.push_str("<div class=\"rule\"></div>\n");
-    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(groups, now_unix)));
+    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(groups, now_unix, mutes)));
 
     // One link per portal, the first portal's first. With none there is nowhere to send anyone.
     let inboxes: Vec<String> = groups
@@ -493,26 +614,9 @@ fn newest_first(list: &[PrEntry]) -> Vec<&PrEntry> {
 /// banner exists because the poll thread may not have published "in progress" yet by the time the
 /// browser follows the redirect, and a page that still offered the button would invite a second
 /// click while the first device code dialog is on its way up.
-pub fn settings_page(
-    cfg: &crate::config::Config,
-    token: &str,
-    restarts: &[&str],
-    view: &PortalsView,
-) -> String {
-    let PortalsView { portals, signin_started, signed_out, now_unix, nonce, ref dispatcher } = *view;
-    // Reload every few seconds while a sign-in is in flight, or has just been asked for, so the
-    // code appears without a click and the card turns to "Signed in" on its own.
-    // A redirect marker means the poll thread was just asked for something and the page should
-    // catch up as soon as it plausibly has: one second. A running flow reloads at the slower pace.
-    let refresh = if signin_started.is_some() || signed_out.is_some() {
-        Some(CATCH_UP_REFRESH_SECS)
-    } else if portals.iter().any(|p| matches!(p.auth, AuthStatus::SigningIn(_))) {
-        Some(SIGN_IN_REFRESH_SECS)
-    } else {
-        None
-    };
-    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, refresh);
-
+pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str], tabs: &Nav) -> String {
+    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
+    h.push_str(&nav(token, tabs));
     if !restarts.is_empty() {
         h.push_str(&format!(
             "<div class=\"empty\"><strong>Saved.</strong> {} need{} a restart to take effect: {}.</div>\n",
@@ -521,35 +625,6 @@ pub fn settings_page(
             esc(&restarts.join(", "))
         ));
     }
-    if let Some(started) = signin_started.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
-        h.push_str(&format!(
-            "<div class=\"empty\"><strong>Sign-in to {} started.</strong> This page refreshes itself; \
-             what to do appears below in a moment.</div>\n",
-            esc(&started.info.display_name)
-        ));
-    }
-
-    if let Some(gone) = signed_out.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
-        h.push_str(&format!(
-            "<div class=\"empty\"><strong>Signed out of {}.</strong> The saved credential was \
-             deleted; sign in again whenever you like.</div>\n",
-            esc(&gone.info.display_name)
-        ));
-    }
-
-    // Its own forms, outside the settings form below: a form cannot nest, and a sign-in is an
-    // action rather than a setting to save.
-    h.push_str("<h2 class=\"section\">Portals</h2>\n");
-    let mut code_on_screen = false;
-    for portal in portals {
-        h.push_str(&portal_card(portal, token, now_unix));
-        code_on_screen |= matches!(portal.auth, AuthStatus::SigningIn(Some(_)));
-    }
-
-    if let Some(d) = dispatcher {
-        h.push_str(&dispatcher_card(d, token));
-    }
-
     h.push_str(&format!("<form method=\"post\" action=\"/{}/settings\">\n", esc(token)));
 
     h.push_str("<h2 class=\"section\">Pull request signals</h2><div class=\"card\">");
@@ -610,10 +685,73 @@ pub fn settings_page(
         "<footer>Written to <code>config.txt</code>, one line per changed setting — your comments \
          and any keys this version has never heard of are left alone.</footer>\n",
     );
+    h.push_str("</main>\n</body>\n</html>\n");
+    h
+}
+
+/// The portals and their sign-ins. Its own page because a sign-in reloads the page every few seconds
+/// until it lands, and on the settings page that reload threw away whatever you were editing.
+pub fn accounts_page(token: &str, view: &PortalsView, tabs: &Nav) -> String {
+    let PortalsView { portals, signin_started, signed_out, now_unix, nonce } = *view;
+    // Reload every few seconds while a sign-in is in flight, or has just been asked for, so the
+    // code appears without a click and the card turns to "Signed in" on its own.
+    // A redirect marker means the poll thread was just asked for something and the page should
+    // catch up as soon as it plausibly has: one second. A running flow reloads at the slower pace.
+    let refresh = if signin_started.is_some() || signed_out.is_some() {
+        Some(CATCH_UP_REFRESH_SECS)
+    } else if portals.iter().any(|p| matches!(p.auth, AuthStatus::SigningIn(_))) {
+        Some(SIGN_IN_REFRESH_SECS)
+    } else {
+        None
+    };
+    let mut h = shell("Accounts", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, refresh.map(|secs| (secs, "accounts")));
+    h.push_str(&nav(token, tabs));
+    if let Some(started) = signin_started.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
+        h.push_str(&format!(
+            "<div class=\"empty\"><strong>Sign-in to {} started.</strong> This page refreshes itself; \
+             what to do appears below in a moment.</div>\n",
+            esc(&started.info.display_name)
+        ));
+    }
+
+    if let Some(gone) = signed_out.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
+        h.push_str(&format!(
+            "<div class=\"empty\"><strong>Signed out of {}.</strong> The saved credential was \
+             deleted; sign in again whenever you like.</div>\n",
+            esc(&gone.info.display_name)
+        ));
+    }
+
+    // Its own forms, outside the settings form below: a form cannot nest, and a sign-in is an
+    // action rather than a setting to save.
+    h.push_str("<h2 class=\"section\">Portals</h2>\n");
+    let mut code_on_screen = false;
+    for portal in portals {
+        h.push_str(&portal_card(portal, token, now_unix));
+        code_on_screen |= matches!(portal.auth, AuthStatus::SigningIn(Some(_)));
+    }
+
     // The one script this page ever carries, and only while there is a code to copy. Named by
     // nonce like the PR page's refresh script, so the CSP stays `default-src 'none'` otherwise.
     if code_on_screen && !nonce.is_empty() {
         h.push_str(&format!("<script nonce=\"{}\">{COPY_SCRIPT}</script>\n", esc(nonce)));
+    }
+    h.push_str("</main>\n</body>\n</html>\n");
+    h
+}
+
+/// The shipped dispatcher and its prompts. `None` off Linux or while `localApi` is off, where the
+/// page says what it needs instead of offering a button that could only fail.
+pub fn dispatcher_page(token: &str, d: Option<&DispatcherView>, tabs: &Nav) -> String {
+    let mut h = shell("Dispatcher", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
+    h.push_str(&nav(token, tabs));
+    match d {
+        Some(d) => h.push_str(&dispatcher_card(d, token)),
+        None => h.push_str(&format!(
+            "<div class=\"empty\"><p>The dispatcher needs Linux and the local API. Turn on \
+             <strong>Serve the lists as JSON to local scripts</strong> in <a href=\"/{}/settings\">Settings</a> and restart.</p></div>\n",
+            esc(token)
+        )),
     }
     h.push_str("</main>\n</body>\n</html>\n");
     h
@@ -731,6 +869,60 @@ pub fn settings_unavailable(token: &str) -> String {
     h
 }
 
+/// One row of the muted page: a live mute, and the pull request it names if a bar still holds it.
+pub struct MutedRow<'a> {
+    pub key: &'a str,
+    pub until: u64,
+    /// The bar it was found in, the entry, and that portal's link prefix. `None` when no bar holds it
+    /// any more, typically because it was merged or closed while muted.
+    pub found: Option<(PrAxis, &'a PrEntry, &'a str)>,
+}
+
+/// Every muted pull request in one place, across all three bars, each with Unmute.
+///
+/// This exists because a muted pull request can otherwise be unreachable: an empty bar hides its
+/// menu entry, so a bar whose only pull request is muted has no page to unmute it from. Reached from
+/// the settings page, and from the muted section of any bar.
+pub fn muted_page(rows: &[MutedRow], token: &str, now_unix: u64, tabs: &Nav) -> String {
+    let mut h = shell("Muted pull requests", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
+    h.push_str(&nav(token, tabs));
+    h.push_str("<p class=\"sub\">A muted pull request stays out of its bar until the mute ends, then comes back as new.</p>\n");
+    if rows.is_empty() {
+        h.push_str("<div class=\"empty\"><p>Nothing is muted.</p></div>\n");
+    }
+    let unmute = |key: &str, until: u64| {
+        format!(
+            "<div class=\"mute\">Muted, back in {} · <form method=\"post\" action=\"/{}/muted\">\
+             <input type=\"hidden\" name=\"key\" value=\"{}\"><button class=\"link\" type=\"submit\">Unmute</button></form></div>",
+            esc(&crate::mute::remaining(until, now_unix)),
+            esc(token),
+            esc(key)
+        )
+    };
+    for axis in PrAxis::ALL {
+        let here: Vec<_> = rows.iter().filter(|r| r.found.is_some_and(|(a, _, _)| a == axis)).collect();
+        if here.is_empty() {
+            continue;
+        }
+        h.push_str(&format!("<h2 class=\"section\">{}</h2>\n", esc(heading(axis))));
+        for r in here {
+            let (_, e, prefix) = r.found.expect("filtered to found rows");
+            h.push_str(&card(e, prefix, now_unix, &unmute(r.key, r.until)));
+        }
+    }
+    let gone: Vec<_> = rows.iter().filter(|r| r.found.is_none()).collect();
+    if !gone.is_empty() {
+        h.push_str("<h2 class=\"section\">No longer in any bar</h2>\n");
+        h.push_str("<p class=\"sub\">Merged, closed, or simply not waiting on you right now. The mute ends by itself; \
+                    unmute it to have it count as new the next time it turns up.</p>\n");
+        for r in gone {
+            h.push_str(&format!("<div class=\"card\"><h2><code>{}</code></h2>{}</div>\n", esc(r.key), unmute(r.key, r.until)));
+        }
+    }
+    h.push_str("</main>\n</body>\n</html>\n");
+    h
+}
+
 /// The agent dispatcher: what is installed, whether it runs, and the one button that changes that.
 ///
 /// Its own form, outside the settings form, because a form cannot nest and because pressing it must
@@ -832,15 +1024,15 @@ fn checkbox(name: &str, label: &str, on: bool) -> String {
 /// Everything both kinds of page share: head, stylesheet, owl and heading.
 /// `refresh_secs` makes the page reload itself, the one way a page with no script can follow
 /// something changing on the poll thread. Used only while a sign-in is running.
-fn shell(title: &str, accent: String, token: &str, refresh_secs: Option<u32>) -> String {
+fn shell(title: &str, accent: String, token: &str, refresh: Option<(u32, &str)>) -> String {
     let mut h = String::with_capacity(4096);
     h.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
     h.push_str("<meta charset=\"utf-8\">\n");
-    if let Some(secs) = refresh_secs {
+    if let Some((secs, path)) = refresh {
         // To the plain address, so a `?signin=` marker from a redirect is carried exactly once and
         // the page does not reload forever on the strength of a click long finished.
         h.push_str(&format!(
-            "<meta http-equiv=\"refresh\" content=\"{secs};url=/{}/settings\">\n",
+            "<meta http-equiv=\"refresh\" content=\"{secs};url=/{}/{path}\">\n",
             esc(token)
         ));
     }
@@ -890,7 +1082,7 @@ fn portal_link(prefix: &str, url: &str, text: &str) -> String {
 }
 
 /// One pull request.
-fn card(e: &PrEntry, link_prefix: &str, now_unix: u64) -> String {
+fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str) -> String {
     let title = e.title.as_deref().unwrap_or("(untitled)");
     // A URL that is not the portal's own is shown but not offered as a link — see `safe_url`.
     let headline = match safe_url(&e.url, link_prefix) {
@@ -959,12 +1151,14 @@ fn card(e: &PrEntry, link_prefix: &str, now_unix: u64) -> String {
     }
     let who = if who.is_empty() { String::new() } else { format!("<ul class=\"who\">{who}</ul>") };
 
-    format!("<div class=\"card\"><h2>{headline}</h2><div class=\"meta\">{meta}</div>{who}</div>\n")
+    format!("<div class=\"card\"><h2>{headline}</h2><div class=\"meta\">{meta}</div>{who}{actions}</div>\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NAV: Nav = Nav { current: Tab::Settings, muted: 0, dispatcher: false };
 
     const NOW: u64 = 1_789_000_000;
 
@@ -1018,7 +1212,7 @@ mod tests {
     }
 
     fn page(entries: Option<&[PrEntry]>) -> String {
-        axis_page(PrAxis::ChangesRequested, &[group(entries)], Some(Duration::from_secs(47)), "deadbeef", NOW, "cafebabe")
+        axis_page(PrAxis::ChangesRequested, &[group(entries)], Some(Duration::from_secs(47)), "deadbeef", NOW, "cafebabe", None)
     }
 
     // ── Escaping: the security surface ────────────────────────────────────────
@@ -1292,7 +1486,7 @@ mod tests {
             (PrAxis::ReadyToMerge, icons::MERGE_DOT_COLOR),
             (PrAxis::ChangesRequested, icons::CHANGES_DOT_COLOR),
         ] {
-            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n");
+            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n", None);
             assert!(html.contains(&icons::css_hex(color)), "{axis:?} should wear its own colour");
         }
     }
@@ -1305,7 +1499,7 @@ mod tests {
     #[test]
     fn the_axis_accent_is_the_only_definition_and_comes_last() {
         assert!(!STYLESHEET.contains("--accent:"), "the sheet must not define the accent");
-        let html = axis_page(PrAxis::ReadyToMerge, &[group(Some(&[]))], None, "t", NOW, "n");
+        let html = axis_page(PrAxis::ReadyToMerge, &[group(Some(&[]))], None, "t", NOW, "n", None);
         let hex = icons::css_hex(icons::MERGE_DOT_COLOR);
         assert_eq!(html.matches("--accent:").count(), 1, "exactly one definition");
         let accent_at = html.find(&format!("--accent:{hex}")).expect("the axis colour");
@@ -1316,7 +1510,7 @@ mod tests {
     #[test]
     fn every_axis_renders_and_names_only_itself() {
         for axis in PrAxis::ALL {
-            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n");
+            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n", None);
             assert!(html.contains(heading(axis)), "{axis:?} should name itself");
             for other in PrAxis::ALL.into_iter().filter(|o| *o != axis) {
                 assert!(!html.contains(heading(other)), "{axis:?} must not name {other:?}");
@@ -1340,7 +1534,7 @@ mod tests {
     // ── Live refresh ──────────────────────────────────────────────────────────
 
     fn live(entries: Option<&[PrEntry]>) -> String {
-        items_json(&[group(entries)], Some(Duration::from_secs(47)), NOW)
+        items_json(&[group(entries)], Some(Duration::from_secs(47)), NOW, None)
     }
 
     /// The fragment must render the *same* cards the page does, or a refresh would quietly swap the
@@ -1383,7 +1577,7 @@ mod tests {
     /// A poll that never happened says so with a null rather than a zero age.
     #[test]
     fn an_unpolled_fragment_sends_a_null_age() {
-        let json = items_json(&[group(None)], None, NOW);
+        let json = items_json(&[group(None)], None, NOW, None);
         assert!(json.contains(r#""age":null"#), "got {json}");
     }
 
@@ -1399,13 +1593,13 @@ mod tests {
     /// The settings page has a form and no list, so it gets no refresh loop.
     #[test]
     fn the_settings_page_has_no_refresh_script() {
-        assert!(!settings_page(&default_cfg(), "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n", dispatcher: None }).contains("<script"));
+        assert!(!settings_page(&default_cfg(), "tok", &[], &NAV).contains("<script"));
     }
 
     // ── The settings page ─────────────────────────────────────────────────────
 
     fn settings(cfg: &crate::config::Config) -> String {
-        settings_page(cfg, "tok", &[], &PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n", dispatcher: None })
+        settings_page(cfg, "tok", &[], &NAV)
     }
 
     fn portal(auth: AuthStatus) -> PortalStatus {
@@ -1413,7 +1607,7 @@ mod tests {
     }
 
     fn view<'a>(portals: &'a [PortalStatus], signin: Option<&'a str>) -> PortalsView<'a> {
-        PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n", dispatcher: None }
+        PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n" }
     }
 
     // ── The dispatcher card ───────────────────────────────────────────────────
@@ -1434,13 +1628,13 @@ mod tests {
     /// mention a feature that cannot be used.
     #[test]
     fn the_dispatcher_card_is_absent_unless_a_view_is_given() {
-        assert!(!settings_page(&default_cfg(), "tok", &[], &view(&[], None)).contains("Agent dispatcher"));
+        assert!(!dispatcher_page("tok", None, &NAV).contains("Agent dispatcher"));
     }
 
     /// Nothing installed and every tool present: one Install button, no Uninstall.
     #[test]
     fn a_fresh_machine_is_offered_install_and_nothing_else() {
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(None, &[])), ..view(&[], None) });
+        let html = dispatcher_page("tok", Some(&dispatcher(None, &[])), &NAV);
         assert!(html.contains("Agent dispatcher") && html.contains("Not installed"));
         assert!(html.contains(r#"value="install""#) && html.contains(">Install<"));
         assert!(!html.contains(r#"value="uninstall""#));
@@ -1450,7 +1644,7 @@ mod tests {
     /// five seconds is worse than a card that says what to install first.
     #[test]
     fn a_missing_tool_withholds_the_button_and_names_itself() {
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(None, &["herdr", "jq"])), ..view(&[], None) });
+        let html = dispatcher_page("tok", Some(&dispatcher(None, &["herdr", "jq"])), &NAV);
         assert!(!html.contains(r#"value="install""#));
         assert!(html.contains("Cannot install"));
         assert!(html.contains("<code>herdr</code>") && html.contains("<code>jq</code>"));
@@ -1460,7 +1654,7 @@ mod tests {
     /// Installed and running with herdr gone must not read as healthy.
     #[test]
     fn an_install_missing_a_tool_says_it_is_not_dispatching() {
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(Some("2.3.0"), &["herdr"])), ..view(&[], None) });
+        let html = dispatcher_page("tok", Some(&dispatcher(Some("2.3.0"), &["herdr"])), &NAV);
         assert!(html.contains("but not dispatching: missing herdr"), "{html}");
         assert!(html.contains(r#"value="uninstall""#) && !html.contains(r#"value="install""#));
     }
@@ -1468,29 +1662,126 @@ mod tests {
     /// An older install gets Update, not Install, plus Uninstall, and says both versions.
     #[test]
     fn an_outdated_install_is_offered_update_and_uninstall() {
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(Some("2.2.0"), &[])), ..view(&[], None) });
+        let html = dispatcher_page("tok", Some(&dispatcher(Some("2.2.0"), &[])), &NAV);
         assert!(html.contains(">Update<") && html.contains(r#"value="uninstall""#));
         assert!(html.contains("2.2.0") && html.contains("2.3.0 available"));
     }
 
-    /// The card's forms post to their own route and stand before the settings form opens. A form
-    /// cannot nest, and pressing Install must never also submit half-edited settings.
+    /// The dispatcher's forms post to their own route, on a page with no settings form on it, so
+    /// pressing Install can never cost an unsaved settings edit.
     #[test]
-    fn the_dispatcher_forms_stand_outside_the_settings_form() {
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(dispatcher(Some("2.3.0"), &[])), ..view(&[], None) });
-        let card = html.find("Agent dispatcher").expect("card");
-        let form = html.find(r#"action="/tok/settings">"#).expect("settings form");
-        assert!(card < form, "the card must come before the settings form opens");
+    fn the_dispatcher_page_carries_no_settings_form() {
+        let html = dispatcher_page("tok", Some(&dispatcher(Some("2.3.0"), &[])), &NAV);
+        assert!(html.contains("Agent dispatcher"));
+        assert!(!html.contains(r#"action="/tok/settings">"#));
         assert!(html.contains(r#"action="/tok/settings/dispatcher""#));
+    }
+
+    // ── Mutes on the PR page ──────────────────────────────────────────────────
+
+    fn bar_page(until: &dyn Fn(&str) -> Option<u64>) -> String {
+        let a = PrEntry { id: Some("PR_a".into()), title: Some("Alpha".into()), ..entry("https://github.com/o/r/pull/1") };
+        let b = PrEntry { id: Some("PR_b".into()), title: Some("Bravo".into()), ..entry("https://github.com/o/r/pull/2") };
+        let m = Mutes { token: "tok", axis: PrAxis::ChangesRequested, now_unix: NOW, until };
+        let list = [a, b];
+        axis_page(PrAxis::ChangesRequested, &[group(Some(&list))], None, "tok", NOW, "n", Some(&m))
+    }
+
+    /// Every active row offers the three durations, as posts back to this axis.
+    #[test]
+    fn each_row_offers_three_mute_durations() {
+        let html = bar_page(&|_| None);
+        for days in [3, 7, 30] {
+            assert!(html.contains(&format!(r#"name="days" value="{days}"><button class="link" type="submit">{days} days</button>"#)), "{days}");
+        }
+        assert!(html.contains(r#"action="/tok/work-required/mute""#));
+        assert!(!html.contains("muted-head\">Muted"), "nothing muted, no section");
+    }
+
+    /// A muted pull request moves under "Muted" at the bottom, says how long is left, offers
+    /// Unmute, and drops out of the count.
+    #[test]
+    fn a_muted_row_sits_below_a_muted_heading_and_offers_unmute() {
+        let html = bar_page(&|k| (k == "PR_a").then_some(NOW + 5 * 86_400));
+        let head = html.find("muted-head\">Muted").expect("a muted section");
+        let alpha = html.find("Alpha").unwrap();
+        let bravo = html.find("Bravo").unwrap();
+        assert!(bravo < head && head < alpha, "active first, muted after the heading");
+        assert!(html.contains("Muted, back in 5 days"));
+        assert!(html.contains(r#"<a href="/tok/muted">all muted</a>"#), "a way to every muted PR");
+        assert!(html.contains(r#"value="0"><button class="link" type="submit">Unmute</button>"#));
+        assert!(html.contains("1 pull request(s)"), "the muted one is not counted");
+    }
+
+    /// Everything muted still says "Nothing here", with the muted section below it.
+    #[test]
+    fn a_bar_with_only_muted_prs_says_nothing_needs_you() {
+        let html = bar_page(&|_| Some(NOW + 3 * 86_400));
+        assert!(html.contains("Nothing here right now."));
+        assert!(html.find("Nothing here").unwrap() < html.find("muted-head\">Muted").unwrap());
+    }
+
+    /// The muted page reaches every muted pull request, grouped by bar, with Unmute posting to
+    /// itself; one no bar holds any more is still listed, by key, so it can be unmuted too.
+    #[test]
+    fn the_muted_page_lists_every_mute_with_unmute() {
+        let a = PrEntry { id: Some("PR_a".into()), title: Some("Alpha".into()), ..entry("https://github.com/o/r/pull/1") };
+        let rows = [
+            MutedRow { key: "PR_a", until: NOW + 3 * 86_400, found: Some((PrAxis::ChangesRequested, &a, "https://github.com/")) },
+            MutedRow { key: "PR_gone", until: NOW + 86_400, found: None },
+        ];
+        let html = muted_page(&rows, "tok", NOW, &NAV);
+        assert!(html.contains(&format!(">{}</h2>", heading(PrAxis::ChangesRequested))));
+        assert!(html.contains("Alpha") && html.contains("back in 3 days"));
+        assert!(html.contains("No longer in any bar") && html.contains("<code>PR_gone</code>"));
+        assert_eq!(html.matches(r#"action="/tok/muted""#).count(), 2, "one Unmute per row");
+        assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#));
+        assert!(!muted_page(&[], "tok", NOW, &NAV).contains("Unmute"));
+        assert!(muted_page(&[], "tok", NOW, &NAV).contains("Nothing is muted."));
+    }
+
+    /// Every one of GitHoot's own pages carries the same nav, so the muted page, the one route to a
+    /// muted pull request whose bar is empty, is one click from anywhere; the current tab is not a link.
+    #[test]
+    fn every_own_page_carries_the_nav_and_marks_where_you_are() {
+        let n = Nav { current: Tab::Settings, muted: 2, dispatcher: true };
+        let settings = settings_page(&default_cfg(), "tok", &[], &n);
+        assert!(settings.contains(r#"<span class="on" aria-current="page">Settings</span>"#));
+        for path in ["accounts", "muted", "dispatcher"] {
+            assert!(settings.contains(&format!(r#"href="/tok/{path}""#)), "{path}");
+        }
+        assert!(settings.contains(">Muted (2)<"));
+        assert!(!settings_page(&default_cfg(), "tok", &[], &NAV).contains("/tok/dispatcher"), "no dispatcher tab off Linux or with the API shut");
+        let a = accounts_page("tok", &view(&[], None), &Nav { current: Tab::Accounts, ..n });
+        assert!(a.contains(r#"aria-current="page">Accounts<"#) && a.contains(r#"href="/tok/settings""#));
+        assert!(muted_page(&[], "tok", NOW, &Nav { current: Tab::Muted, ..n }).contains(r#"aria-current="page">Muted (2)<"#));
+    }
+
+    /// The point of the split: nothing that reloads by itself shares a page with the settings form.
+    #[test]
+    fn the_settings_form_shares_its_page_with_nothing_that_reloads_it() {
+        let html = settings_page(&default_cfg(), "tok", &[], &NAV);
+        assert!(html.contains(r#"<form method="post" action="/tok/settings">"#));
+        assert!(!html.contains("http-equiv=\"refresh\""), "no auto-refresh on the page with your edits");
+        assert!(!html.contains("Portals") && !html.contains("Agent dispatcher") && !html.contains("settings/authenticate"));
+    }
+
+    /// The page posts its mute links back to itself, so it must not null its own `Origin`.
+    #[test]
+    fn the_pr_page_keeps_an_origin_for_its_mute_links() {
+        let html = bar_page(&|_| None);
+        assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#));
+        assert!(!html.contains("no-referrer\""), "the document policy must not be no-referrer");
+        assert!(html.contains(r#"rel="noreferrer""#), "outbound links still send nothing");
     }
 
     /// No dispatcher, no prompt boxes: nothing would read them.
     #[test]
     fn prompt_boxes_appear_only_once_the_dispatcher_is_installed() {
         let rows = [PromptRow { name: "approved", text: "x {url}".into(), is_default: true }];
-        let none = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(DispatcherView { prompts: &rows, ..dispatcher(None, &[]) }), ..view(&[], None) });
+        let none = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(None, &[]) }), &NAV);
         assert!(!none.contains("Dispatcher prompts"));
-        let some = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), ..view(&[], None) });
+        let some = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), &NAV);
         assert!(some.contains("Dispatcher prompts") && some.contains(r#"name="prompt_approved""#));
         assert!(some.contains("shipped default"));
     }
@@ -1500,13 +1791,13 @@ mod tests {
     #[test]
     fn prompt_text_is_escaped_inside_its_box() {
         let rows = [PromptRow { name: "update", text: "</textarea><script>1</script> & {url}".into(), is_default: false }];
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { dispatcher: Some(DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), ..view(&[], None) });
+        let html = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), &NAV);
         assert!(!html.contains("</textarea><script>"));
         assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
     }
 
     fn settings_with(portals: &[PortalStatus], signin: Option<&str>) -> String {
-        settings_page(&default_cfg(), "tok", &[], &view(portals, signin))
+        accounts_page("tok", &view(portals, signin), &NAV)
     }
 
     fn default_cfg() -> crate::config::Config {
@@ -1571,9 +1862,7 @@ mod tests {
         assert!(html.contains("Sign in to GitHub</button>"));
         assert!(html.contains("A code and a link"), "the device flow is explained before the click");
         assert!(!html.contains("http-equiv=\"refresh\""), "nothing running: the page sits still");
-        let sign_in_form = html.find("settings/authenticate").expect("the button's form");
-        let settings_form = html.find(r#"action="/tok/settings">"#).expect("the settings form");
-        assert!(sign_in_form < settings_form, "the sign-in form must not sit inside the settings form");
+        assert!(!html.contains(r#"action="/tok/settings">"#), "the settings form lives on its own page now");
     }
 
     /// Signed in offers Sign out, which posts to the same route with `signout` set. The page after
@@ -1587,9 +1876,9 @@ mod tests {
         assert!(!html.contains("http-equiv=\"refresh\""));
 
         let statuses = [portal(AuthStatus::NotSignedIn)];
-        let html = settings_page(&default_cfg(), "tok", &[], &PortalsView { signed_out: Some("github"), ..view(&statuses, None) });
+        let html = accounts_page("tok", &PortalsView { signed_out: Some("github"), ..view(&statuses, None) }, &NAV);
         assert!(html.contains("<strong>Signed out of GitHub.</strong>"), "got {html}");
-        assert!(html.contains(r#"<meta http-equiv="refresh" content="1;url=/tok/settings">"#), "one quick reload to catch up, to the plain address: {html}");
+        assert!(html.contains(r#"<meta http-equiv="refresh" content="1;url=/tok/accounts">"#), "one quick reload to catch up, to the plain address: {html}");
     }
 
     /// A dead end the portal declared: the reason is said and no button is offered, because a
@@ -1610,7 +1899,7 @@ mod tests {
         assert!(html.contains("Starting sign-in"), "got {html}");
         assert!(html.contains(r#"<input type="hidden" name="cancel" value="1"><button type="submit">Cancel</button>"#));
         assert!(!html.contains("Sign in to GitHub</button>"), "no second sign-in while one runs");
-        assert!(html.contains(r#"<meta http-equiv="refresh" content="3;url=/tok/settings">"#), "reloads to the plain address");
+        assert!(html.contains(r#"<meta http-equiv="refresh" content="3;url=/tok/accounts">"#), "reloads to the plain address");
 
         let prompt = SignInPrompt {
             code: "ABCD-1234".to_string(),
@@ -1672,14 +1961,14 @@ mod tests {
         assert!(!settings_with(&[portal(AuthStatus::SigningIn(None))], None).contains("<script"));
         let prompt = SignInPrompt { code: "X".to_string(), url: GITHUB.link_prefix.clone(), expires_at: NOW + 60 };
         let statuses = [portal(AuthStatus::SigningIn(Some(prompt)))];
-        let without_nonce = settings_page(&default_cfg(), "tok", &[], &PortalsView { nonce: "", ..view(&statuses, None) });
+        let without_nonce = accounts_page("tok", &PortalsView { nonce: "", ..view(&statuses, None) }, &NAV);
         assert!(!without_nonce.contains("<script"), "no nonce, no script: the CSP would block it anyway");
     }
 
     #[test]
     fn the_restart_banner_only_shows_after_a_save() {
         assert!(!settings(&default_cfg()).contains("Saved."));
-        let banner = settings_page(&default_cfg(), "tok", &["logLevel"], &view(&[], None));
+        let banner = settings_page(&default_cfg(), "tok", &["logLevel"], &NAV);
         assert!(banner.contains("Saved."));
         assert!(banner.contains("logLevel"));
     }
@@ -1732,21 +2021,21 @@ mod tests {
             crate::portal::types::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
         ];
         e.pending = vec![Reviewer::User("carol".into()), Reviewer::Team("platform".into())];
-        let json = items_json(&[group(Some(&[e]))], Some(Duration::from_secs(47)), NOW);
+        let json = items_json(&[group(Some(&[e]))], Some(Duration::from_secs(47)), NOW, None);
         assert_eq!(json, r#"{"age":47,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2><a href=\"https://github.com/qumea/care-api/pull/2204\" rel=\"noreferrer\">Fix the bed-exit debounce</a></h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill draft\">Draft</span><span class=\"pill checks-failure\">Merge conflict</span><span class=\"pill checks-pending\">2 unresolved Copilot comments</span><span class=\"pill checks-failure\">Checks failing</span></div><ul class=\"who\"><li><span class=\"dot dot-ok\"></span>alice approved</li><li><span class=\"dot dot-no\"></span>bob requested changes</li><li><span class=\"dot dot-wait\"></span>carol re-review pending</li><li><span class=\"dot dot-wait\"></span>team platform re-review pending</li></ul></div>\n"}"#);
     }
 
     #[test]
     fn golden_items_json_for_both_empty_states() {
-        assert_eq!(items_json(&[group(None)], None, NOW), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
-        assert_eq!(items_json(&[group(Some(&[]))], Some(Duration::from_secs(5)), NOW), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(&[group(None)], None, NOW, None), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(&[group(Some(&[]))], Some(Duration::from_secs(5)), NOW, None), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
     }
 
     #[test]
     fn golden_unsafe_url_is_text_not_link() {
         let mut e = entry("https://github.com.evil.com/x");
         e.title = Some("t".into());
-        let json = items_json(&[group(Some(&[e]))], None, NOW);
+        let json = items_json(&[group(Some(&[e]))], None, NOW, None);
         assert_eq!(json, r#"{"age":null,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2>t</h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill checks-success\">Checks passing</span></div></div>\n"}"#);
     }
 
@@ -1762,7 +2051,7 @@ mod tests {
             PortalGroup { info: &GITHUB, entries: Some(&[a]) },
             PortalGroup { info: &GITLAB, entries: Some(&[]) },
         ];
-        let html = axis_page(PrAxis::ReviewRequested, &groups, None, "tok", NOW, "n");
+        let html = axis_page(PrAxis::ReviewRequested, &groups, None, "tok", NOW, "n", None);
         assert!(html.contains("<h2 class=\"portal\">GitHub</h2>"), "got {html}");
         assert!(html.contains("<h2 class=\"portal\">GitLab</h2>"));
         assert!(html.contains("Open your pull requests on GitLab"), "GitLab's empty state names GitLab");
@@ -1780,9 +2069,9 @@ mod tests {
     fn the_groups_link_prefix_decides_what_becomes_a_link() {
         let mut mr = entry("https://gitlab.example/g/p/-/merge_requests/7");
         mr.title = Some("Widen the door".to_string());
-        let under_gitlab = items_json(&[PortalGroup { info: &GITLAB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW);
+        let under_gitlab = items_json(&[PortalGroup { info: &GITLAB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW, None);
         assert!(under_gitlab.contains("<a href=\\\"https://gitlab.example/g/p/-/merge_requests/7\\\""), "got {under_gitlab}");
-        let under_github = items_json(&[PortalGroup { info: &GITHUB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW);
+        let under_github = items_json(&[PortalGroup { info: &GITHUB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW, None);
         assert!(!under_github.contains("href=\\\"https://gitlab.example"), "got {under_github}");
         assert!(under_github.contains("Widen the door"), "shown as text, not hidden");
     }
@@ -1791,7 +2080,7 @@ mod tests {
     /// known" state with nowhere to send anyone, and it must not claim a count.
     #[test]
     fn no_groups_at_all_is_not_known_with_no_link() {
-        let json = items_json(&[], None, NOW);
+        let json = items_json(&[], None, NOW, None);
         assert!(json.contains("not known"), "got {json}");
         assert!(!json.contains("href"), "no portal, no inbox to offer");
         assert!(json.contains("\"count\":\"\""), "no confirmed list, no number");

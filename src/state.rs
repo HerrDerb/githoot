@@ -641,6 +641,10 @@ pub struct PollState {
     /// credential looks exactly like a dark dot because nothing needs attention, which is the one
     /// confusion this module exists to prevent.
     pr_off: [Option<String>; 3],
+    /// Each axis's muted pull requests from its last confirmed list, set aside before the list
+    /// reached the counter and the hoot ledger. Kept so the page can still show them, in a section
+    /// of their own. See `crate::mute`.
+    pr_muted: [Vec<PrEntry>; 3],
     /// PR status has no usable credential and needs the user to start a browser round trip.
     ///
     /// Deliberately separate from `pr_off`, even though both mean "no dots". `pr_off` is a dead end
@@ -692,6 +696,7 @@ impl PollState {
             pr: pr_enabled.map(|enabled| enabled.then(Track::new)),
             pr_enabled,
             pr_off: [None, None, None],
+            pr_muted: Default::default(),
             pr_needs_auth: false,
             // Starts clear: assuming an outage before asking would put an exclamation on the icon for
             // the first few seconds of every launch.
@@ -815,10 +820,46 @@ impl PollState {
 
     /// No-op when `axis` is unconfigured, so callers do not have to special-case it.
     pub fn apply_pr(&mut self, axis: PrAxis, response: PollResponse) {
+        let now = crate::mute::unix_now();
+        self.apply_pr_with(axis, response, &|key| crate::mute::until(key, now).is_some());
+    }
+
+    /// `apply_pr`, with the question "is this key muted" handed in, so tests need no mute file.
+    ///
+    /// A muted pull request is taken out of a fresh list **before** the track sees it: it then does
+    /// not count, does not light the bar, and cannot hoot, and every rule downstream stays exactly
+    /// as it was. It is also **dropped from the hoot ledger**, so the cycle its mute ends it reads as
+    /// a pull request never seen before and arrives as new. That is the point of a snooze.
+    ///
+    /// Only a list GitHoot can read entry by entry can be filtered. A payload hole (`prs: None`)
+    /// passes through untouched, muted pull requests included: the rare case errs towards showing.
+    pub(crate) fn apply_pr_with(&mut self, axis: PrAxis, mut response: PollResponse, muted: &dyn Fn(&str) -> bool) {
         self.learn_pacing(&response);
-        let Some(track) = self.pr[axis.index()].as_mut() else { return };
+        let i = axis.index();
+        let Some(track) = self.pr[i].as_mut() else { return };
+        if let PollResult::Fresh { present, count, prs: Some(list) } = &mut response.result {
+            let (held, active): (Vec<PrEntry>, Vec<PrEntry>) = std::mem::take(list).into_iter().partition(|e| muted(e.key()));
+            // Only a mute may change what the portal said. With nothing muted the answer passes
+            // through exactly as it came, so every existing rule and test sees the same thing.
+            if !held.is_empty() {
+                for e in &held {
+                    track.seen.remove(e.key());
+                }
+                // Subtracted, not recounted: the count is the portal's, and the list can be shorter
+                // than it (see `SEARCH_HITS_CAP`).
+                *count = count.map(|c| c.saturating_sub(held.len() as u32));
+                *present = count.map_or(!active.is_empty(), |c| c > 0);
+            }
+            *list = active;
+            self.pr_muted[i] = held;
+        }
         let forced = track.apply(&self.portal_name, response.result);
         self.record_forced(forced);
+    }
+
+    /// The muted pull requests set aside from `axis`'s last confirmed list. See `apply_pr_with`.
+    pub fn pr_muted(&self, axis: PrAxis) -> &[PrEntry] {
+        &self.pr_muted[axis.index()]
     }
 
     /// Which PR axes have just gone from a confirmed zero to a confirmed one or more, indexed by
@@ -2210,6 +2251,49 @@ mod tests {
         assert!(!hooted(&mut state));
         state.apply_pr(PrAxis::ReviewRequested, fresh_prs(&[pr_at("a", "2026-09-15T09:00:00Z")]));
         assert!(!hooted(&mut state), "same id, same updatedAt: the index blinked, nothing happened");
+    }
+
+    // ── Mutes ─────────────────────────────────────────────────────────────────
+
+    /// A muted pull request does not count, does not light the bar, and does not hoot, while the
+    /// others on the same axis carry on exactly as before. The page still gets it, set aside.
+    #[test]
+    fn a_muted_pr_neither_counts_nor_hoots() {
+        let mut state = ledger_state();
+        let axis = PrAxis::ChangesRequested;
+        let a = pr_at("a", "2026-09-15T09:00:00Z");
+        let b = pr_at("b", "2026-09-15T09:00:00Z");
+        state.apply_pr_with(axis, fresh_prs(&[a.clone(), b.clone()]), &|k| k == "a");
+        assert_eq!(state.confirmed_count(axis), Some(1), "only b counts");
+        assert_eq!(state.pr_entries(axis).map(|l| l.len()), Some(1));
+        assert_eq!(state.pr_muted(axis).len(), 1, "a is set aside, not lost");
+
+        // Everything muted: the bar goes dark, and the list is a confirmed empty one, not an
+        // unknown one, because GitHub still answered.
+        state.apply_pr_with(axis, fresh_prs(&[a, b]), &|_| true);
+        assert_eq!(state.confirmed_count(axis), None, "nothing left to count lights nothing");
+        assert_eq!(state.pr_entries(axis), Some(Vec::new()), "a confirmed empty list, not an unknown one");
+    }
+
+    /// **Unmuting counts as a new pull request**, whether by the link or by time: the muted key is
+    /// dropped from the ledger, so it arrives again and the owl hoots.
+    #[test]
+    fn an_unmuted_pr_arrives_as_new() {
+        let mut state = ledger_state();
+        let axis = PrAxis::ChangesRequested;
+        let a = pr_at("a", "2026-09-15T09:00:00Z");
+        state.apply_pr_with(axis, fresh_prs(std::slice::from_ref(&a)), &|_| false);
+        assert!(state.take_pr_arrivals()[axis.index()], "first sight hoots");
+
+        state.apply_pr_with(axis, fresh_prs(std::slice::from_ref(&a)), &|_| true);
+        assert!(!state.take_pr_arrivals()[axis.index()], "muting is silent");
+
+        // Same id, same updatedAt: without the forgetting, the ledger would call this a blink.
+        state.apply_pr_with(axis, fresh_prs(std::slice::from_ref(&a)), &|_| false);
+        assert!(state.take_pr_arrivals()[axis.index()], "the mute ended: it is new again");
+
+        state.apply_pr_with(axis, fresh_prs(&[a]), &|_| false);
+        assert!(!state.take_pr_arrivals()[axis.index()], "and then ordinary again");
     }
 
     /// **The reported bug: changes requested twice, one hoot.** PR 668 had changes requested and

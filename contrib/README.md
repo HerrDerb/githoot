@@ -12,8 +12,8 @@ Both through GitHoot's [local API](../docs/local-api.md), on your own `gh` crede
 
 ## Installing
 
-Tick **Serve the lists as JSON to local scripts** on the settings page, restart, and the
-**Agent dispatcher** section appears. It checks for `herdr`, `gh`, `jq`, `git` and `curl`, and
+Tick **Serve the lists as JSON to local scripts** on the settings page, restart, and a
+**Dispatcher** tab appears beside Settings, Accounts and Muted. It checks for `herdr`, `gh`, `jq`, `git` and `curl`, and
 for a signed-in `gh`, and refuses to install while anything is missing. No Herdr yet? [Install it first](https://herdr.dev/docs/install/); the card links there too. Then one button:
 
 | What it writes | Where |
@@ -46,6 +46,8 @@ Every five seconds, for each bar:
    re-read. Changed or new with nobody home: fetch the branch, create a worktree through Herdr
    **on a branch of the dispatcher's own, `ght/pr-<n>-<repo>`**, start an agent in it, hand it
    the prompt.
+   **Muted pull requests are skipped** (muted from the PR page); they drop out of the state file,
+   so when the mute ends the pull request is new to the dispatcher as well.
 4. Record that this version was looked at. Pull requests that left the bar are forgotten, so
    one that comes back is new again.
 
@@ -70,7 +72,7 @@ either**. The dispatcher never deletes work.
 
 ## Prompts
 
-Edit them on the settings page, under **Dispatcher prompts**, one box per bar plus the nudge an
+Edit them on the **Dispatcher** tab, under **Dispatcher prompts**, one box per bar plus the nudge an
 agent gets when its pull request changes. **Clear a box to go back to the shipped default.** The
 boxes write `~/.config/ght-dispatch/prompts/<bar>.txt`, so an editor works just as well.
 

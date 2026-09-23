@@ -78,6 +78,16 @@ pub enum Route {
     /// the page's own five-second refresh. Served only while `localApi` is on; off, it answers
     /// `NotFound`, because a door you may not open should be absent rather than refused.
     Entries(PrAxis),
+    /// A mute or unmute link on an axis page. `POST` only.
+    Mute(PrAxis),
+    /// Every muted pull request, across all bars.
+    Muted,
+    /// The portals and their sign-ins.
+    Accounts,
+    /// The shipped dispatcher and its prompts.
+    DispatcherPage,
+    /// The Unmute link on the muted page.
+    Unmute,
     /// The settings form.
     Settings,
     /// Applying a submitted settings form.
@@ -315,6 +325,8 @@ pub fn route_for(
             // Whether `localApi` is on is not `route_for`'s business: it is a pure function of the
             // request, and threading config through it would put a setting in the way of every
             // routing test. `handle` answers `NotFound` for this variant when the setting is off.
+            (Some(axis), "mute", Method::Post) => Route::Mute(axis),
+            (Some(_), "mute", _) => Route::MethodNotAllowed,
             (Some(_), "entries", Method::Post) => Route::MethodNotAllowed,
             (Some(axis), "entries", _) => Route::Entries(axis),
             _ => Route::NotFound,
@@ -324,6 +336,12 @@ pub fn route_for(
     match (leaf, method) {
         ("owl.png", Method::Post) => Route::MethodNotAllowed,
         ("owl.png", _) => Route::Owl,
+        ("muted", Method::Post) => Route::Unmute,
+        ("muted", _) => Route::Muted,
+        ("accounts", Method::Post) => Route::MethodNotAllowed,
+        ("accounts", _) => Route::Accounts,
+        ("dispatcher", Method::Post) => Route::MethodNotAllowed,
+        ("dispatcher", _) => Route::DispatcherPage,
         ("settings", Method::Post) => Route::SaveSettings,
         ("settings", _) => Route::Settings,
         // Everything else is a read, so a write to it is the wrong method rather than a miss — the
@@ -437,7 +455,6 @@ pub struct Head<'a> {
 }
 
 impl<'a> Head<'a> {
-    #[cfg(test)]
     pub fn same_origin() -> Self {
         Head { referrer: Referrer::SameOrigin, ..Head::default() }
     }
@@ -707,7 +724,30 @@ pub fn open_settings_page() -> bool {
     }
 }
 
-/// Whether the listener is up, so a sign-in knows the settings page can show its code. `false`
+/// Opens the accounts page, where a sign-in is started. `false` when there is no listener, so the
+/// caller can fall back to the old dialog.
+pub fn open_accounts_page() -> bool {
+    match SERVER.get_or_init(start).as_ref() {
+        Some(server) => {
+            open_url(format!("http://{PAGE_HOST}:{}/{}/accounts", server.port, server.token));
+            true
+        }
+        None => false,
+    }
+}
+
+/// The nav line's facts, read fresh per page: how many are muted, and whether the dispatcher tab
+/// exists at all (Linux, with `localApi` on).
+fn nav_for(current: page::Tab) -> page::Nav {
+    let local_api = SETTINGS.get().is_some() && crate::config::Config::load(&settings_path()).0.local_api;
+    page::Nav {
+        current,
+        muted: crate::mute::all(unix_now()).len(),
+        dispatcher: cfg!(target_os = "linux") && local_api,
+    }
+}
+
+/// Whether the listener is up, so a sign-in knows the accounts page can show its code. `false`
 /// before the first click as well as after a failed bind; both mean the page is not where the code
 /// should go.
 pub fn is_available() -> bool {
@@ -813,31 +853,32 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
 
     match route_for(&request.path, request.host.as_deref(), token, port, request.method) {
         Route::Settings => {
-            // A fresh nonce per response, as the PR page does; failing to get one drops the copy
-            // button's script rather than widening the policy.
-            let nonce = new_token().unwrap_or_default();
             let html = match SETTINGS.get() {
                 Some(_) => {
                     let (cfg, _) = crate::config::Config::load(&settings_path());
-                    let query = request.query.as_deref();
-                    page::settings_page(
-                        &cfg,
-                        token,
-                        &restart_names(query),
-                        &page::PortalsView {
-                            portals: &scheduler::portal_statuses(),
-                            signin_started: query_value(query, "signin").as_deref(),
-                            signed_out: query_value(query, "signout").as_deref(),
-                            now_unix: unix_now(),
-                            nonce: &nonce,
-                            dispatcher: dispatcher_view(&cfg, query).as_ref().map(|d| d.view()),
-                        },
-                    )
+                    page::settings_page(&cfg, token, &restart_names(request.query.as_deref()), &nav_for(page::Tab::Settings))
                 }
                 None => page::settings_unavailable(token),
             };
-            // `same-origin` for the form's `Origin`, plus the nonce for the copy button's script,
-            // which the page emits only while a device code is on screen.
+            // `same-origin`, so the form's `Origin` survives: see `Referrer`.
+            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
+        }
+        Route::Accounts => {
+            // A fresh nonce per response for the copy button's script, which the page emits only
+            // while a device code is on screen; failing to get one drops the script, never widens.
+            let nonce = new_token().unwrap_or_default();
+            let query = request.query.as_deref();
+            let html = page::accounts_page(
+                token,
+                &page::PortalsView {
+                    portals: &scheduler::portal_statuses(),
+                    signin_started: query_value(query, "signin").as_deref(),
+                    signed_out: query_value(query, "signout").as_deref(),
+                    now_unix: unix_now(),
+                    nonce: &nonce,
+                },
+                &nav_for(page::Tab::Accounts),
+            );
             respond_as(
                 &mut stream,
                 200,
@@ -851,8 +892,46 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 },
             )
         }
+        Route::DispatcherPage => {
+            // Only with settings installed. `Config::load` on an empty path writes a default
+            // `config.txt` into the current directory, which a test run did to the repo once.
+            let state = SETTINGS.get().and_then(|_| {
+                let (cfg, _) = crate::config::Config::load(&settings_path());
+                dispatcher_view(&cfg, request.query.as_deref())
+            });
+            let html = page::dispatcher_page(token, state.as_ref().map(|d| d.view()).as_ref(), &nav_for(page::Tab::Dispatcher));
+            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
+        }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
         Route::Authenticate => start_sign_in(&mut stream, &head, &request, token, port),
+        Route::Mute(axis) => mute_action(&mut stream, &head, &request, token, port, axis),
+        Route::Unmute => unmute_action(&mut stream, &head, &request, token, port),
+        Route::Muted => {
+            let now = unix_now();
+            let mutes = crate::mute::all(now);
+            let snapshots: Vec<_> = PrAxis::ALL.map(|a| (a, scheduler::pr_snapshot(a))).into_iter().collect();
+            let rows: Vec<page::MutedRow> = mutes
+                .iter()
+                .map(|(key, until)| page::MutedRow {
+                    key,
+                    until: *until,
+                    found: snapshots.iter().find_map(|(axis, snap)| {
+                        snap.groups.iter().find_map(|(info, list)| {
+                            list.as_ref()?.iter().find(|e| e.key() == key).map(|e| (*axis, e, info.link_prefix.as_str()))
+                        })
+                    }),
+                })
+                .collect();
+            let html = page::muted_page(&rows, token, now, &nav_for(page::Tab::Muted));
+            respond_as(
+                &mut stream,
+                200,
+                "text/html; charset=utf-8",
+                html.as_bytes(),
+                request.body_wanted,
+                Head { referrer: Referrer::SameOrigin, ..Head::default() },
+            )
+        }
         #[cfg(target_os = "linux")]
         Route::Dispatcher => dispatcher_action(&mut stream, &head, &request, token, port),
         Route::MethodNotAllowed => {
@@ -870,7 +949,10 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             if tag_matches(request.if_none_match.as_deref(), version) {
                 return send_not_modified(&mut stream, version);
             }
-            let json = page::items_json(&page::groups(&snapshot.groups), snapshot.polled_at, unix_now());
+            let now = unix_now();
+            let until = |key: &str| crate::mute::until(key, now);
+            let mutes = page::Mutes { token, axis, now_unix: now, until: &until };
+            let json = page::items_json(&page::groups(&snapshot.groups), snapshot.polled_at, now, Some(&mutes));
             respond_as(
                 &mut stream,
                 200,
@@ -910,21 +992,28 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             // in *this* response's CSP. Failing to get one drops the script rather than widening the
             // policy — the page still works, it just stops refreshing itself.
             let nonce = new_token().unwrap_or_default();
+            let now = unix_now();
+            let until = |key: &str| crate::mute::until(key, now);
+            let mutes = page::Mutes { token, axis, now_unix: now, until: &until };
             let html = page::axis_page(
                 axis,
                 &page::groups(&snapshot.groups),
                 snapshot.polled_at,
                 token,
-                unix_now(),
+                now,
                 &nonce,
+                Some(&mutes),
             );
+            // `same-origin`, because the page now posts its mute links back here and `no-referrer`
+            // would serialize their `Origin` as `null`. See the matching `<meta>` in `page::axis_page`.
+            let head = if nonce.is_empty() { Head::default() } else { Head::with_nonce(&nonce) };
             respond_as(
                 &mut stream,
                 200,
                 "text/html; charset=utf-8",
                 html.as_bytes(),
                 request.body_wanted,
-                if nonce.is_empty() { Head::default() } else { Head::with_nonce(&nonce) },
+                Head { referrer: Referrer::SameOrigin, ..head },
             )
         }
         Route::Forbidden => {
@@ -1196,10 +1285,10 @@ fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, toke
         _ => return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
     };
     match outcome {
-        Ok(what) => redirect(stream, &format!("/{token}/settings?dispatcher={what}")),
+        Ok(what) => redirect(stream, &format!("/{token}/dispatcher?dispatcher={what}")),
         Err(why) => {
             errorln!("dispatcher: {why}");
-            redirect(stream, &format!("/{token}/settings?dispatcher=failed&why={}", encode_query_value(&why)))
+            redirect(stream, &format!("/{token}/dispatcher?dispatcher=failed&why={}", encode_query_value(&why)))
         }
     }
 }
@@ -1215,6 +1304,84 @@ fn encode_query_value(s: &str) -> String {
         }
     }
     out
+}
+
+/// A mute or unmute link.
+///
+/// The same guards as every other write, and two of its own. `days` must be one the page offers, or
+/// `0` to unmute, so a hand-made post cannot mute for a year. And `key` must name a pull request
+/// that is on this axis's page right now, so the file only ever holds keys GitHoot itself showed:
+/// the form cannot be used to write arbitrary lines into it.
+///
+/// Wakes the poll loop, so the bar and the count change within seconds rather than at the next
+/// minute, then sends the browser back to the page it came from.
+fn mute_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16, axis: PrAxis) {
+    if !origin_is_ours(request.origin.as_deref(), port) {
+        return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
+    }
+    let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
+    let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
+        Ok(body) => body,
+        Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
+    };
+    let form = parse_form(&body);
+    let days = form.get("days").and_then(|d| d.parse::<u64>().ok());
+    let Some(days) = days.filter(|d| *d == 0 || crate::mute::DAYS.contains(d)) else {
+        return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown duration", true);
+    };
+    let Some(key) = form.get("key").map(|k| k.to_string()) else {
+        return respond(stream, 400, "text/plain; charset=utf-8", b"No pull request", true);
+    };
+    let on_page = scheduler::pr_snapshot(axis)
+        .groups
+        .iter()
+        .filter_map(|(_, list)| list.as_ref())
+        .flatten()
+        .any(|e| e.key() == key);
+    if !on_page {
+        return respond(stream, 404, "text/plain; charset=utf-8", b"Not on this page", true);
+    }
+    match crate::mute::set(&key, days, unix_now()) {
+        Ok(()) => {
+            infoln!("{} {} on {}", if days == 0 { "unmuted" } else { "muted" }, key, axis.slug());
+            if let Some(wake) = SETTINGS.get().and_then(|s| s.wake.lock().ok()) {
+                let _ = wake.send(scheduler::Wake::PollNow);
+            }
+        }
+        Err(why) => errorln!("mute: {why}"),
+    }
+    redirect(stream, &format!("/{token}/{}", axis.slug()))
+}
+
+/// The Unmute link on the muted page. Only a key that is muted right now can be named, so the form
+/// can remove a line from the file but never write one.
+fn unmute_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+    if !origin_is_ours(request.origin.as_deref(), port) {
+        return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
+    }
+    let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
+    let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
+        Ok(body) => body,
+        Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
+    };
+    let form = parse_form(&body);
+    let now = unix_now();
+    let Some(key) = form.get("key").map(|k| k.to_string()) else {
+        return respond(stream, 400, "text/plain; charset=utf-8", b"No pull request", true);
+    };
+    if !crate::mute::all(now).iter().any(|(k, _)| *k == key) {
+        return respond(stream, 404, "text/plain; charset=utf-8", b"Not muted", true);
+    }
+    match crate::mute::set(&key, 0, now) {
+        Ok(()) => {
+            infoln!("unmuted {key} from the muted page");
+            if let Some(wake) = SETTINGS.get().and_then(|s| s.wake.lock().ok()) {
+                let _ = wake.send(scheduler::Wake::PollNow);
+            }
+        }
+        Err(why) => errorln!("unmute: {why}"),
+    }
+    redirect(stream, &format!("/{token}/muted"))
 }
 
 fn start_sign_in(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
@@ -1251,19 +1418,19 @@ fn start_sign_in(stream: &mut TcpStream, head: &str, request: &Request, token: &
         if let Ok(wake) = settings.wake.lock() {
             let _ = wake.send(scheduler::Wake::SignOut(status.info.id.clone()));
         }
-        return redirect(stream, &format!("/{token}/settings?signout={}", status.info.id.0));
+        return redirect(stream, &format!("/{token}/accounts?signout={}", status.info.id.0));
     }
     if form.ticked("cancel") {
         if scheduler::cancel_sign_in(&status.info.id) {
             infoln!("settings page cancelled the {} sign-in", status.info.display_name);
         }
-        return redirect(stream, &format!("/{token}/settings"));
+        return redirect(stream, &format!("/{token}/accounts"));
     }
     infoln!("settings page asked to sign in to {}", status.info.display_name);
     if let Ok(wake) = settings.wake.lock() {
         let _ = wake.send(scheduler::Wake::Authenticate(Some(status.info.id.clone())));
     }
-    redirect(stream, &format!("/{token}/settings?signin={}", status.info.id.0));
+    redirect(stream, &format!("/{token}/accounts?signin={}", status.info.id.0));
 }
 
 /// One query parameter, percent-decoded. `None` when absent.
@@ -1433,6 +1600,88 @@ mod tests {
             let path = format!("/{TOKEN}/approved/{tail}");
             assert_eq!(route_get(&path, Some(&ok_host()), TOKEN, PORT), Route::NotFound, "tail {tail:?}");
         }
+    }
+
+    // ── The mute route ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_mute_route_is_post_only_and_token_gated() {
+        for axis in PrAxis::ALL {
+            let path = format!("/{TOKEN}/{}/mute", axis.slug());
+            assert_eq!(route_write(&path, Method::Post), Route::Mute(axis));
+            assert_eq!(route_write(&path, Method::Get), Route::MethodNotAllowed, "a GET must never mute");
+            assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
+        }
+    }
+
+    fn mute_post(origin: &str, body: &str) -> String {
+        round_trip(&format!(
+            "POST /{TOKEN}/work-required/mute HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: {origin}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ))
+    }
+
+    /// The guards in order, over a real socket: another site's form, a duration the page does not
+    /// offer, and a key that is not on the page. None of them can reach the mute file.
+    #[test]
+    fn a_mute_post_is_refused_unless_it_names_a_shown_pr_and_an_offered_duration() {
+        let ours = "http://githoot.localhost:{PORT}";
+        assert!(mute_post("https://evil.com", "key=PR_a&days=3").starts_with("HTTP/1.1 403 "));
+        assert!(mute_post(ours, "key=PR_a&days=365").starts_with("HTTP/1.1 400 "), "a year is not offered");
+        assert!(mute_post(ours, "days=3").starts_with("HTTP/1.1 400 "));
+        assert!(mute_post(ours, "key=PR_a&days=3").starts_with("HTTP/1.1 404 "), "no poll ran: nothing is on the page");
+    }
+
+    /// Accounts and Dispatcher are pages to read; their actions keep their own POST routes.
+    #[test]
+    fn the_accounts_and_dispatcher_pages_are_get_only() {
+        assert_eq!(route_write(&format!("/{TOKEN}/accounts"), Method::Get), Route::Accounts);
+        assert_eq!(route_write(&format!("/{TOKEN}/accounts"), Method::Post), Route::MethodNotAllowed);
+        assert_eq!(route_write(&format!("/{TOKEN}/dispatcher"), Method::Get), Route::DispatcherPage);
+        assert_eq!(route_write(&format!("/{TOKEN}/dispatcher"), Method::Post), Route::MethodNotAllowed);
+        assert_eq!(route_get(&format!("/{TOKEN}/accounts"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    }
+
+    #[test]
+    fn a_real_request_for_the_accounts_page_renders_it_with_its_nav() {
+        let r = round_trip(&format!("GET /{TOKEN}/accounts HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
+        assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page">Accounts<"#));
+        let d = round_trip(&format!("GET /{TOKEN}/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(d.starts_with("HTTP/1.1 200 OK\r\n") && d.contains("needs Linux and the local API"), "{d}");
+    }
+
+    #[test]
+    fn the_muted_page_routes_get_to_the_page_and_post_to_unmute() {
+        let path = format!("/{TOKEN}/muted");
+        assert_eq!(route_write(&path, Method::Get), Route::Muted);
+        assert_eq!(route_write(&path, Method::Post), Route::Unmute);
+        assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    }
+
+    /// Unmute can only remove a key that is muted; it can never add a line to the file.
+    #[test]
+    fn an_unmute_post_is_refused_for_another_origin_or_a_key_that_is_not_muted() {
+        let post = |origin: &str, body: &str| round_trip(&format!(
+            "POST /{TOKEN}/muted HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\nOrigin: {origin}\r\n\
+             Content-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(post("https://evil.com", "key=PR_a").starts_with("HTTP/1.1 403 "));
+        assert!(post("http://githoot.localhost:{PORT}", "key=PR_a").starts_with("HTTP/1.1 404 "));
+        assert!(post("http://githoot.localhost:{PORT}", "").starts_with("HTTP/1.1 400 "));
+    }
+
+    #[test]
+    fn a_real_request_for_the_muted_page_renders_it() {
+        let r = round_trip(&format!("GET /{TOKEN}/muted HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
+        assert!(r.contains("Nothing is muted.") && r.contains("Referrer-Policy: same-origin"));
+    }
+
+    #[test]
+    fn a_real_pr_page_answers_with_a_same_origin_policy() {
+        let response = round_trip(&format!("GET /{TOKEN}/approved HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(response.contains("Referrer-Policy: same-origin"), "{response}");
     }
 
     // ── The dispatcher install route ──────────────────────────────────────────
@@ -1750,7 +1999,7 @@ mod tests {
     /// header does.
     #[test]
     fn the_settings_document_declares_the_same_policy_as_its_response() {
-        let html = page::settings_page(&test_config(), "tok", &[], &page::PortalsView { portals: &[], signin_started: None, signed_out: None, now_unix: 0, nonce: "n", dispatcher: None });
+        let html = page::settings_page(&test_config(), "tok", &[], &page::Nav { current: page::Tab::Settings, muted: 0, dispatcher: false });
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#), "got {html}");
         assert!(!html.contains("no-referrer"));
     }
@@ -2127,7 +2376,7 @@ mod tests {
 
         let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         client
-            .write_all(format!("GET /{token}/settings HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+            .write_all(format!("GET /{token}/dispatcher HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
             .expect("write");
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read");

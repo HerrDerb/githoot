@@ -109,7 +109,9 @@ No `-H Host:` is needed: curl sends the literal it dialled, and that literal is 
           "bot_review": { "name": "Copilot", "unresolved": 3 },
           "checks": "failure",
           "verdicts": [ { "login": "bob", "state": "approved" } ],
-          "pending_reviewers": [ { "kind": "team", "name": "platform" } ]
+          "pending_reviewers": [ { "kind": "team", "name": "platform" } ],
+          "muted": false,
+          "muted_until_unix": null
         }
       ]
     }
@@ -125,6 +127,11 @@ can disagree.
 
 `pending_reviewers` tags `user` against `team` rather than flattening both to a name, because a team
 has no login and cannot be looked up as a person.
+
+**`muted` is `true` for a pull request you have muted from the PR page**, and `muted_until_unix` says
+until when. Muted pull requests are still listed, because hiding them would be the API deciding for
+you; they do not count on the icon, and anything acting on a bar should skip them, as the shipped
+dispatcher does → [the PR page](pr-page.md#muting-a-pull-request).
 
 ## The one rule that matters
 
@@ -207,7 +214,7 @@ learns about a change up to a minute after GitHub did, and no sooner than GitHoo
 
 Reading the bars is the general thing. Turning them into agents is one particular use of it, and
 GitHoot ships that too, as a separate, unsupported, Linux-only piece: `ght-dispatch`, installed with
-one button from the settings page once `localApi` is on. It keeps its own small state file, asks
+one button on the **Dispatcher** tab once `localApi` is on. It keeps its own small state file, asks
 Herdr who is already working what, and starts one agent per pull request with a prompt you own.
 
 Everything about it, including what the button writes and the one guard rail that actually holds,

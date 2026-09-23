@@ -24,6 +24,11 @@
 //! **`checks` is never `null`**, because `CheckRollup::Unknown` is a real answer covering three
 //! indistinguishable causes (see its doc comment). An absent field would let a client infer success.
 //!
+//! **`muted` says whether you have muted it** (from the PR page, for 3, 7 or 30 days), and
+//! `muted_until_unix` until when. Muted pull requests are still listed, because hiding them would be
+//! the API deciding for the caller; they do not count on the icon, and a consumer acting on the bar
+//! should skip them the way the shipped dispatcher does.
+//!
 //! **There is no `count` field.** The array length is the count, and a second representation of it
 //! is a second thing that can disagree.
 
@@ -41,6 +46,16 @@ const SCHEMA: u64 = 1;
 /// Takes the snapshot rather than `page::groups` so the machine contract does not travel through
 /// the page's view type and pick up its rendering concerns.
 pub fn entries_json(axis: PrAxis, snapshot: &AxisSnapshot, now_unix: u64) -> String {
+    entries_json_with(axis, snapshot, now_unix, &|key| crate::mute::until(key, now_unix))
+}
+
+/// `entries_json`, with "is this muted, and until when" handed in, so tests need no mute file.
+pub fn entries_json_with(
+    axis: PrAxis,
+    snapshot: &AxisSnapshot,
+    now_unix: u64,
+    muted: &dyn Fn(&str) -> Option<u64>,
+) -> String {
     json!({
         "schema": SCHEMA,
         "axis": axis.slug(),
@@ -55,24 +70,24 @@ pub fn entries_json(axis: PrAxis, snapshot: &AxisSnapshot, now_unix: u64) -> Str
         "portals": snapshot
             .groups
             .iter()
-            .map(|(info, entries)| portal_json(info, entries.as_deref()))
+            .map(|(info, entries)| portal_json(info, entries.as_deref(), muted))
             .collect::<Vec<_>>(),
     })
     .to_string()
 }
 
-fn portal_json(info: &PortalInfo, entries: Option<&[PrEntry]>) -> Value {
+fn portal_json(info: &PortalInfo, entries: Option<&[PrEntry]>, muted: &dyn Fn(&str) -> Option<u64>) -> Value {
     json!({
         "id": info.id.0,
         "display_name": info.display_name,
         "inbox_url": info.inbox_url,
         "known": entries.is_some(),
         // `None` becomes `null`, never `[]`. See the module doc.
-        "entries": entries.map(|list| list.iter().map(entry_json).collect::<Vec<_>>()),
+        "entries": entries.map(|list| list.iter().map(|e| entry_json(e, muted(e.key()))).collect::<Vec<_>>()),
     })
 }
 
-fn entry_json(e: &PrEntry) -> Value {
+fn entry_json(e: &PrEntry, muted_until: Option<u64>) -> Value {
     // Destructured, not field-accessed: a new field on `PrEntry` must not be able to go missing
     // from the machine contract without a compile error right here.
     let PrEntry {
@@ -108,6 +123,8 @@ fn entry_json(e: &PrEntry) -> Value {
         "checks": checks_str(*checks),
         "verdicts": verdicts.iter().map(verdict_json).collect::<Vec<_>>(),
         "pending_reviewers": pending.iter().map(reviewer_json).collect::<Vec<_>>(),
+        "muted": muted_until.is_some(),
+        "muted_until_unix": muted_until,
     })
 }
 
@@ -267,6 +284,23 @@ mod tests {
         assert_eq!(e["checks"], json!("failure"));
         assert_eq!(e["verdicts"], json!([{ "login": "bob", "state": "approved" }]));
         assert_eq!(e["pending_reviewers"], json!([{ "kind": "team", "name": "platform" }]));
+        assert_eq!(e["muted"], json!(false));
+        assert_eq!(e["muted_until_unix"], Value::Null);
+    }
+
+    /// A muted pull request is still listed, marked, with its end time; the rest are not.
+    #[test]
+    fn a_muted_entry_is_listed_and_marked_with_its_end() {
+        let a = PrEntry { id: Some("PR_a".into()), ..PrEntry::stub("https://github.com/o/r/pull/1") };
+        let b = PrEntry { id: Some("PR_b".into()), ..PrEntry::stub("https://github.com/o/r/pull/2") };
+        let snap = snapshot(vec![(info("github"), Some(vec![a, b]))]);
+        let out = entries_json_with(PrAxis::ChangesRequested, &snap, 0, &|k| (k == "PR_a").then_some(1_758_999_999));
+        let v = parse(&out);
+        let list = v["portals"][0]["entries"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "muted is not hidden");
+        assert_eq!(list[0]["muted"], json!(true));
+        assert_eq!(list[0]["muted_until_unix"], json!(1_758_999_999));
+        assert_eq!(list[1]["muted"], json!(false));
     }
 
     /// Every optional field is present as `null` rather than absent, so a caller never has to tell a
