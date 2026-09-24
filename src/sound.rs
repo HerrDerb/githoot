@@ -38,6 +38,10 @@ use crate::{errorln, infoln};
 ///
 /// The path is all the code knows, so swapping in a differently-licensed clip is a one-file change
 /// with no code edit — which is what anyone wanting to use this app commercially has to do.
+///
+/// The first second is silence, on purpose. A Bluetooth headset wakes its audio link only when a
+/// stream starts, and swallowed the start of the hoot while it did. The silence is what it swallows now.
+/// A replacement clip needs the same lead-in.
 const HOOT: &[u8] = include_bytes!("../assets/hoot.mp3");
 
 /// Name of the temp copy. Deliberately fixed rather than unique per process: a second instance of the
@@ -84,7 +88,7 @@ fn clip_path() -> Option<&'static PathBuf> {
         let path = std::env::temp_dir().join(HOOT_FILE);
         // Only write when what is there is not already this clip. Length is enough: the bytes are
         // fixed at compile time, so a differing length is the only way a stale file can differ in
-        // practice, and hashing 33KB on every launch to learn the same thing is not worth it.
+        // practice, and hashing 50KB on every launch to learn the same thing is not worth it.
         let current_len = std::fs::metadata(&path).ok().map(|m| m.len());
         if current_len != Some(HOOT.len() as u64) {
             if let Err(e) = std::fs::write(&path, HOOT) {
