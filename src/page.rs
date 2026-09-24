@@ -46,7 +46,7 @@ pub struct Nav {
     pub current: Tab,
     /// How many pull requests are muted, shown on the tab when there are any.
     pub muted: usize,
-    /// Whether the dispatcher tab exists: Linux, with `localApi` on.
+    /// Whether the dispatcher tab exists: Linux or Windows, with `localApi` on.
     pub dispatcher: bool,
 }
 
@@ -72,18 +72,21 @@ fn nav(token: &str, n: &Nav) -> String {
 /// How the shipped dispatcher stands, as plain data so this module needs no platform gate.
 #[derive(Clone, Copy)]
 pub struct DispatcherView<'a> {
-    /// The GitHoot version the installed script came from. `None` when nothing is installed.
-    pub installed: Option<&'a str>,
-    /// What this GitHoot would install.
-    pub shipped: &'a str,
-    pub outdated: bool,
-    pub running: bool,
-    /// Required tools not found. Non-empty hides the install button and says why.
+    /// Whether the `dispatcher` setting is on. There is nothing to install any more: the
+    /// dispatcher is a thread in this process, so the only question is whether it is switched on.
+    pub enabled: bool,
+    /// Required tools that would not run. Only ever asked when `enabled`, because spawning three
+    /// processes to draw a card for a feature nobody switched on is three too many.
     pub missing: &'a [&'a str],
     /// The outcome of the last button press, from the redirect's query.
     pub message: Option<&'a str>,
     /// The dispatcher's prompts, one per bar plus the nudge, as the edit boxes show them.
     pub prompts: &'a [PromptRow],
+    /// What the last Dry run said, in the order a pass produced it. Empty until one is asked for.
+    pub dry_run: &'a [String],
+    /// Where a pass would look for clones, and where it would put worktrees, already resolved.
+    pub clone_root: &'a str,
+    pub worktree_root: &'a str,
 }
 
 /// One editable prompt. `is_default` means no file of the user's exists yet.
@@ -317,6 +320,13 @@ button.link{background:none;border:0;padding:0;color:var(--dim);font:inherit;fon
 text-decoration:underline;cursor:pointer}\
 button.link:hover{color:var(--ink)}\
 .muted-head{margin-top:1.6rem}\
+.path{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:.5rem 0 0;font-size:.9rem}\
+.path span{color:var(--dim);flex:0 0 auto}\
+.path input{flex:1 1 16rem;min-width:0;font:inherit;padding:.35rem .5rem;border:1px solid var(--line);\
+border-radius:6px;background:var(--bg);color:inherit}\
+.dry{margin:.6rem 0 0;padding:.6rem .7rem;background:var(--bg);border:1px solid var(--line);\
+border-radius:8px;font:.82rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .actions form{margin:0}\
 .small{padding:.4rem 1rem;font-size:.9rem}\
 textarea{display:block;box-sizing:border-box;width:100%;min-height:14rem;margin:.3rem 0 1rem;\
@@ -650,6 +660,28 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
         "Serve the lists as JSON to local scripts (opens the local port at startup)",
         cfg.local_api,
     ));
+    // The one box that makes GitHoot act rather than show. The label says what it will *do*, not
+    // what it enables, because somebody finding an unexpected `ght/` branch tomorrow has to be
+    // able to trace it back to a line they deliberately ticked.
+    h.push_str(&checkbox(
+        "dispatcher",
+        "Start an agent for each pull request that needs one (creates branches and worktrees)",
+        cfg.dispatcher,
+    ));
+    // Two paths, and they have to be reachable from here rather than from an environment variable.
+    // GitHoot is started from a tray icon, a shortcut or autostart, none of which carry a shell's
+    // environment, so a knob only settable by launching the app a particular way is a knob most
+    // people cannot reach. The dispatcher then silently finds no clones, for everybody.
+    for (key, label, value, fallback) in [
+        ("dispatcherCloneRoot", "Clones live in", &cfg.clone_root, "~/projects"),
+        ("dispatcherWorktreeRoot", "Worktrees go in", &cfg.worktree_root, "~/worktrees"),
+    ] {
+        h.push_str(&format!(
+            "<label class=\"path\"><span>{label}</span>\
+             <input type=\"text\" name=\"{key}\" value=\"{}\" placeholder=\"{fallback}\" spellcheck=\"false\"></label>",
+            esc(value)
+        ));
+    }
     h.push_str("</div>\n");
 
     h.push_str("<h2 class=\"section\">Log detail</h2><div class=\"card\">");
@@ -742,7 +774,7 @@ pub fn accounts_page(token: &str, view: &PortalsView, tabs: &Nav) -> String {
     h
 }
 
-/// The shipped dispatcher and its prompts. `None` off Linux or while `localApi` is off, where the
+/// The shipped dispatcher and its prompts. `None` on macOS or while `localApi` is off, where the
 /// page says what it needs instead of offering a button that could only fail.
 pub fn dispatcher_page(token: &str, d: Option<&DispatcherView>, tabs: &Nav) -> String {
     let mut h = shell("Dispatcher", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
@@ -750,7 +782,7 @@ pub fn dispatcher_page(token: &str, d: Option<&DispatcherView>, tabs: &Nav) -> S
     match d {
         Some(d) => h.push_str(&dispatcher_card(d, token)),
         None => h.push_str(&format!(
-            "<div class=\"empty\"><p>The dispatcher needs Linux and the local API. Turn on \
+            "<div class=\"empty\"><p>The dispatcher needs Linux or Windows, and the local API. Turn on \
              <strong>Serve the lists as JSON to local scripts</strong> in <a href=\"/{}/settings\">Settings</a> and restart.</p></div>\n",
             esc(token)
         )),
@@ -925,63 +957,62 @@ pub fn muted_page(rows: &[MutedRow], token: &str, now_unix: u64, tabs: &Nav) -> 
     h
 }
 
-/// The agent dispatcher: what is installed, whether it runs, and the one button that changes that.
+/// The agent dispatcher: whether it is on, and what it would need to work.
 ///
-/// Its own form, outside the settings form, because a form cannot nest and because pressing it must
-/// never also save half-edited settings. The button is offered only when every required tool is
-/// present; otherwise the card names what is missing and offers nothing, since an installed
-/// dispatcher that fails every five seconds is worse than a card that says what to install first.
+/// There is no button here any more. The dispatcher is a thread in this process rather than a
+/// script somebody installs, so the only thing to say is whether the setting is on, and, when it
+/// is, whether the three tools it shells out to actually run. The prompts sit below and are always
+/// editable, because editing what an agent will be told before switching it on is the sane order.
 fn dispatcher_card(d: &DispatcherView, token: &str) -> String {
-    let status = match (d.installed, d.running) {
-        (None, _) => "Not installed".to_string(),
-        // Running but unable to do anything is not "running" in any sense that matters.
-        (Some(v), _) if !d.missing.is_empty() => format!(
-            "Installed from {}, but not dispatching: missing {}",
-            esc(v),
-            d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join(", ")
-        ),
-        (Some(v), true) if d.outdated => format!("Installed from {}, running. {} available.", esc(v), esc(d.shipped)),
-        (Some(v), false) if d.outdated => format!("Installed from {}, not running. {} available.", esc(v), esc(d.shipped)),
-        (Some(v), true) => format!("Installed from {}, running", esc(v)),
-        (Some(v), false) => format!("Installed from {}, not running", esc(v)),
-    };
-    let action = |what: &str, label: &str| {
-        format!(
-            "<form method=\"post\" action=\"/{}/settings/dispatcher\"><input type=\"hidden\" \
-             name=\"action\" value=\"{what}\"><button class=\"small\" type=\"submit\">{label}</button></form>",
-            esc(token)
-        )
-    };
-    let mut buttons = String::new();
-    if d.missing.is_empty() {
-        let label = match (d.installed, d.outdated) {
-            (None, _) => "Install",
-            (Some(_), true) => "Update",
-            (Some(_), false) => "Reinstall",
-        };
-        buttons.push_str(&action("install", label));
+    let status = if !d.enabled {
+        "Off".to_string()
+    } else if d.missing.is_empty() {
+        "On".to_string()
     } else {
-        buttons.push_str(&format!(
-            "<p class=\"sub\">Cannot install: missing <code>{}</code>. Put them on your PATH or in <code>~/.local/bin</code>.</p>",
+        // On but unable to do anything is not "on" in any sense that matters to the reader.
+        format!("On, but not dispatching: missing {}", d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join(", "))
+    };
+
+    let mut notes = String::new();
+    if d.enabled && !d.missing.is_empty() {
+        notes.push_str(&format!(
+            "<p class=\"sub\">Put <code>{}</code> on your PATH. Until then nothing is dispatched.</p>",
             d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
         ));
         // Herdr is the one a user is least likely to have, so it gets a way to fix it.
         if d.missing.contains(&"herdr") {
-            buttons.push_str("<p class=\"sub\"><a href=\"https://herdr.dev/docs/install/\">How to install Herdr</a></p>");
+            notes.push_str("<p class=\"sub\"><a href=\"https://herdr.dev/docs/install/\">How to install Herdr</a></p>");
         }
     }
-    if d.installed.is_some() {
-        buttons.push_str(&action("uninstall", "Uninstall"));
-    }
+
     let message = d.message.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
-    let prompts = if d.installed.is_some() { prompts_card(d, token) } else { String::new() };
+
+    // The switch and the rehearsal, side by side. Dry run is offered whether or not it is on, and
+    // that is the point: the only safe way to learn what switching it on would do is to ask first.
+    let button = |action: &str, label: &str| {
+        format!(
+            "<form method=\"post\" action=\"/{}/settings/dispatcher\">             <input type=\"hidden\" name=\"action\" value=\"{action}\">             <button class=\"small\" type=\"submit\">{label}</button></form>",
+            esc(token)
+        )
+    };
+    let dry = format!(
+        "<div class=\"actions\">{}{}</div>",
+        if d.enabled { button("off", "Turn off") } else { button("on", "Turn on") },
+        button("dryrun", "Dry run"),
+    );
+    let said = if d.dry_run.is_empty() {
+        String::new()
+    } else {
+        format!("<pre class=\"dry\">{}</pre>", d.dry_run.iter().map(|l| esc(l)).collect::<Vec<_>>().join("
+"))
+    };
     format!(
-        "<h2 class=\"section\">Agent dispatcher</h2>\n\
-         <div class=\"card\"><div class=\"row\"><strong>ght-dispatch</strong> · <span class=\"portal-status\">{status}</span></div>\
-         <p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request that needs you, \
-         through the local API. Linux only. Installs to <code>~/.local/bin</code> and enables a user service; \
-         writes an executable, so read <a href=\"https://github.com/HerrDerb/githoot-tray/blob/main/contrib/README.md\">what it does</a> first.</p>\
-         {message}<div class=\"actions\">{buttons}</div></div>\n{prompts}"
+        "<h2 class=\"section\">Agent dispatcher</h2>
+         <div class=\"card\"><div class=\"row\"><strong>Dispatcher</strong> · <span class=\"portal-status\">{status}</span></div>         <p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request that needs you,          on a branch of its own, under your own <code>gh</code>. It needs <code>herdr</code>, <code>gh</code> and          <code>git</code>. This is the only thing GitHoot does that is not reading, so          <a href=\"https://github.com/HerrDerb/githoot-tray/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code>.          Set <code>dispatcherCloneRoot</code> in <code>config.txt</code> if your clones are elsewhere.</p>         {notes}{message}{dry}{said}</div>
+{}",
+        esc(d.clone_root),
+        esc(d.worktree_root),
+        prompts_card(d, token)
     )
 }
 
@@ -1614,66 +1645,80 @@ mod tests {
 
     // ── The dispatcher card ───────────────────────────────────────────────────
 
-    fn dispatcher(installed: Option<&'static str>, missing: &'static [&'static str]) -> DispatcherView<'static> {
+    fn dispatcher(enabled: bool, missing: &'static [&'static str]) -> DispatcherView<'static> {
         DispatcherView {
-            installed,
-            shipped: "2.3.0",
-            outdated: installed.is_some_and(|v| v != "2.3.0"),
-            running: installed.is_some(),
+            enabled,
             missing,
             message: None,
             prompts: &[],
+            dry_run: &[],
+            clone_root: "/d/projects",
+            worktree_root: "/d/worktrees",
         }
     }
 
-    /// Hidden entirely unless asked for: off Linux, and while `localApi` is off, the page must not
-    /// mention a feature that cannot be used.
+    /// Hidden entirely unless asked for: on macOS the page must not mention a feature that does
+    /// not exist in that binary.
     #[test]
     fn the_dispatcher_card_is_absent_unless_a_view_is_given() {
         assert!(!dispatcher_page("tok", None, &NAV).contains("Agent dispatcher"));
     }
 
-    /// Nothing installed and every tool present: one Install button, no Uninstall.
+    /// Off is the default and must read as a plain "Off", offering the switch itself rather than
+    /// directions to another tab. A page that explains what a thing does is the right page to turn
+    /// it on from.
     #[test]
-    fn a_fresh_machine_is_offered_install_and_nothing_else() {
-        let html = dispatcher_page("tok", Some(&dispatcher(None, &[])), &NAV);
-        assert!(html.contains("Agent dispatcher") && html.contains("Not installed"));
-        assert!(html.contains(r#"value="install""#) && html.contains(">Install<"));
-        assert!(!html.contains(r#"value="uninstall""#));
+    fn a_dispatcher_that_is_off_offers_the_switch_on_the_spot() {
+        let html = dispatcher_page("tok", Some(&dispatcher(false, &[])), &NAV);
+        assert!(html.contains("Agent dispatcher"));
+        assert!(html.contains("portal-status\">Off<"), "{html}");
+        assert!(html.contains(r#"value="on""#) && html.contains(">Turn on<"), "the switch itself");
+        assert!(!html.contains(r#"value="off""#), "nothing to turn off while it is off");
+        assert!(html.contains(">Dry run<"), "and a way to rehearse before committing to it");
     }
 
-    /// A missing tool hides the button and names the tool. An installed dispatcher that fails every
-    /// five seconds is worse than a card that says what to install first.
+    /// On offers the way back out, and never both directions at once.
     #[test]
-    fn a_missing_tool_withholds_the_button_and_names_itself() {
-        let html = dispatcher_page("tok", Some(&dispatcher(None, &["herdr", "jq"])), &NAV);
-        assert!(!html.contains(r#"value="install""#));
-        assert!(html.contains("Cannot install"));
-        assert!(html.contains("<code>herdr</code>") && html.contains("<code>jq</code>"));
-        assert!(html.contains(r#"href="https://herdr.dev/docs/install/""#), "a missing herdr must link to its install guide");
+    fn a_dispatcher_that_is_on_offers_the_way_back_out() {
+        let html = dispatcher_page("tok", Some(&dispatcher(true, &[])), &NAV);
+        assert!(html.contains(r#"value="off""#) && html.contains(">Turn off<"));
+        assert!(!html.contains(r#"value="on""#), "one switch, not two");
     }
 
-    /// Installed and running with herdr gone must not read as healthy.
+    /// On with everything present is the healthy case and says nothing more than that.
     #[test]
-    fn an_install_missing_a_tool_says_it_is_not_dispatching() {
-        let html = dispatcher_page("tok", Some(&dispatcher(Some("2.3.0"), &["herdr"])), &NAV);
-        assert!(html.contains("but not dispatching: missing herdr"), "{html}");
-        assert!(html.contains(r#"value="uninstall""#) && !html.contains(r#"value="install""#));
+    fn a_dispatcher_that_is_on_and_able_says_only_on() {
+        let html = dispatcher_page("tok", Some(&dispatcher(true, &[])), &NAV);
+        assert!(html.contains("portal-status\">On<"), "{html}");
+        assert!(!html.contains("not dispatching"));
     }
 
-    /// An older install gets Update, not Install, plus Uninstall, and says both versions.
+    /// On with a tool gone must not read as healthy: it is switched on and doing nothing.
     #[test]
-    fn an_outdated_install_is_offered_update_and_uninstall() {
-        let html = dispatcher_page("tok", Some(&dispatcher(Some("2.2.0"), &[])), &NAV);
-        assert!(html.contains(">Update<") && html.contains(r#"value="uninstall""#));
-        assert!(html.contains("2.2.0") && html.contains("2.3.0 available"));
+    fn a_dispatcher_missing_a_tool_says_it_is_not_dispatching() {
+        let html = dispatcher_page("tok", Some(&dispatcher(true, &["herdr", "gh"])), &NAV);
+        assert!(html.contains("On, but not dispatching: missing herdr, gh"), "{html}");
+        assert!(html.contains("<code>herdr</code>") && html.contains("<code>gh</code>"));
+        assert!(
+            html.contains(r#"href="https://herdr.dev/docs/install/""#),
+            "a missing herdr must link to its install guide"
+        );
     }
 
-    /// The dispatcher's forms post to their own route, on a page with no settings form on it, so
-    /// pressing Install can never cost an unsaved settings edit.
+    /// The prompts are editable whether or not the dispatcher is on. Deciding what an agent will
+    /// be told *before* switching it on is the sane order, and there is no install step any more
+    /// that could have gated them.
+    #[test]
+    fn the_prompts_are_editable_even_while_it_is_off() {
+        let html = dispatcher_page("tok", Some(&dispatcher(false, &[])), &NAV);
+        assert!(html.contains(r#"action="/tok/settings/dispatcher""#));
+    }
+
+    /// The prompts form posts to its own route, on a page with no settings form on it, so saving
+    /// prompts can never cost an unsaved settings edit.
     #[test]
     fn the_dispatcher_page_carries_no_settings_form() {
-        let html = dispatcher_page("tok", Some(&dispatcher(Some("2.3.0"), &[])), &NAV);
+        let html = dispatcher_page("tok", Some(&dispatcher(true, &[])), &NAV);
         assert!(html.contains("Agent dispatcher"));
         assert!(!html.contains(r#"action="/tok/settings">"#));
         assert!(html.contains(r#"action="/tok/settings/dispatcher""#));
@@ -1781,7 +1826,7 @@ mod tests {
             assert!(settings.contains(&format!(r#"href="/tok/{path}""#)), "{path}");
         }
         assert!(settings.contains(">Muted (2)<"));
-        assert!(!settings_page(&default_cfg(), "tok", &[], &NAV).contains("/tok/dispatcher"), "no dispatcher tab off Linux or with the API shut");
+        assert!(!settings_page(&default_cfg(), "tok", &[], &NAV).contains("/tok/dispatcher"), "no dispatcher tab on macOS or with the API shut");
         let a = accounts_page("tok", &view(&[], None), &Nav { current: Tab::Accounts, ..n });
         assert!(a.contains(r#"aria-current="page">Accounts<"#) && a.contains(r#"href="/tok/settings""#));
         assert!(muted_page(&[], "tok", NOW, &Nav { current: Tab::Muted, ..n }).contains(r#"aria-current="page">Muted (2)<"#));
@@ -1805,15 +1850,18 @@ mod tests {
         assert!(html.contains(r#"rel="noreferrer""#), "outbound links still send nothing");
     }
 
-    /// No dispatcher, no prompt boxes: nothing would read them.
+    /// The boxes are there whether it is on or off. There is no install step to gate them on any
+    /// more, and reading what an agent would be told is the most useful thing the page offers
+    /// someone deciding whether to switch it on at all.
     #[test]
-    fn prompt_boxes_appear_only_once_the_dispatcher_is_installed() {
+    fn prompt_boxes_are_shown_whether_it_is_on_or_off() {
         let rows = [PromptRow { name: "approved", text: "x {url}".into(), is_default: true }];
-        let none = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(None, &[]) }), &NAV);
-        assert!(!none.contains("Dispatcher prompts"));
-        let some = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), &NAV);
-        assert!(some.contains("Dispatcher prompts") && some.contains(r#"name="prompt_approved""#));
-        assert!(some.contains("shipped default"));
+        for on in [false, true] {
+            let html = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(on, &[]) }), &NAV);
+            assert!(html.contains("Dispatcher prompts"), "on={on}");
+            assert!(html.contains(r#"name="prompt_approved""#), "on={on}");
+            assert!(html.contains("shipped default"), "on={on}");
+        }
     }
 
     /// Prompt text is user content going into an HTML attribute-free element: it must still be
@@ -1821,7 +1869,7 @@ mod tests {
     #[test]
     fn prompt_text_is_escaped_inside_its_box() {
         let rows = [PromptRow { name: "update", text: "</textarea><script>1</script> & {url}".into(), is_default: false }];
-        let html = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(Some("2.3.0"), &[]) }), &NAV);
+        let html = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(true, &[]) }), &NAV);
         assert!(!html.contains("</textarea><script>"));
         assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
     }

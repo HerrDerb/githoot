@@ -1,9 +1,14 @@
 # The dispatcher
 
-**Linux and [Herdr](https://herdr.dev) only, and unsupported in the sense that matters:** GitHoot
-ships it, installs it, and versions it, but it depends on tools GitHoot does not control. When
-Herdr's CLI changes, this breaks, and the fix is a GitHoot release. That is the trade for one
-click.
+**Linux and Windows, [Herdr](https://herdr.dev) only, and unsupported in the sense that matters:**
+GitHoot ships it, installs it, and versions it, but it depends on tools GitHoot does not control.
+When Herdr's CLI changes, this breaks, and the fix is a GitHoot release. That is the trade for one
+click. There is no macOS build, because nothing there has been tried.
+
+On Windows it is the **same bash script**, run by the bash that arrives with
+[Git for Windows](https://git-scm.com/download/win), and it lands in the same places: under Git
+Bash `$HOME` is your Windows profile directory, so `~/.local/bin` and `~/.config/ght-dispatch` mean
+what they say. Two things differ and the table below says which.
 
 It turns GitHoot's bars into agents. A pull request lands in **work required** and an agent in
 its own worktree reads the review comments and challenges them. Somebody **requests your
@@ -16,22 +21,35 @@ Tick **Serve the lists as JSON to local scripts** on the settings page, restart,
 **Dispatcher** tab appears beside Settings, Accounts and Muted. It checks for `herdr`, `gh`, `jq`, `git` and `curl`, and
 for a signed-in `gh`, and refuses to install while anything is missing. No Herdr yet? [Install it first](https://herdr.dev/docs/install/); the card links there too. Then one button:
 
-| What it writes | Where |
-|---|---|
-| `ght-dispatch` | `~/.local/bin/`, executable |
-| `ght-dispatch-loop` | `~/.local/bin/`, executable |
-| `ght-dispatch.service` | `~/.config/systemd/user/`, enabled and started |
+| What it writes | Where, on Linux | Where, on Windows |
+|---|---|---|
+| `ght-dispatch` | `~/.local/bin/`, executable | `~\.local\bin\` |
+| `ght-dispatch-loop` | `~/.local/bin/`, executable | `~\.local\bin\` |
+| what keeps it running | `ght-dispatch.service` in `~/.config/systemd/user/`, enabled and started | a **GitHoot dispatcher** task in Task Scheduler, registered from `~\.config\ght-dispatch\ght-dispatch.xml` and started |
+
+**How the two checks differ.** On Linux a systemd user service gets a `PATH` of its own, so
+preflight looks in exactly the directories the unit's `PATH=` line names and nowhere else: a
+`herdr` that only GitHoot can see would pass the check and then be invisible to the service. On
+Windows a task inherits your environment, so there is no second list to disagree with, and
+preflight asks a real `bash -l` instead. That also means Windows checks for `bash` first, and says
+only that when it is missing, because without a shell nothing else can be looked for.
+
+**The Windows task runs as you, when you are logged on**, not as a background service. That is
+deliberate rather than a shortcut: the other option puts it in a session where it cannot reach the
+Herdr you have open, which is the one thing it needs. The environment the unit sets with
+`Environment=` lines rides along in the task's command instead, and stays just as readable:
+`schtasks /Query /TN "GitHoot dispatcher" /XML` prints it back, the way `systemctl --user cat` does.
 
 The same button reads **Update** when GitHoot ships a newer script than the one installed, and
 there is an **Uninstall** beside it that stops the service and removes all three. Nothing else
 is touched: your prompts, state and cache survive an uninstall so a reinstall picks up where
 it left off.
 
-**The button writes an executable and enables a service from a page your browser can reach.**
-That is a bigger thing than any other setting does, and it is deliberate. What bounds it: the
-content is compiled into GitHoot and the page cannot choose it; the paths are fixed; the route
-answers `404` unless `localApi` is on; it demands the same same-origin `Origin` as saving
-settings; and it does not exist in the binary on any platform but Linux.
+**The button writes an executable and registers something that starts at login, from a page your
+browser can reach.** That is a bigger thing than any other setting does, and it is deliberate. What
+bounds it: the content is compiled into GitHoot and the page cannot choose it; the paths are fixed;
+the route answers `404` unless `localApi` is on; it demands the same same-origin `Origin` as saving
+settings; and it does not exist in the macOS binary at all.
 
 ## What it does, each tick
 
@@ -118,9 +136,28 @@ All environment, all optional, all read by `ght-dispatch`:
 Run `ght-dispatch work-required` by hand any time. It is a dry run and prints exactly what
 the service would do.
 
+**On Windows, check `GHT_CLONE_ROOT` before you turn the dry run off.** The default is
+`~/projects`, which under Git Bash is `C:\Users\you\projects`. If your clones live on another
+drive, say `D:\projects`, the dispatcher finds no clone and skips every pull request with a line
+saying so. Set `GHT_CLONE_ROOT=/d/projects` and `GHT_WORKTREE_ROOT=/d/worktrees`, in POSIX form,
+since the script is bash. It converts them to `D:\...` itself wherever Herdr needs that shape.
+
 ## Removing by hand
+
+Linux:
 
 ```bash
 systemctl --user disable --now ght-dispatch
 rm ~/.local/bin/ght-dispatch ~/.local/bin/ght-dispatch-loop ~/.config/systemd/user/ght-dispatch.service
 ```
+
+Windows, in Git Bash:
+
+```bash
+schtasks //End //TN "GitHoot dispatcher"
+schtasks //Delete //TN "GitHoot dispatcher" //F
+rm ~/.local/bin/ght-dispatch ~/.local/bin/ght-dispatch-loop ~/.config/ght-dispatch/ght-dispatch.xml
+```
+
+The doubled slashes are for Git Bash, which would otherwise read `/End` as a path and rewrite it.
+From `cmd` or PowerShell, use single ones.

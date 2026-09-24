@@ -111,7 +111,7 @@ losing the only way into the configuration because a socket would not bind is th
 | Settings | the settings form and its Save, and nothing else |
 | Accounts | one card per portal, and signing in and out |
 | Muted | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
-| Dispatcher | install, update and prompts for the shipped dispatcher. Only on Linux with `localApi` on → [the dispatcher](../contrib/README.md) |
+| Dispatcher | install, update and prompts for the shipped dispatcher. Linux and Windows, with `localApi` on → [the dispatcher](../contrib/README.md) |
 
 **They used to be one page, and that cost edits.** A running sign-in reloads its page every few seconds,
 and the dispatcher's buttons reload theirs; on a shared page either one threw away whatever you were

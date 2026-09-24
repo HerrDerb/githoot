@@ -94,9 +94,9 @@ pub enum Route {
     SaveSettings,
     /// Starting a portal's sign-in from the settings page.
     Authenticate,
-    /// Installing or removing the shipped dispatcher from the settings page. Linux only; on any
-    /// other platform the path is simply a miss, because the feature does not exist there.
-    #[cfg(target_os = "linux")]
+    /// Installing or removing the shipped dispatcher from the settings page. Linux and Windows;
+    /// on macOS the path is simply a miss, because the feature does not exist there.
+    #[cfg(not(target_os = "macos"))]
     Dispatcher,
     Owl,
     /// The path exists but not for this method.
@@ -312,7 +312,7 @@ pub fn route_for(
                 _ => Route::MethodNotAllowed,
             };
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "macos"))]
         if (leaf, tail) == ("settings", "dispatcher") {
             return match method {
                 Method::Post => Route::Dispatcher,
@@ -737,13 +737,16 @@ pub fn open_accounts_page() -> bool {
 }
 
 /// The nav line's facts, read fresh per page: how many are muted, and whether the dispatcher tab
-/// exists at all (Linux, with `localApi` on).
+/// exists at all.
+///
+/// The tab no longer depends on `localApi`. It did while the dispatcher was a separate process that
+/// read the bars back over HTTP; in process there is nothing to serve it, so the tab is simply a
+/// place to read the status and edit the prompts, on every platform that has a dispatcher.
 fn nav_for(current: page::Tab) -> page::Nav {
-    let local_api = SETTINGS.get().is_some() && crate::config::Config::load(&settings_path()).0.local_api;
     page::Nav {
         current,
         muted: crate::mute::all(unix_now()).len(),
-        dispatcher: cfg!(target_os = "linux") && local_api,
+        dispatcher: cfg!(not(target_os = "macos")),
     }
 }
 
@@ -932,7 +935,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 Head { referrer: Referrer::SameOrigin, ..Head::default() },
             )
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "macos"))]
         Route::Dispatcher => dispatcher_action(&mut stream, &head, &request, token, port),
         Route::MethodNotAllowed => {
             respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
@@ -1170,73 +1173,85 @@ fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &
 /// as long as the user takes costs nothing but a paused poll. The redirect back names the portal so
 /// the page can say the sign-in has started even before the poll thread has published "in progress".
 /// Everything the settings page needs to draw the dispatcher section, owned so the borrowed
-/// `page::DispatcherView` can point into it. `None` off Linux, and `None` while `localApi` is off,
+/// `page::DispatcherView` can point into it. `None` on macOS, and `None` while `localApi` is off,
 /// because a section offering to install a consumer of an API that is shut would be a promise
 /// with nothing behind it.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 struct DispatcherState {
-    status: crate::dispatcher::Status,
+    enabled: bool,
     missing: Vec<&'static str>,
     message: Option<String>,
     prompts: Vec<page::PromptRow>,
+    /// What the last Dry run said, or empty. Kept in the dispatcher rather than the query string
+    /// because a pass over three bars says far more than a URL can carry.
+    dry_run: Vec<String>,
+    /// Where a pass would look, resolved. On the card because "it found no clones" is not
+    /// diagnosable from a page that will not say where it looked.
+    roots: (String, String),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 impl DispatcherState {
     fn view(&self) -> page::DispatcherView<'_> {
         page::DispatcherView {
-            installed: self.status.installed.as_deref(),
-            shipped: self.status.shipped,
-            outdated: self.status.is_outdated(),
-            running: self.status.service_active,
+            enabled: self.enabled,
             missing: &self.missing,
             message: self.message.as_deref(),
             prompts: &self.prompts,
+            dry_run: &self.dry_run,
+            clone_root: &self.roots.0,
+            worktree_root: &self.roots.1,
         }
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn dispatcher_view(cfg: &crate::config::Config, query: Option<&str>) -> Option<DispatcherState> {
-    if !cfg.local_api {
-        return None;
-    }
-    let home = dirs::home_dir()?;
+    let home = settings_home()?;
     let message = match query_value(query, "dispatcher").as_deref() {
-        Some("installed") => Some(match query_value(query, "kept") {
-            Some(kept) => format!("Installed and running. Kept your edited prompts: {}.", kept.replace(',', ", ")),
-            None => "Installed and running. Prompts are current.".to_string(),
-        }),
-        Some("removed") => Some("Removed.".to_string()),
-        Some("prompts") => Some("Prompts saved. The next tick uses them.".to_string()),
+        Some("prompts") => Some("Prompts saved. The next pass uses them.".to_string()),
+        Some("dryrun") => Some("Dry run only. Nothing was started and nothing was recorded.".to_string()),
+        Some("on") => Some("On. The next pass starts agents for real.".to_string()),
+        Some("off") => Some("Off. Nothing further will be started.".to_string()),
         Some("failed") => Some(format!("Failed: {}", query_value(query, "why").unwrap_or_default())),
         _ => None,
     };
     Some(DispatcherState {
-        status: crate::dispatcher::status(&home),
-        missing: crate::dispatcher::preflight(&home).missing,
+        enabled: cfg.dispatcher,
+        // Only worth asking when it is meant to be running; three processes spawned to draw a card
+        // nobody switched on is three too many.
+        missing: if cfg.dispatcher { crate::dispatch::missing_tools() } else { Vec::new() },
         message,
-        prompts: crate::dispatcher::prompts(&home)
+        prompts: crate::prompts::prompts(&home)
             .into_iter()
             .map(|p| page::PromptRow { name: p.name, text: p.text, is_default: p.is_default })
             .collect(),
+        dry_run: crate::dispatch::last_dry_run(),
+        roots: crate::dispatch::roots(&home),
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+/// GitHoot's own directory, the one holding `config.txt`. The prompts live beside it now, so this
+/// no longer goes anywhere near a home directory of its own.
+#[cfg(not(target_os = "macos"))]
+fn settings_home() -> Option<std::path::PathBuf> {
+    SETTINGS.get().map(|s| s.app_asset_path.clone())
+}
+
+#[cfg(target_os = "macos")]
 fn dispatcher_view(_: &crate::config::Config, _: Option<&str>) -> Option<DispatcherState> {
     None
 }
 
-/// Off Linux there is no dispatcher, and so nothing to hold. Only exists so the page handler that
+/// On macOS there is no dispatcher, and so nothing to hold. Only exists so the page handler that
 /// asks for one compiles on every platform; `dispatcher_view` never builds it there.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 struct DispatcherState;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 impl DispatcherState {
     fn view(&self) -> page::DispatcherView<'_> {
-        unreachable!("no dispatcher state is ever built off Linux")
+        unreachable!("no dispatcher state is ever built on macOS")
     }
 }
 
@@ -1246,16 +1261,13 @@ impl DispatcherState {
 /// dispatcher is a consumer of that API and installing one against a shut door would only ever fail.
 /// The form names an action and nothing else; there is no field that could steer what gets written
 /// or where, which is the property `contrib/README.md` promises.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
     if !origin_is_ours(request.origin.as_deref(), port) {
         return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
     }
-    if !entries_enabled() {
-        return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", true);
-    }
-    let Some(home) = dirs::home_dir() else {
-        return respond(stream, 503, "text/plain; charset=utf-8", b"No home directory", true);
+    let Some(home) = settings_home() else {
+        return respond(stream, 503, "text/plain; charset=utf-8", b"No settings directory", true);
     };
     let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
     let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
@@ -1264,27 +1276,31 @@ fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, toke
     };
     let form = parse_form(&body);
     let outcome = match form.get("action").map(|a| a.as_ref()) {
-        Some("install") => {
-            infoln!("settings page asked to install the dispatcher");
-            crate::dispatcher::install(&home).map(|kept| {
-                if kept.is_empty() { "installed".to_string() } else { format!("installed&kept={}", kept.join(",")) }
-            })
+        // Runs a real pass with every effect suppressed, against the lists GitHoot already holds.
+        // It writes no state either, so pressing it can never change what the next real pass does.
+        Some("dryrun") => {
+            infoln!("settings page asked for a dispatcher dry run");
+            crate::dispatch::dry_run_now(&home);
+            Ok("dryrun".to_string())
         }
-        Some("uninstall") => {
-            infoln!("settings page asked to remove the dispatcher");
-            crate::dispatcher::uninstall(&home).map(|()| "removed".to_string())
+        // The switch. It writes one line of `config.txt`, the same one the Settings checkbox
+        // writes, and the dispatch thread picks it up on its next pass: no restart, and no second
+        // source of truth for whether the thing is on.
+        Some(verb @ ("on" | "off")) => {
+            infoln!("settings page turned the dispatcher {verb}");
+            crate::config::set_dispatcher(&home, verb == "on").map(|()| verb.to_string())
         }
         // Only the four known names are read off the form, by name; nothing the form invents can
-        // become a filename. See `dispatcher::save_prompts`.
+        // become a filename. See `prompts::save_prompts`.
         Some("prompts") => {
             infoln!("settings page saved the dispatcher prompts");
-            let given: Vec<(String, String)> = crate::dispatcher::DEFAULT_PROMPTS
+            let given: Vec<(String, String)> = crate::prompts::DEFAULT_PROMPTS
                 .iter()
                 .filter_map(|(name, _)| {
                     form.get(&format!("prompt_{name}")).map(|v| (name.to_string(), v.to_string()))
                 })
                 .collect();
-            crate::dispatcher::save_prompts(&home, &given)
+            crate::prompts::save_prompts(&home, &given)
                 .map(|()| "prompts".to_string())
                 .map_err(|e| format!("could not write the prompts: {e}"))
         }
@@ -1300,7 +1316,7 @@ fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, toke
 }
 
 /// Percent-encodes a value for a query string. Only what a redirect after an error needs.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn encode_query_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -1655,7 +1671,7 @@ mod tests {
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
         assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page">Accounts<"#));
         let d = round_trip(&format!("GET /{TOKEN}/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
-        assert!(d.starts_with("HTTP/1.1 200 OK\r\n") && d.contains("needs Linux and the local API"), "{d}");
+        assert!(d.starts_with("HTTP/1.1 200 OK\r\n") && d.contains("needs Linux or Windows, and the local API"), "{d}");
     }
 
     #[test]
@@ -1693,7 +1709,7 @@ mod tests {
     // ── The dispatcher install route ──────────────────────────────────────────
 
     /// A `GET` here must never install anything, and a wrong token must not learn the route exists.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_dispatcher_route_is_post_only_and_token_gated() {
         let path = format!("/{TOKEN}/settings/dispatcher");
@@ -1709,22 +1725,32 @@ mod tests {
     /// off, `404`, the same answer the entries route gives. Neither reaches `install`, which is the
     /// only thing that would touch the real home directory, and why the success path is not driven
     /// over a socket from a test.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_dispatcher_post_is_refused_before_it_can_write_anything() {
-        assert!(!entries_enabled(), "no ordinary test installs SETTINGS; the door must read as shut");
         let hostile = round_trip(&format!(
             "POST /{TOKEN}/settings/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
-             Origin: https://evil.com\r\nContent-Length: 14\r\n\r\naction=install"
+             Origin: https://evil.com\r\nContent-Length: 14\r\n\r\naction=prompts"
         ));
         assert!(hostile.starts_with("HTTP/1.1 403 "), "{hostile}");
 
-        let shut = round_trip(&format!(
+        // Our own `Origin`, but no settings directory installed, which is every ordinary test.
+        // `503` rather than writing to a path it had to guess at.
+        let homeless = round_trip(&format!(
             "POST /{TOKEN}/settings/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
-             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 14\r\n\r\naction=install"
+             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 14\r\n\r\naction=prompts"
         ));
-        assert!(shut.starts_with("HTTP/1.1 404 "), "{shut}");
+        assert!(homeless.starts_with("HTTP/1.1 503 "), "{homeless}");
+
+        // The install and uninstall actions are gone with the scripts they installed; the route
+        // answers for prompts and nothing else, so an invented action is a bad request.
+        assert!(!SETTINGS_DISPATCH_ACTIONS.contains(&"install"), "nothing here installs anything any more");
     }
+
+    /// Every action `dispatcher_action` will act on. One list, so the test above cannot go stale
+    /// by asserting about an action that was quietly added back.
+    #[cfg(not(target_os = "macos"))]
+    const SETTINGS_DISPATCH_ACTIONS: [&str; 4] = ["prompts", "dryrun", "on", "off"];
 
     /// The CSRF guard. A form on another site can make the browser send a cross-origin `POST` — the
     /// `Host` allowlist cannot see that, because the browser puts *our* host in it. `Origin` is what
@@ -2354,7 +2380,7 @@ mod tests {
     /// `#[ignore]`d for the same reason as the test above: it installs the process-wide `SETTINGS`.
     /// Tolerates running after that test by recreating whatever directory `SETTINGS` points at.
     /// Prints the card so `--nocapture` shows what a user would see.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
     fn the_dispatcher_card_renders_for_this_machine_over_a_real_connection() {

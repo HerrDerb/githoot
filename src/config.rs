@@ -36,6 +36,9 @@ const KEY_SOUND: &str = "sound";
 const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 const KEY_LOCAL_API: &str = "localApi";
+const KEY_DISPATCHER: &str = "dispatcher";
+const KEY_CLONE_ROOT: &str = "dispatcherCloneRoot";
+const KEY_WORKTREE_ROOT: &str = "dispatcherWorktreeRoot";
 
 /// Every component GitHub publishes on its status page, in the order the page lists them.
 ///
@@ -191,6 +194,22 @@ pub struct Config {
     /// `endpoint.json` so a script can find the ephemeral port and this run's token. Off, the route
     /// answers 404 and nothing is written, which is exactly how the app behaved before it existed.
     pub local_api: bool,
+    /// Whether GitHoot starts a Herdr agent for each pull request that needs one.
+    ///
+    /// **The only setting that makes GitHoot do something rather than show something.** On, a
+    /// thread creates branches and worktrees and launches agents under your own `gh`; off, GitHoot
+    /// reads GitHub and draws an icon, which is everything it did before this existed. Off by
+    /// default and left off by a typo, for the same reason `localApi` is.
+    pub dispatcher: bool,
+    /// Where your clones live, one directory per repository name. Empty means `~/projects`.
+    ///
+    /// A setting rather than an environment variable, and that is not a style choice: GitHoot is
+    /// started from a tray, a shortcut or autostart, none of which carry a shell's environment. A
+    /// knob you can only set by launching the app a particular way is a knob most people cannot
+    /// reach, and the dispatcher silently finds no clones for all of them.
+    pub clone_root: String,
+    /// Where the dispatcher's per-pull-request worktrees go. Empty means `~/worktrees`.
+    pub worktree_root: String,
 }
 
 /// Where the settings file lives.
@@ -250,7 +269,7 @@ pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
 /// Public because the settings page renders from it: one list, so a key cannot appear in the form
 /// without the page knowing whether to warn about it, and cannot be added to the file without
 /// appearing in the form.
-pub const WRITABLE_KEYS: [(&str, bool); 9] = [
+pub const WRITABLE_KEYS: [(&str, bool); 12] = [
     (KEY_REVIEW_REQUESTED, false),
     (KEY_READY_TO_MERGE, false),
     (KEY_CHANGES_REQUESTED, false),
@@ -261,6 +280,11 @@ pub const WRITABLE_KEYS: [(&str, bool); 9] = [
     (KEY_STATUS_COMPONENTS, false),
     // Not live: the listener binds once, at startup.
     (KEY_LOCAL_API, false),
+    // Not live: the thread starts once, at startup.
+    (KEY_DISPATCHER, false),
+    // Read fresh on every pass, so a corrected path takes effect without a restart.
+    (KEY_CLONE_ROOT, false),
+    (KEY_WORKTREE_ROOT, false),
 ];
 
 /// Every component GitHub publishes, for the settings page's checkboxes.
@@ -277,6 +301,9 @@ fn value_of(wanted: &Config, key: &str) -> String {
         KEY_CHANGES_REQUESTED => flag(wanted.pr_enabled[2]),
         KEY_COPILOT_REVIEWS => flag(wanted.copilot_reviews),
         KEY_LOCAL_API => flag(wanted.local_api),
+        KEY_DISPATCHER => flag(wanted.dispatcher),
+        KEY_CLONE_ROOT => wanted.clone_root.clone(),
+        KEY_WORKTREE_ROOT => wanted.worktree_root.clone(),
         KEY_SOUND => flag(wanted.sound),
         KEY_UPDATE_CHECK => flag(wanted.update_check),
         KEY_LOG_LEVEL => match wanted.log_level {
@@ -329,6 +356,13 @@ pub fn is_live(key: &str) -> bool {
 /// Writes the `copilotReviews` value, the same surgical single-line edit `set_sound` makes.
 pub fn set_copilot_reviews(app_asset_path: &Path, on: bool) -> Result<(), String> {
     set_flag(&config_path(app_asset_path), KEY_COPILOT_REVIEWS, on)
+}
+
+/// The Dispatcher tab's own switch, so the one page that explains what the dispatcher does is also
+/// the page that turns it on. It writes the same single line a tick of the Settings checkbox does,
+/// leaving every other byte of the file alone.
+pub fn set_dispatcher(app_asset_path: &Path, on: bool) -> Result<(), String> {
+    set_flag(&config_path(app_asset_path), KEY_DISPATCHER, on)
 }
 
 /// Reads the file, replaces one value, writes it back.
@@ -446,6 +480,15 @@ impl Config {
             sound: form.ticked(KEY_SOUND),
             copilot_reviews: form.ticked(KEY_COPILOT_REVIEWS),
             local_api: form.ticked(KEY_LOCAL_API),
+            dispatcher: form.ticked(KEY_DISPATCHER),
+            // Absent from the form entirely means "not shown to me", which is not the same as
+            // "cleared": the current value is kept. A box submitted empty is a deliberate clear,
+            // and clears back to the default.
+            clone_root: form.get(KEY_CLONE_ROOT).map(|v| v.trim().to_string()).unwrap_or_else(|| current.clone_root.clone()),
+            worktree_root: form
+                .get(KEY_WORKTREE_ROOT)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|| current.worktree_root.clone()),
             log_level: form
                 .get(KEY_LOG_LEVEL)
                 .and_then(|v| Level::parse(v))
@@ -490,6 +533,9 @@ impl Config {
             // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
             // *missing* key as on and open the door on every install that never asked.
             local_api: values.get(KEY_LOCAL_API).is_some_and(|v| is_on(v)),
+            dispatcher: values.get(KEY_DISPATCHER).is_some_and(|v| is_on(v)),
+            clone_root: values.get(KEY_CLONE_ROOT).map(|v| v.trim().to_string()).unwrap_or_default(),
+            worktree_root: values.get(KEY_WORKTREE_ROOT).map(|v| v.trim().to_string()).unwrap_or_default(),
         }
     }
 
@@ -605,7 +651,26 @@ fn default_config() -> String {
          # endpoint.json is written beside this file (owner-only) with that port and this run's\n\
          # token, so a script can find the address. Off, nothing is written and the route answers\n\
          # 404. Restart to apply.\n\
-         {KEY_LOCAL_API}=off\n"
+         {KEY_LOCAL_API}=off\n\
+         \n\
+         # Start a Herdr agent for each pull request that needs one.\n\
+         #\n\
+         # The only setting that makes GitHoot do something rather than show something: it creates\n\
+         # branches and worktrees and launches agents, under your own gh credential. Needs herdr,\n\
+         # gh and git on PATH. Off by default, and like the line above a typo leaves it off.\n\
+         # Read docs/dispatcher.md before turning it on. Restart to apply.\n\
+         {KEY_DISPATCHER}=off\n\
+         \n\
+         # Where the dispatcher looks for your clones, one directory per repository name. A pull\n\
+         # request in owner/thing needs a clone at <this>/thing. Empty means ~/projects.\n\
+         #\n\
+         # Set this if your clones are anywhere else. Without it the dispatcher finds nothing and\n\
+         # says so once per pull request in the log.\n\
+         {KEY_CLONE_ROOT}=\n\
+         \n\
+         # Where the dispatcher puts the worktree it makes for each pull request. Empty means\n\
+         # ~/worktrees. One directory per pull request, named ght/pr-<number>-<repo>.\n\
+         {KEY_WORKTREE_ROOT}=\n"
     )
 }
 
@@ -890,10 +955,14 @@ mod tests {
         // The one key whose written value is not its absent-key default: see
         // `the_template_is_explicit_where_an_absent_key_is_not`.
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
-        // The one key shipped off. Written explicitly anyway, so the file says the door exists.
+        // The two keys shipped off. Written explicitly anyway, so the file says the doors exist.
         assert_eq!(values.get(KEY_LOCAL_API), Some(&"off"));
+        assert_eq!(values.get(KEY_DISPATCHER), Some(&"off"));
+        // Written empty on purpose: the file names the knob and its default in one place.
+        assert_eq!(values.get(KEY_CLONE_ROOT), Some(&""));
+        assert_eq!(values.get(KEY_WORKTREE_ROOT), Some(&""));
         // And nothing else, so a key added to the template without being read is caught.
-        assert_eq!(values.len(), 9, "unexpected keys in the template: {values:?}");
+        assert_eq!(values.len(), 12, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -949,6 +1018,9 @@ mod tests {
             KEY_STATUS_COMPONENTS,
             KEY_COPILOT_REVIEWS,
             KEY_LOCAL_API,
+            KEY_DISPATCHER,
+            KEY_CLONE_ROOT,
+            KEY_WORKTREE_ROOT,
         ];
         let text = default_config();
         for key in parse(&text).keys() {
