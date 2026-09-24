@@ -153,8 +153,8 @@ the file is read or written. The links are forms, not links, so a mute is a `POS
 request that is on the page right now. The icon catches up within seconds, because a mute wakes the
 poll loop.
 
-The [local API](local-api.md) still serves muted pull requests, marked `"muted": true`, and the
-shipped dispatcher skips them.
+The [local API](local-api.md) still serves muted pull requests, marked `"muted": true`, and
+[the dispatcher](dispatcher.md) skips them.
 
 ## When it cannot start
 

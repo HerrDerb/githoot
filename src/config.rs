@@ -280,11 +280,12 @@ pub const WRITABLE_KEYS: [(&str, bool); 12] = [
     (KEY_STATUS_COMPONENTS, false),
     // Not live: the listener binds once, at startup.
     (KEY_LOCAL_API, false),
-    // Not live: the thread starts once, at startup.
-    (KEY_DISPATCHER, false),
-    // Read fresh on every pass, so a corrected path takes effect without a restart.
-    (KEY_CLONE_ROOT, false),
-    (KEY_WORKTREE_ROOT, false),
+    // Live, all three: the dispatch thread is always running and reads the setting and both paths
+    // fresh on every pass, so turning it on or correcting a root takes effect within one pass. The
+    // settings page must not claim a restart is needed when it is not.
+    (KEY_DISPATCHER, true),
+    (KEY_CLONE_ROOT, true),
+    (KEY_WORKTREE_ROOT, true),
 ];
 
 /// Every component GitHub publishes, for the settings page's checkboxes.
@@ -658,7 +659,7 @@ fn default_config() -> String {
          # The only setting that makes GitHoot do something rather than show something: it creates\n\
          # branches and worktrees and launches agents, under your own gh credential. Needs herdr,\n\
          # gh and git on PATH. Off by default, and like the line above a typo leaves it off.\n\
-         # Read docs/dispatcher.md before turning it on. Restart to apply.\n\
+         # Read docs/dispatcher.md before turning it on. Takes effect within one pass.\n\
          {KEY_DISPATCHER}=off\n\
          \n\
          # Where the dispatcher looks for your clones, one directory per repository name. A pull\n\
@@ -835,13 +836,17 @@ mod tests {
         assert_eq!(writable, generated);
     }
 
-    /// The two settings with a checkbox on the tray are the two that need no restart.
+    /// `live` means "takes effect without a restart", which is what the settings page tells the
+    /// user. It is not a synonym for "has a tray checkbox": the dispatcher has no tray entry and is
+    /// still live, because its thread re-reads the setting on every pass. Everything else here
+    /// binds at startup, and saying otherwise on the page would be a broken promise, not a typo.
     #[test]
-    fn only_the_menu_checkboxes_are_live() {
+    fn exactly_the_settings_that_need_no_restart_are_live() {
         let live: Vec<&str> =
             WRITABLE_KEYS.iter().filter(|(_, live)| *live).map(|(k, _)| *k).collect();
-        assert_eq!(live, [KEY_COPILOT_REVIEWS, KEY_SOUND]);
+        assert_eq!(live, [KEY_COPILOT_REVIEWS, KEY_SOUND, KEY_DISPATCHER, KEY_CLONE_ROOT, KEY_WORKTREE_ROOT]);
         assert!(is_live(KEY_SOUND) && !is_live(KEY_LOG_LEVEL));
+        assert!(!is_live(KEY_LOCAL_API), "the listener binds once, at startup");
     }
 
     // ── The live switch ───────────────────────────────────────────────────────

@@ -49,7 +49,6 @@ If the local listener cannot start at all, the entries open that inbox directly.
 |---|---|---|
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
 | ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
-| ☑ **Serve the lists as JSON to local scripts** | Opens the local port at startup and publishes its address, for your own tooling | `localApi` in `config.txt` |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
 | **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
@@ -104,6 +103,17 @@ need a restart — the hoot and the Copilot rule take effect at once, everything
 If the local listener cannot start, the entry falls back to opening `config.txt` in an editor, since
 losing the only way into the configuration because a socket would not bind is the worse failure.
 
+The form carries every key in the table below. Two of them are worth naming here, because they are
+the only settings that open something rather than change how a count is drawn:
+
+| Tick box | Does |
+|---|---|
+| ☑ **Serve the lists as JSON to local scripts** | Opens the local port at startup and publishes its address, for your own tooling → [the local API](local-api.md) |
+| ☑ **Start an agent for each pull request that needs one** | Turns the bars into Herdr agents. The one setting that makes GitHoot act rather than show → [the dispatcher](dispatcher.md) |
+
+Neither is on the tray menu. The tray carries only the three checkboxes above it, because those are
+the ones worth reaching without opening a page.
+
 **Four pages, one line of tabs:** *Settings · Accounts · Muted · Dispatcher*, on each of them.
 
 | Page | Holds |
@@ -111,7 +121,7 @@ losing the only way into the configuration because a socket would not bind is th
 | Settings | the settings form and its Save, and nothing else |
 | Accounts | one card per portal, and signing in and out |
 | Muted | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
-| Dispatcher | install, update and prompts for the shipped dispatcher. Linux and Windows, with `localApi` on → [the dispatcher](../contrib/README.md) |
+| Dispatcher | the switch, a dry run, and the prompts → [the dispatcher](dispatcher.md) |
 
 **They used to be one page, and that cost edits.** A running sign-in reloads its page every few seconds,
 and the dispatcher's buttons reload theirs; on a shared page either one threw away whatever you were
@@ -180,14 +190,18 @@ existed — the key is appended rather than the file regenerated.
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
-| `localApi` | `off` | Serve the judged lists as JSON to local scripts, and bind the local port at startup — see [The local API](local-api.md). The one key here that is off by default, and the one where a typo leaves it shut rather than open |
+| `localApi` | `off` | Serve the judged lists as JSON to local scripts, and bind the local port at startup — see [The local API](local-api.md). Off by default, and a typo leaves it shut rather than open |
+| `dispatcher` | `off` | Start a Herdr agent for each pull request that needs one — see [The dispatcher](dispatcher.md). The only key that makes GitHoot act rather than show, so like `localApi` a typo leaves it off |
+| `dispatcherCloneRoot` | `~/projects` | Where the dispatcher looks for your clones, one directory per repository name |
+| `dispatcherWorktreeRoot` | `~/worktrees` | Where the dispatcher puts the worktree it makes for each pull request |
 
 Keys starting with `portal.` are **reserved** for naming portals other than GitHub, and are not read
 yet; the rule they will follow is written down in [Portals](portals.md#configuration).
 
 Only `off`, `false`, `0` or `no` switch something off; anything else leaves the default, so a typo cannot
-silently disable a feature. Two keys are not toggles: `logLevel` takes `error` or `info`, falling back to
-`error`; `statusComponents` takes a comma-separated list.
+silently disable a feature. Four keys are not toggles: `logLevel` takes `error` or `info`, falling back to
+`error`; `statusComponents` takes a comma-separated list; the two `dispatcher*Root` keys take a path, and
+empty means the default.
 
 **Two things are deliberately not keys here:** whether GitHoot starts when you sign in, and whether its
 icon sits on the Windows taskbar or in the overflow flyout. Both are stored by the operating system

@@ -210,13 +210,13 @@ lists owns its own bookkeeping, where it can be inspected and reset. A test asse
 **Not a push.** The poll floor is 60 seconds (→ [Troubleshooting](troubleshooting.md)), so a reader
 learns about a change up to a minute after GitHub did, and no sooner than GitHoot itself.
 
-## The dispatcher, if you want one
+## The dispatcher does not use this
 
 Reading the bars is the general thing. Turning them into agents is one particular use of it, and
-GitHoot ships that too, as a separate, unsupported, Linux-only piece: `ght-dispatch`, installed with
-one button on the **Dispatcher** tab once `localApi` is on. It keeps its own small state file, asks
-Herdr who is already working what, and starts one agent per pull request with a prompt you own.
+GitHoot does that too, in [the dispatcher](dispatcher.md) — but **in process**, reading the same
+snapshot the icon and the pages read. It does not go through this API and does not need `localApi`
+on.
 
-Everything about it, including what the button writes and the one guard rail that actually holds,
-is in [`contrib/README.md`](../contrib/README.md). It is documented there rather than here on
-purpose: this page is the contract, and the dispatcher is one caller of it.
+It used to. Until 2.4.0 the dispatcher was a separate script that read the bars back over HTTP,
+which is most of why this API exists. That reader is gone; this page is still the contract for
+yours.
