@@ -299,6 +299,8 @@ footer{margin-top:2rem;color:var(--dim);font-size:.78rem;text-align:center}\
 footer a,.empty a{color:var(--dim)}\
 .section{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
 margin:1.5rem 0 .5rem;font-weight:600}\
+.section a{font-weight:400;color:var(--dim);text-decoration:underline;text-underline-offset:.25em}\
+.section a:hover{color:var(--ink)}\
 .row{display:flex;align-items:center;gap:.6rem;padding:.35rem 0;cursor:pointer}\
 .row input{width:1rem;height:1rem;accent-color:var(--accent);flex:none}\
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
@@ -1711,6 +1713,34 @@ mod tests {
         assert!(html.contains(r#"<a href="/tok/muted">all muted</a>"#), "a way to every muted PR");
         assert!(html.contains(r#"value="0"><button class="link" type="submit">Unmute</button>"#));
         assert!(html.contains("1 pull request(s)"), "the muted one is not counted");
+    }
+
+    /// Every link a page renders is caught by a rule that names its container: `.card a`,
+    /// `footer a`, `.empty a`, `.tabs a`. A link in a `.section` heading was caught by none of
+    /// them, so "all muted" took the browser's own `#0000EE`, underlined and purple once visited,
+    /// glued to dim grey uppercase text. Against the dark sheet's `--bg` that is about 1.3:1,
+    /// which is not a link so much as a rumour of one.
+    ///
+    /// The sheet styles by container and never by bare element, and that is not taste: a bare
+    /// `h2` rule is what put every PR title in capitals from 2.0.0 to 2.0.3, which
+    /// `only_settings_section_headings_are_uppercased` now pins. A bare `a` rule would not
+    /// actually reach a card title — `.card a` outranks it — but it would silently decide the
+    /// look of every link added after it, which is the same trap one specificity notch further
+    /// along. So links stay opt-in by container, and this pins that too.
+    #[test]
+    fn the_muted_heading_link_is_coloured_by_the_sheet_not_the_browser() {
+        let html = bar_page(&|k| (k == "PR_a").then_some(NOW + 5 * 86_400));
+        assert!(html.contains(r#"<a href="/tok/muted">all muted</a>"#), "the link this is about");
+
+        // A selector "colours a link" when it names an anchor and sets a colour on it.
+        let colours = |wanted: &str| {
+            STYLESHEET.split('}').any(|rule| {
+                let (selector, body) = rule.split_once('{').unwrap_or(("", ""));
+                selector.split(',').any(|s| s.trim() == wanted) && body.contains("color:")
+            })
+        };
+        assert!(!colours("a"), "link colour is opt-in by container, never by bare element");
+        assert!(colours(".section a"), "so the heading link needs a rule of its own");
     }
 
     /// Everything muted still says "Nothing here", with the muted section below it.
