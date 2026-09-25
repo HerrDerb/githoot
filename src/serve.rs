@@ -1206,7 +1206,20 @@ fn integration_page(integration: &'static dyn crate::integration::Integration, h
         missing: &missing,
         flash: flash.as_deref(),
         dry_run: &dry_run,
-        settings: info.settings.iter().map(|s| (s.key, s.label, ctx.setting(s.key).to_string(), s.placeholder)).collect(),
+        settings: info
+            .settings
+            .iter()
+            .map(|s| page::SettingRow {
+                key: s.key,
+                label: s.label,
+                value: ctx.setting(s.key).to_string(),
+                placeholder: match s.kind {
+                    crate::integration::Kind::Text { placeholder } => placeholder,
+                    crate::integration::Kind::Flag { .. } => "",
+                },
+                flag: matches!(s.kind, crate::integration::Kind::Flag { .. }).then(|| ctx.flag(s)),
+            })
+            .collect(),
         body: integration.page(&ctx, token),
     };
     page::integration_page(token, &view, &nav_for(page::Tab::Integrations))
@@ -1253,14 +1266,11 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
             crate::integration::dry_run_now(&home, integration);
             Ok("Dry run only. Nothing was done and nothing was recorded.".to_string())
         }
-        // Only the keys the integration declared are read off the form, by name. A box submitted
-        // empty is a deliberate clear, back to that setting's default.
-        "settings" => integration
-            .info()
-            .settings
-            .iter()
-            .filter_map(|s| form.get(s.key).map(|v| (s.key, v)))
-            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, value))
+        // Only the keys the integration declared are read off the form, by name. An unticked box is
+        // off; a text box submitted empty is a deliberate clear, back to that setting's default.
+        "settings" => crate::integration::form_values(integration.info(), &form)
+            .into_iter()
+            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, &value))
             .map(|()| "Settings saved. The next pass uses them.".to_string()),
         other => {
             let cfg = crate::config::Config::load(&home).0;

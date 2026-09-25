@@ -9,7 +9,8 @@ It is the first [integration](integrations.md): built into GitHoot, off until yo
 
 ## What it does, each pass
 
-After every poll, and at least every thirty seconds, for each bar GitHoot is watching:
+After every poll, and at least every thirty seconds, for each bar GitHoot is watching and the
+dispatcher is switched on for (all but **approved**, by default; see [Settings](#settings)):
 
 1. Take the bar from GitHoot's own poll. **A bar GitHoot has no confirmed answer for is skipped
    entirely.** That is not the same as an empty bar: acting on it would mean going quiet for
@@ -63,8 +64,29 @@ a real pass does not bother to say, which is the whole point of pressing it.
 | Key | Default | Meaning |
 |---|---|---|
 | `integration.herdr.enabled` | `off` | Installed or not. What Install and Remove write. An unrecognised value leaves it off |
+| `integration.herdr.workRequired` | `on` | Start agents for the amber bar: your pull requests that need work |
+| `integration.herdr.requestedReviews` | `on` | Start agents for the red bar: reviews requested of you |
+| `integration.herdr.approved` | `off` | Start agents for the green bar: your approved pull requests |
 | `integration.herdr.cloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
 | `integration.herdr.worktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
+
+The three bar switches are checkboxes on its page. **Approved is off by default**: an approved pull
+request is usually one you are about to merge yourself, and an agent started for it mostly spends
+tokens on work that is done. A bar switched off is skipped before anything is asked of `gh`.
+
+### Switching on is "from now on"
+
+Installing it, or switching a bar on, **starts nothing for what is already waiting.** The first pass
+takes every pull request in the bar as seen, as of that moment, with everything said on it so far as
+read, and says so in the log:
+
+> `[work-required] switched on: 7 pull request(s) taken as seen, none started`
+
+From then on the normal rules apply: a pull request that enters the bar is new, and a comment from
+someone else on one that was already there wakes an agent like any other. Switching a bar off, and
+Remove, forget that baseline, so switching back on is "from now on" again. A bar GitHoot has no
+confirmed answer for yet, such as before the first poll, waits: a baseline of nothing would make the
+backlog look new a moment later. Dry run says what the first pass would take as seen.
 
 `GITHOOT_CLONE_ROOT` and `GITHOOT_WORKTREE_ROOT` still work, but only as a one-off override for a run
 started from a shell. The settings come first, deliberately: GitHoot is started from a tray icon, a
@@ -145,8 +167,9 @@ it up once the config is fixed.
 
 ## Its files
 
-Everything it keeps is in `~/.githoot/integrations/herdr/`: one state file per bar, `prompts/`, and
-two caches (`viewer`, your login, and `branches/`, each pull request's head branch).
+Everything it keeps is in `~/.githoot/integrations/herdr/`: one state file per bar, a `.armed` marker
+per bar that has its baseline, `prompts/`, and two caches (`viewer`, your login, and `branches/`,
+each pull request's head branch).
 
 ## Upgrading from 2.4.0 or 3.0.0
 
@@ -157,10 +180,8 @@ The dispatcher was a setting of its own then. It is an integration now, and noth
   once per start; the `off` and empty lines every fresh file carried are left alone quietly. Install it on the Integrations tab and set the
   two folders on its page, or write the `integration.herdr.*` keys above.
 - **Its files moved.** `~/.githoot/dispatch/` and `~/.githoot/prompts/` are no longer read. Move
-  `prompts/` into `~/.githoot/integrations/herdr/` to keep edited prompts, and the files in
-  `dispatch/` in there too if you want pull requests it already looked at to stay looked at.
-  Otherwise the first pass after Install treats every pull request in the bars as new and **starts
-  an agent for each one**. Press Dry run first to see how many that is.
+  `prompts/` into `~/.githoot/integrations/herdr/` to keep edited prompts. The old state is not
+  needed: Install takes whatever is in the bars as seen and starts nothing for it.
 
 ## Upgrading from the shipped script
 

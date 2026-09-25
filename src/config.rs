@@ -686,7 +686,14 @@ fn integrations_section() -> String {
         let info = integration.info();
         out.push_str(&format!("\n# {}: {}\n{INTEGRATION_PREFIX}{}.enabled=off\n", info.name, info.summary, info.id));
         for setting in info.settings {
-            out.push_str(&format!("# {}\n{INTEGRATION_PREFIX}{}.{}=\n", setting.help, info.id, setting.key));
+            // A flag is written at its default, so the file says which way each one stands. A text
+            // setting is written empty, which means its default.
+            let value = match setting.kind {
+                crate::integration::Kind::Flag { default_on: true } => "on",
+                crate::integration::Kind::Flag { default_on: false } => "off",
+                crate::integration::Kind::Text { .. } => "",
+            };
+            out.push_str(&format!("# {}\n{INTEGRATION_PREFIX}{}.{}={value}\n", setting.help, info.id, setting.key));
         }
     }
     out
@@ -770,11 +777,11 @@ fn renamed_key_warnings(values: &std::collections::HashMap<&str, &str>) -> Vec<S
 /// has to mean on, so only an explicit off may turn it off. Deliberately not `!is_on(v)` — that would
 /// make a typo like `updateCheck=yse` read as off, silently disabling a feature the user was trying to
 /// confirm. An unrecognised value leaves the default alone.
-fn is_on(value: &str) -> bool {
+pub(crate) fn is_on(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes")
 }
 
-fn is_off(value: &str) -> bool {
+pub(crate) fn is_off(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no")
 }
 
@@ -1188,6 +1195,10 @@ mod tests {
         assert_eq!(written, declared);
         let values = parse(&text);
         assert_eq!(values.get("integration.herdr.enabled"), Some(&"off"));
+        // A flag is written at its default, so the file says which way each one stands.
+        assert_eq!(values.get("integration.herdr.approved"), Some(&"off"));
+        assert_eq!(values.get("integration.herdr.workRequired"), Some(&"on"));
+        assert_eq!(values.get("integration.herdr.cloneRoot"), Some(&""));
         assert!(!from(&text).integration_enabled("herdr"), "installed by nobody means not installed");
     }
 

@@ -43,19 +43,28 @@ use crate::state::PrAxis;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A text setting an integration declares, beyond `enabled`.
+/// A setting an integration declares, beyond `enabled`.
 ///
 /// Every one is live: the runner reads `config.txt` fresh on each pass, so the page never has to
 /// say "restart to apply".
 pub struct Setting {
     /// The key after `integration.<id>.`, so `cloneRoot` for `integration.herdr.cloneRoot`.
     pub key: &'static str,
-    /// What the page's input is labelled.
+    /// What the page's input or checkbox is labelled.
     pub label: &'static str,
-    /// What an empty value means, shown greyed in the input.
-    pub placeholder: &'static str,
+    pub kind: Kind,
     /// One sentence for `config.txt`, above the key.
     pub help: &'static str,
+}
+
+/// What a setting holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Free text on one line. Empty means the setting's default, which `placeholder` shows greyed.
+    Text { placeholder: &'static str },
+    /// `on` or `off`, a checkbox on the page. Only an explicit value moves it off its default, so a
+    /// typo leaves the default standing in either direction.
+    Flag { default_on: bool },
 }
 
 /// What the rest of the app needs to know about an integration without running it.
@@ -91,6 +100,16 @@ impl Context {
     pub fn setting(&self, key: &str) -> &str {
         self.settings.get(key).map(|v| v.trim()).unwrap_or("")
     }
+
+    /// A flag's current answer: its default until the file says otherwise. `false` for a text setting.
+    pub fn flag(&self, setting: &Setting) -> bool {
+        let value = self.setting(setting.key);
+        match setting.kind {
+            Kind::Flag { default_on: true } => !crate::config::is_off(value),
+            Kind::Flag { default_on: false } => crate::config::is_on(value),
+            Kind::Text { .. } => false,
+        }
+    }
 }
 
 /// One bar's pull requests, as an integration receives them.
@@ -99,6 +118,9 @@ pub struct Batch {
     pub entries: Vec<PrEntry>,
     /// How many were left out because they are muted. Only ever reported, never acted on.
     pub muted: usize,
+    /// Whether any portal it may see has answered for this bar. `false` means "not known yet", which
+    /// an empty `entries` must never be mistaken for: nothing may be concluded from it.
+    pub confirmed: bool,
 }
 
 /// What one pass said, sorted by who needs to hear it.
@@ -117,6 +139,13 @@ pub trait Integration: Send + Sync {
 
     /// Once at startup, installed or not: bring shipped files such as default prompts up to date.
     fn prepare(&self, _ctx: &Context) {}
+
+    /// Install or Remove was pressed. Called after `config.txt` says so.
+    fn installed(&self, _ctx: &Context, _on: bool) {}
+
+    /// One of its settings was written from the page, with the value it now has. Saving the form
+    /// writes every setting on it, so this is called for values that did not change as well.
+    fn setting_changed(&self, _ctx: &Context, _key: &str, _value: &str) {}
 
     /// Tools it needs that will not run. Empty when it has everything.
     fn missing(&self) -> Vec<&'static str> {
@@ -160,13 +189,15 @@ pub fn batches(info: &Info, snapshots: &[(PrAxis, AxisSnapshot)], is_muted: &dyn
     snapshots
         .iter()
         .map(|(axis, snapshot)| {
-            let mut batch = Batch { axis: *axis, entries: Vec::new(), muted: 0 };
-            let lists = snapshot
+            let mut batch = Batch { axis: *axis, entries: Vec::new(), muted: 0, confirmed: false };
+            let lists: Vec<&Vec<PrEntry>> = snapshot
                 .groups
                 .iter()
                 .filter(|(portal, _)| info.portals.contains(&portal.kind))
-                .filter_map(|(_, list)| list.as_ref());
-            for entry in lists.flatten() {
+                .filter_map(|(_, list)| list.as_ref())
+                .collect();
+            batch.confirmed = !lists.is_empty();
+            for entry in lists.into_iter().flatten() {
                 if is_muted(entry.key()) {
                     batch.muted += 1;
                 } else {
@@ -185,18 +216,40 @@ fn check_setting(integration: &dyn Integration, key: &str, value: &str) -> Resul
     if value.contains(['\n', '\r']) {
         return Err(format!("{}: a setting must stay on one line", info.id));
     }
-    match key {
-        "enabled" if matches!(value, "on" | "off") => Ok(()),
-        "enabled" => Err(format!("{}: enabled is on or off, not {value:?}", info.id)),
-        _ if info.settings.iter().any(|s| s.key == key) => Ok(()),
-        _ => Err(format!("{} has no setting {key:?}", info.id)),
+    let is_flag = match (key, info.settings.iter().find(|s| s.key == key)) {
+        ("enabled", _) => true,
+        (_, Some(setting)) => matches!(setting.kind, Kind::Flag { .. }),
+        (_, None) => return Err(format!("{} has no setting {key:?}", info.id)),
+    };
+    if is_flag && !matches!(value, "on" | "off") {
+        return Err(format!("{}: {key} is on or off, not {value:?}", info.id));
     }
+    Ok(())
+}
+
+/// What a submitted settings form says for each declared setting, in declaration order.
+///
+/// A checkbox posts nothing when unticked, which is how a form says off, so every flag gets an answer.
+/// A text box absent from the form is left alone; one submitted empty is a deliberate clear.
+pub fn form_values(info: &Info, form: &crate::serve::Form) -> Vec<(&'static str, String)> {
+    info.settings
+        .iter()
+        .filter_map(|s| match s.kind {
+            Kind::Flag { .. } => Some((s.key, if form.ticked(s.key) { "on" } else { "off" }.to_string())),
+            Kind::Text { .. } => form.get(s.key).map(|v| (s.key, v.trim().to_string())),
+        })
+        .collect()
 }
 
 /// Writes one of an integration's settings, the same single-line edit every other setting gets.
 pub fn set(app_asset_path: &Path, integration: &dyn Integration, key: &str, value: &str) -> Result<(), String> {
     check_setting(integration, key, value)?;
-    crate::config::set_integration(app_asset_path, integration.info().id, key, value.trim())
+    crate::config::set_integration(app_asset_path, integration.info().id, key, value.trim())?;
+    if key != "enabled" {
+        let cfg = Config::load(app_asset_path).0;
+        integration.setting_changed(&Context::new(app_asset_path, &cfg, integration.info().id), key, value.trim());
+    }
+    Ok(())
 }
 
 /// Install or remove. Refused where the build cannot run it, so the page cannot switch on something
@@ -205,7 +258,10 @@ pub fn install(app_asset_path: &Path, integration: &dyn Integration, on: bool) -
     if let (true, Some(why)) = (on, integration.info().unsupported) {
         return Err(why.to_string());
     }
-    set(app_asset_path, integration, "enabled", if on { "on" } else { "off" })
+    set(app_asset_path, integration, "enabled", if on { "on" } else { "off" })?;
+    let cfg = Config::load(app_asset_path).0;
+    integration.installed(&Context::new(app_asset_path, &cfg, integration.info().id), on);
+    Ok(())
 }
 
 // ── The runner ───────────────────────────────────────────────────────────────
@@ -413,7 +469,67 @@ mod tests {
     #[test]
     fn an_unconfirmed_list_is_not_handed_over() {
         let snaps = vec![(PrAxis::ReadyToMerge, snapshot(vec![(fake_info(PortalKind::GitHub), None)]))];
-        assert!(batches(&GITHUB_ONLY, &snaps, &|_| false).iter().all(|b| b.entries.is_empty()));
+        let seen = batches(&GITHUB_ONLY, &snaps, &|_| false);
+        assert!(seen.iter().all(|b| b.entries.is_empty()));
+        // And it says so: an empty list nobody confirmed must never pass for a quiet bar.
+        assert!(seen.iter().all(|b| !b.confirmed));
+    }
+
+    #[test]
+    fn a_confirmed_list_is_marked_confirmed_even_when_it_is_empty() {
+        let snaps = vec![(PrAxis::ReadyToMerge, snapshot(vec![(fake_info(PortalKind::GitHub), Some(Vec::new()))]))];
+        assert!(batches(&GITHUB_ONLY, &snaps, &|_| false)[0].confirmed);
+        assert!(!batches(&NO_PORTALS, &snaps, &|_| false)[0].confirmed, "a portal it cannot see confirms nothing");
+    }
+
+    /// Install and Remove tell the integration, so it can treat the next pass as a fresh start.
+    #[test]
+    fn install_and_remove_tell_the_integration() {
+        let dir = std::env::temp_dir().join(format!("githoot-integration-install-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let before = fake::INSTALLS.load(std::sync::atomic::Ordering::SeqCst);
+        install(&dir, &fake::Echo, true).unwrap();
+        install(&dir, &fake::Echo, false).unwrap();
+        assert_eq!(fake::INSTALLS.load(std::sync::atomic::Ordering::SeqCst), before + 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    static FLAGGED: Info = Info {
+        id: "test",
+        name: "Test",
+        summary: "",
+        portals: &[PortalKind::GitHub],
+        settings: &[
+            Setting { key: "loud", label: "Loud", kind: Kind::Flag { default_on: true }, help: "" },
+            Setting { key: "quiet", label: "Quiet", kind: Kind::Flag { default_on: false }, help: "" },
+            Setting { key: "root", label: "Root", kind: Kind::Text { placeholder: "~" }, help: "" },
+        ],
+        unsupported: None,
+    };
+
+    /// A flag nobody set is its default, and only an explicit value moves it. A typo leaves the
+    /// default standing, in either direction, as every other switch in `config.txt` does.
+    #[test]
+    fn a_flag_reads_its_default_until_it_is_set() {
+        let flag = |text: &str, key: &str| {
+            let cfg = Config::from_text(text);
+            let ctx = Context::new(Path::new("/x"), &cfg, "test");
+            ctx.flag(FLAGGED.settings.iter().find(|s| s.key == key).unwrap())
+        };
+        assert!(flag("", "loud") && !flag("", "quiet"));
+        assert!(!flag("integration.test.loud=off\n", "loud") && flag("integration.test.quiet=on\n", "quiet"));
+        assert!(flag("integration.test.loud=offf\n", "loud") && !flag("integration.test.quiet=onn\n", "quiet"));
+    }
+
+    /// A checkbox posts nothing when unticked, which is how a form says off. Reading absence as
+    /// "leave it" would make a flag impossible to switch off from the page. A text box absent from
+    /// the form is left alone; one submitted empty is a deliberate clear.
+    #[test]
+    fn a_settings_form_turns_unticked_boxes_into_off() {
+        let form = crate::serve::parse_form("loud=on&root=%2Fsrc");
+        assert_eq!(form_values(&FLAGGED, &form), [("loud", "on".to_string()), ("quiet", "off".to_string()), ("root", "/src".to_string())]);
+        let form = crate::serve::parse_form("quiet=on");
+        assert_eq!(form_values(&FLAGGED, &form), [("loud", "off".to_string()), ("quiet", "on".to_string())]);
     }
 
     #[test]
@@ -425,5 +541,7 @@ mod tests {
         assert!(check_setting(herdr, "cloneRoot\nlocalApi", "on").is_err());
         assert!(check_setting(herdr, "cloneRoot", "/x\nlocalApi=on").is_err(), "a value must stay on one line");
         assert!(check_setting(herdr, "enabled", "maybe").is_err());
+        assert!(check_setting(herdr, "approved", "on").is_ok() && check_setting(herdr, "approved", "off").is_ok());
+        assert!(check_setting(herdr, "approved", "yes please").is_err(), "a flag is on or off");
     }
 }

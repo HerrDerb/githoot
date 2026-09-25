@@ -16,7 +16,8 @@ has a page with:
 - **Dry run.** A real pass with every effect suppressed and nothing recorded, so it cannot change
   what the next real pass does. Offered installed or not: asking first is the only safe way to learn
   what installing would do.
-- **Its settings**, as a form of their own. Only keys the integration declared can be written.
+- **Its settings**, as a form of their own: text boxes and switches. Only keys the integration
+  declared can be written, a switch only as `on` or `off`, and an unticked switch saves as `off`.
 - **What it is missing.** Installed but unable to run reads *Installed, but idle*, never *Installed*.
 - **Whatever it adds**, such as the dispatcher's prompts.
 

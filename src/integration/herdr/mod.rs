@@ -32,7 +32,7 @@
 
 pub mod prompts;
 
-use super::{Batch, Context, Info, Integration, Said, Setting};
+use super::{Batch, Context, Info, Integration, Kind, Said, Setting};
 use crate::page::esc;
 use crate::portal::types::PrEntry;
 use crate::portal::PortalKind;
@@ -696,16 +696,37 @@ static INFO: Info = Info {
     // another forge's pull request, so none ever reaches it.
     portals: &[PortalKind::GitHub],
     settings: &[
+        // One switch per bar, keyed like the bars' prompts. Approved is off by default: an approved
+        // pull request is usually one you are about to merge yourself, and an agent started for it is
+        // mostly tokens spent on work that is done.
+        Setting {
+            key: "workRequired",
+            label: "Start agents for pull requests that need work from you",
+            kind: Kind::Flag { default_on: true },
+            help: "Start agents for the amber bar: your pull requests that need work.",
+        },
+        Setting {
+            key: "requestedReviews",
+            label: "Start agents for reviews requested of you",
+            kind: Kind::Flag { default_on: true },
+            help: "Start agents for the red bar: reviews requested of you.",
+        },
+        Setting {
+            key: "approved",
+            label: "Start agents for your approved pull requests",
+            kind: Kind::Flag { default_on: false },
+            help: "Start agents for the green bar: your approved pull requests. Off by default.",
+        },
         Setting {
             key: "cloneRoot",
             label: "Clones live in",
-            placeholder: "~/projects",
+            kind: Kind::Text { placeholder: "~/projects" },
             help: "Where your clones live, one directory per repository name: owner/thing needs <this>/thing. Empty means ~/projects.",
         },
         Setting {
             key: "worktreeRoot",
             label: "Worktrees go in",
-            placeholder: "~/worktrees",
+            kind: Kind::Text { placeholder: "~/worktrees" },
             help: "Where the worktree for each pull request goes, named githoot/pr-<number>-<repo>. Empty means ~/worktrees.",
         },
     ],
@@ -733,15 +754,67 @@ impl Integration for Herdr {
         missing_tools()
     }
 
+    /// Install, or install again after Remove, is "from now on" for every bar.
+    fn installed(&self, ctx: &Context, _on: bool) {
+        for axis in PrAxis::ALL {
+            disarm(&ctx.dir, axis);
+        }
+    }
+
+    /// A bar switched off on the page is disarmed at once, not at the next pass, which may not come
+    /// before it is switched back on if a tool is missing. `on` is left alone: saving the form writes
+    /// every switch, and a bar that was already on must not be re-baselined by an unrelated save.
+    fn setting_changed(&self, ctx: &Context, key: &str, value: &str) {
+        if let (Some(axis), "off") = (PrAxis::ALL.into_iter().find(|a| bar_key(*a) == key), value) {
+            disarm(&ctx.dir, axis);
+        }
+    }
+
     fn pass(&self, ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
         let settings = settings_now(ctx, dry_run);
         let mut out = Said::default();
         for batch in batches {
             let axis = batch.axis;
+            // Before anything else, so a bar switched off costs no `gh` call and touches no state
+            // beyond forgetting its baseline, which makes switching it back on "from now on" too.
+            if !bar_on(ctx, axis) {
+                if dry_run {
+                    out.said.push(format!("[{}] switched off, skipped", axis.slug()));
+                } else {
+                    disarm(&ctx.dir, axis);
+                }
+                continue;
+            }
             if dry_run && batch.muted > 0 {
                 out.said.push(format!("[{}] {} muted, skipped", axis.slug(), batch.muted));
             }
             let targets: Vec<Target> = batch.entries.iter().filter_map(Target::from_entry).collect();
+            if !armed(&ctx.dir, axis) {
+                // Not known yet is not empty. A baseline of nothing taken before the first poll
+                // would make the whole backlog look new a moment later.
+                if !batch.confirmed {
+                    continue;
+                }
+                if dry_run {
+                    if !targets.is_empty() {
+                        out.said.push(format!(
+                            "[{}] first pass: would take {} pull request(s) as seen and start none",
+                            axis.slug(),
+                            targets.len()
+                        ));
+                    }
+                    continue;
+                }
+                match write_state(&ctx.dir, axis, &baseline(&targets)).and_then(|()| arm(&ctx.dir, axis)) {
+                    Ok(()) => out.said.push(format!(
+                        "[{}] switched on: {} pull request(s) taken as seen, none started",
+                        axis.slug(),
+                        targets.len()
+                    )),
+                    Err(e) => out.trouble.push(format!("[{}] could not record the baseline: {e}", axis.slug())),
+                }
+                continue;
+            }
             if targets.is_empty() {
                 continue;
             }
@@ -787,6 +860,57 @@ impl Integration for Herdr {
                 .map_err(|e| format!("could not write the prompts: {e}")),
         )
     }
+}
+
+// ── Switching on is "from now on" ────────────────────────────────────────────
+//
+// A bar that was just switched on, or an integration that was just installed, must not start an
+// agent for every pull request already waiting in it. Its first pass takes them all as seen instead,
+// and leaves a marker saying the bar has a baseline. Switching the bar off, Install and Remove all
+// remove the marker, so the next time the bar is on is a fresh "from now on" as well.
+
+fn armed_path(dir: &Path, axis: PrAxis) -> PathBuf {
+    dir.join(format!("{}.armed", axis.slug()))
+}
+
+fn armed(dir: &Path, axis: PrAxis) -> bool {
+    armed_path(dir, axis).exists()
+}
+
+fn arm(dir: &Path, axis: PrAxis) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(armed_path(dir, axis), "")
+}
+
+fn disarm(dir: &Path, axis: PrAxis) {
+    let _ = std::fs::remove_file(armed_path(dir, axis));
+}
+
+/// Every pull request in the bar as seen, as of now, with everything said on it so far as read.
+///
+/// The comment time recorded is the pull request's own `updated_at`, and that is not a shortcut: a
+/// comment or a review moves `updated_at`, so no comment that exists yet can be newer than it. The
+/// first one that is was written after the switch, which is exactly when an agent should wake. And
+/// no `gh` call is made to find out, so a baseline over a full bar costs nothing.
+fn baseline(targets: &[Target]) -> std::collections::BTreeMap<String, Handled> {
+    targets
+        .iter()
+        .map(|t| (t.key.clone(), Handled { updated: t.updated.clone(), comment: t.updated.clone() }))
+        .collect()
+}
+
+/// The switch for one bar's key, in `INFO.settings`.
+fn bar_key(axis: PrAxis) -> &'static str {
+    match axis {
+        PrAxis::ChangesRequested => "workRequired",
+        PrAxis::ReviewRequested => "requestedReviews",
+        PrAxis::ReadyToMerge => "approved",
+    }
+}
+
+/// Whether this pass acts on `axis` at all.
+fn bar_on(ctx: &Context, axis: PrAxis) -> bool {
+    INFO.settings.iter().find(|s| s.key == bar_key(axis)).is_some_and(|s| ctx.flag(s))
 }
 
 /// The roots a pass needs: the integration's setting first, then the environment, then a default
@@ -918,11 +1042,136 @@ mod tests {
     fn a_dry_run_over_empty_bars_says_nothing_needed_an_agent() {
         let cfg = crate::config::Config::from_text("");
         let ctx = Context::new(Path::new("/nonexistent"), &cfg, "herdr");
-        let batches = [Batch { axis: PrAxis::ReadyToMerge, entries: Vec::new(), muted: 2 }];
+        let batches = [Batch { axis: PrAxis::ChangesRequested, entries: Vec::new(), muted: 2, confirmed: true }];
         let out = Herdr.pass(&ctx, &batches, true);
-        assert_eq!(out.said, ["[approved] 2 muted, skipped"]);
+        assert_eq!(out.said, ["[work-required] 2 muted, skipped"]);
         assert!(Herdr.pass(&ctx, &[], true).said == ["nothing needed an agent"]);
         assert!(Herdr.pass(&ctx, &[], false).said.is_empty(), "a real pass with nothing to do is silent");
+    }
+
+    fn ctx(text: &str) -> Context {
+        Context::new(Path::new("/nonexistent"), &crate::config::Config::from_text(text), "herdr")
+    }
+
+    /// An approved pull request is usually one you merge yourself. An agent started for it is mostly
+    /// tokens spent on a pull request that is done, so that bar is opt-in; the other two are why the
+    /// dispatcher exists.
+    #[test]
+    fn the_approved_bar_is_off_by_default_and_the_others_on() {
+        let c = ctx("");
+        assert!(!bar_on(&c, PrAxis::ReadyToMerge));
+        assert!(bar_on(&c, PrAxis::ChangesRequested) && bar_on(&c, PrAxis::ReviewRequested));
+        let c = ctx("integration.herdr.approved=on\nintegration.herdr.workRequired=off\n");
+        assert!(bar_on(&c, PrAxis::ReadyToMerge) && !bar_on(&c, PrAxis::ChangesRequested));
+    }
+
+    /// A bar switched off costs nothing: no `gh`, no state. A dry run says so, because a bar that is
+    /// full and quiet is exactly the confusing case the button is pressed to explain.
+    #[test]
+    fn a_bar_switched_off_is_skipped_and_a_dry_run_says_so() {
+        let batches = [Batch { axis: PrAxis::ReadyToMerge, entries: vec![PrEntry::stub("https://github.com/o/r/pull/1")], muted: 0, confirmed: true }];
+        assert_eq!(Herdr.pass(&ctx(""), &batches, true).said, ["[approved] switched off, skipped"]);
+        assert!(Herdr.pass(&ctx(""), &batches, false).said.is_empty(), "a real pass says nothing about it");
+    }
+
+    fn pr(number: u64, updated: &str) -> PrEntry {
+        PrEntry {
+            repo: Some("o/r".into()),
+            number: Some(number),
+            updated_at: Some(updated.into()),
+            ..PrEntry::stub(&format!("https://github.com/o/r/pull/{number}"))
+        }
+    }
+
+    fn temp_ctx(name: &str, text: &str) -> Context {
+        let root = std::env::temp_dir().join(format!("githoot-herdr-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Context::new(&root, &crate::config::Config::from_text(text), "herdr")
+    }
+
+    fn batch(axis: PrAxis, entries: Vec<PrEntry>, confirmed: bool) -> Batch {
+        Batch { axis, entries, muted: 0, confirmed }
+    }
+
+    /// Switching a bar on, or installing, is "from now on". Whatever is in the bar at that moment is
+    /// recorded as seen and nothing starts, so the backlog never becomes a swarm of agents.
+    #[test]
+    fn the_first_pass_of_a_bar_records_a_baseline_and_starts_nothing() {
+        let ctx = temp_ctx("baseline", "");
+        let out = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(1, "2026-09-25T10:00:00Z"), pr(2, "2026-09-25T11:00:00Z")], true)], false);
+        assert_eq!(out.said, ["[work-required] switched on: 2 pull request(s) taken as seen, none started"]);
+        assert!(out.trouble.is_empty() && out.setup.is_empty(), "nothing was asked of gh: {out:?}");
+        let state = read_state(&ctx.dir, PrAxis::ChangesRequested);
+        assert_eq!(state.len(), 2);
+        assert!(armed(&ctx.dir, PrAxis::ChangesRequested));
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap().parent().unwrap());
+    }
+
+    /// The baseline counts any comment up to now as read. A pull request's `updated_at` moves with
+    /// every comment, so no comment that exists yet can be newer than it, and the first one that is
+    /// was written after the switch.
+    #[test]
+    fn a_baseline_takes_everything_said_so_far_as_read() {
+        let t = Target::from_entry(&pr(1, "2026-09-25T10:00:00Z")).unwrap();
+        let seen = baseline(std::slice::from_ref(&t));
+        let h = &seen[&t.key];
+        assert_eq!(h.updated, "2026-09-25T10:00:00Z");
+        assert_eq!(decide(Some(h), "2026-09-25T10:00:00Z", "2026-09-25T09:00:00Z", None), Action::AlreadySeen);
+        assert_eq!(decide(Some(h), "2026-09-25T12:00:00Z", "2026-09-25T09:00:00Z", None), Action::NoNewComment, "a push");
+        assert_eq!(decide(Some(h), "2026-09-25T12:00:00Z", "2026-09-25T11:00:00Z", None), Action::Start, "a new comment");
+    }
+
+    /// Before the first poll a bar is "not known", not empty. A baseline of nothing taken then would
+    /// make the whole backlog look new a second later.
+    #[test]
+    fn an_unconfirmed_bar_is_not_taken_as_a_baseline() {
+        let ctx = temp_ctx("unconfirmed", "");
+        let out = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), false)], false);
+        assert!(out.said.is_empty() && !armed(&ctx.dir, PrAxis::ChangesRequested));
+    }
+
+    #[test]
+    fn switching_a_bar_off_means_the_next_switch_on_is_a_fresh_baseline() {
+        let ctx = temp_ctx("rearm", "");
+        let _ = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
+        assert!(armed(&ctx.dir, PrAxis::ChangesRequested));
+        let off = Context::new(ctx.dir.parent().unwrap().parent().unwrap(), &crate::config::Config::from_text("integration.herdr.workRequired=off\n"), "herdr");
+        let _ = Herdr.pass(&off, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
+        assert!(!armed(&ctx.dir, PrAxis::ChangesRequested));
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn install_and_remove_both_mean_a_fresh_baseline_next_time() {
+        let ctx = temp_ctx("install", "");
+        let _ = Herdr.pass(&ctx, &[batch(PrAxis::ReviewRequested, Vec::new(), true)], false);
+        assert!(armed(&ctx.dir, PrAxis::ReviewRequested));
+        Herdr.installed(&ctx, true);
+        assert!(!armed(&ctx.dir, PrAxis::ReviewRequested));
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap().parent().unwrap());
+    }
+
+    /// Switching a bar off on the page counts even when no pass runs in between, say because a tool
+    /// is missing: the next pass after switching it back on is still a fresh baseline.
+    #[test]
+    fn switching_a_bar_off_on_the_page_counts_without_a_pass() {
+        let ctx = temp_ctx("page-off", "");
+        let _ = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
+        let root = ctx.dir.parent().unwrap().parent().unwrap().to_path_buf();
+        crate::integration::set(&root, &Herdr, "workRequired", "on").unwrap();
+        assert!(armed(&ctx.dir, PrAxis::ChangesRequested), "saving the form with it still on is not a switch");
+        crate::integration::set(&root, &Herdr, "workRequired", "off").unwrap();
+        assert!(!armed(&ctx.dir, PrAxis::ChangesRequested));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A dry run says what the switch would do and records nothing, baseline included.
+    #[test]
+    fn a_dry_run_before_the_baseline_says_so_and_writes_nothing() {
+        let ctx = temp_ctx("dry", "");
+        let out = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(1, "2026-09-25T10:00:00Z")], true)], true);
+        assert_eq!(out.said, ["[work-required] first pass: would take 1 pull request(s) as seen and start none"]);
+        assert!(!armed(&ctx.dir, PrAxis::ChangesRequested) && read_state(&ctx.dir, PrAxis::ChangesRequested).is_empty());
     }
 
     /// Its files are its own: state and caches under the integration's directory, nowhere else.

@@ -92,10 +92,22 @@ pub struct IntegrationView<'a> {
     pub flash: Option<&'a str>,
     /// What the last Dry run said, in the order a pass produced it. Empty until one is asked for.
     pub dry_run: &'a [String],
-    /// Its declared settings with their current values: key, label, value, placeholder.
-    pub settings: Vec<(&'a str, &'a str, String, &'a str)>,
+    /// Its declared settings with their current values, in declaration order.
+    pub settings: Vec<SettingRow<'a>>,
     /// What the integration adds below. Already HTML, escaped by the integration.
     pub body: String,
+}
+
+/// One declared setting as its form shows it.
+pub struct SettingRow<'a> {
+    pub key: &'a str,
+    pub label: &'a str,
+    /// The text as the file has it. Unused for a flag.
+    pub value: String,
+    /// What an empty text value means. Unused for a flag.
+    pub placeholder: &'a str,
+    /// `Some(on)` for a flag, drawn as a checkbox; `None` for text.
+    pub flag: Option<bool>,
 }
 
 /// "Installed", "Not installed", and the two states that must not read as either.
@@ -1014,14 +1026,17 @@ fn integration_card(token: &str, v: &IntegrationView) -> String {
             "<h2 class=\"section\">Settings</h2>\n<div class=\"card\"><form method=\"post\" action=\"{action}\">\
              <input type=\"hidden\" name=\"action\" value=\"settings\">"
         ));
-        for (key, label, value, placeholder) in &v.settings {
-            h.push_str(&format!(
-                "<label class=\"path\"><span>{}</span><input type=\"text\" name=\"{}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"></label>",
-                esc(label),
-                esc(key),
-                esc(value),
-                esc(placeholder)
-            ));
+        for row in &v.settings {
+            match row.flag {
+                Some(on) => h.push_str(&checkbox(row.key, row.label, on)),
+                None => h.push_str(&format!(
+                    "<label class=\"path\"><span>{}</span><input type=\"text\" name=\"{}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"></label>",
+                    esc(row.label),
+                    esc(row.key),
+                    esc(&row.value),
+                    esc(row.placeholder)
+                )),
+            }
         }
         h.push_str("<button class=\"small\" type=\"submit\">Save settings</button></form></div>\n");
     }
@@ -1638,7 +1653,7 @@ mod tests {
             missing,
             flash: None,
             dry_run: &[],
-            settings: vec![("cloneRoot", "Clones live in", "/d/projects".to_string(), "~/projects")],
+            settings: vec![SettingRow { key: "cloneRoot", label: "Clones live in", value: "/d/projects".into(), placeholder: "~/projects", flag: None }],
             body: "<p>its own part</p>".to_string(),
         }
     }
@@ -1683,13 +1698,29 @@ mod tests {
     #[test]
     fn integration_settings_are_a_form_of_their_own_with_escaped_values() {
         let v = IntegrationView {
-            settings: vec![("cloneRoot", "Clones live in", "\"><script>".to_string(), "~/projects")],
+            settings: vec![SettingRow { key: "cloneRoot", label: "Clones live in", value: "\"><script>".into(), placeholder: "~/projects", flag: None }],
             ..integration(true, &[])
         };
         let html = integration_page("tok", &v, &NAV);
         assert!(html.contains(r#"name="action" value="settings""#));
         assert!(html.contains(r#"name="cloneRoot""#) && !html.contains("\"><script>"));
         assert!(!html.contains(r#"action="/tok/settings">"#), "never the general settings form");
+    }
+
+    /// A flag is a checkbox in the same form, ticked for on.
+    #[test]
+    fn integration_flags_are_checkboxes_in_the_settings_form() {
+        let v = IntegrationView {
+            settings: vec![
+                SettingRow { key: "approved", label: "Approved", value: "off".into(), placeholder: "", flag: Some(false) },
+                SettingRow { key: "workRequired", label: "Work required", value: "on".into(), placeholder: "", flag: Some(true) },
+            ],
+            ..integration(true, &[])
+        };
+        let html = integration_page("tok", &v, &NAV);
+        assert!(html.contains(r#"<input type="checkbox" name="approved" value="on"> Approved"#), "{html}");
+        assert!(html.contains(r#"<input type="checkbox" name="workRequired" value="on" checked> Work required"#));
+        assert!(!html.contains(r#"type="text" name="approved""#));
     }
 
     #[test]

@@ -3,23 +3,30 @@
 //! It compiles only if the trait can be implemented without a single Herdr type, which is the whole
 //! promise of the seam, the same promise `portal::fake` keeps for portals.
 
-use super::{Batch, Context, Info, Integration, Said, Setting};
+use super::{Batch, Context, Info, Integration, Kind, Said, Setting};
 use crate::portal::PortalKind;
 
 pub struct Echo;
+
+/// How often `installed` was called, so the generic Install can be seen to call it.
+pub static INSTALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub static ECHO: Info = Info {
     id: "echo",
     name: "Echo",
     summary: "Says which pull requests it was handed.",
     portals: &[PortalKind::GitHub],
-    settings: &[Setting { key: "prefix", label: "Prefix", placeholder: "echo", help: "What each line starts with." }],
+    settings: &[Setting { key: "prefix", label: "Prefix", kind: Kind::Text { placeholder: "echo" }, help: "What each line starts with." }],
     unsupported: None,
 };
 
 impl Integration for Echo {
     fn info(&self) -> &'static Info {
         &ECHO
+    }
+
+    fn installed(&self, _ctx: &Context, _on: bool) {
+        INSTALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn pass(&self, ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
