@@ -31,7 +31,7 @@ pub enum Tab {
     Settings,
     Accounts,
     Muted,
-    Dispatcher,
+    Integrations,
 }
 
 /// The nav line, shared by the four pages so each can be single-purpose and still one click from
@@ -40,22 +40,22 @@ pub enum Tab {
 /// **Why four pages and not one.** They used to share the settings page, and two of them fought the
 /// settings form: a sign-in's auto-refresh reloaded the page under a half-edited form, and the
 /// dispatcher's own buttons reloaded it too. Anything that reloads now lives on a page with no form
-/// of yours on it.
+/// of yours on it. The Integrations tab and each integration's page count as one tab.
 #[derive(Clone, Copy, Debug)]
 pub struct Nav {
     pub current: Tab,
     /// How many pull requests are muted, shown on the tab when there are any.
     pub muted: usize,
-    /// Whether the dispatcher tab exists: Linux or Windows, with `localApi` on.
-    pub dispatcher: bool,
 }
 
 fn nav(token: &str, n: &Nav) -> String {
     let muted = if n.muted > 0 { format!("Muted ({})", n.muted) } else { "Muted".to_string() };
-    let mut tabs = vec![(Tab::Settings, "settings", "Settings".to_string()), (Tab::Accounts, "accounts", "Accounts".to_string()), (Tab::Muted, "muted", muted)];
-    if n.dispatcher {
-        tabs.push((Tab::Dispatcher, "dispatcher", "Dispatcher".to_string()));
-    }
+    let tabs = vec![
+        (Tab::Settings, "settings", "Settings".to_string()),
+        (Tab::Accounts, "accounts", "Accounts".to_string()),
+        (Tab::Muted, "muted", muted),
+        (Tab::Integrations, "integrations", "Integrations".to_string()),
+    ];
     let links: Vec<String> = tabs
         .into_iter()
         .map(|(tab, path, label)| {
@@ -69,32 +69,44 @@ fn nav(token: &str, n: &Nav) -> String {
     format!("<nav class=\"tabs\">{}</nav>\n", links.join(""))
 }
 
-/// How the shipped dispatcher stands, as plain data so this module needs no platform gate.
-#[derive(Clone, Copy)]
-pub struct DispatcherView<'a> {
-    /// Whether the `dispatcher` setting is on. There is nothing to install any more: the
-    /// dispatcher is a thread in this process, so the only question is whether it is switched on.
-    pub enabled: bool,
-    /// Required tools that would not run. Only ever asked when `enabled`, because spawning three
-    /// processes to draw a card for a feature nobody switched on is three too many.
-    pub missing: &'a [&'a str],
-    /// The outcome of the last button press, from the redirect's query.
-    pub message: Option<&'a str>,
-    /// The dispatcher's prompts, one per bar plus the nudge, as the edit boxes show them.
-    pub prompts: &'a [PromptRow],
-    /// What the last Dry run said, in the order a pass produced it. Empty until one is asked for.
-    pub dry_run: &'a [String],
-    /// Where a pass would look for clones, and where it would put worktrees, already resolved.
-    pub clone_root: &'a str,
-    pub worktree_root: &'a str,
+/// One integration as the Integrations tab lists it.
+pub struct IntegrationRow<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub summary: &'a str,
+    pub status: String,
 }
 
-/// One editable prompt. `is_default` means no file of the user's exists yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptRow {
-    pub name: &'static str,
-    pub text: String,
-    pub is_default: bool,
+/// Everything the generic part of an integration's page shows, as plain data.
+pub struct IntegrationView<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub summary: &'a str,
+    pub installed: bool,
+    /// Why this build cannot run it. No Install button then, and the reason instead.
+    pub unsupported: Option<&'a str>,
+    /// Tools it needs that will not run. Only ever asked while installed, because spawning processes
+    /// to draw a card for something nobody installed is waste.
+    pub missing: &'a [&'a str],
+    /// The outcome of the last button press, shown once.
+    pub flash: Option<&'a str>,
+    /// What the last Dry run said, in the order a pass produced it. Empty until one is asked for.
+    pub dry_run: &'a [String],
+    /// Its declared settings with their current values: key, label, value, placeholder.
+    pub settings: Vec<(&'a str, &'a str, String, &'a str)>,
+    /// What the integration adds below. Already HTML, escaped by the integration.
+    pub body: String,
+}
+
+/// "Installed", "Not installed", and the two states that must not read as either.
+pub fn integration_status(installed: bool, unsupported: Option<&str>, missing: &[&str]) -> String {
+    match (unsupported, installed, missing.is_empty()) {
+        (Some(_), _, _) => "Not available here".to_string(),
+        (None, false, _) => "Not installed".to_string(),
+        (None, true, true) => "Installed".to_string(),
+        // Installed but unable to do anything is not "installed" in any sense that matters to the reader.
+        (None, true, false) => format!("Installed, but idle: missing {}", missing.join(", ")),
+    }
 }
 
 /// What a PR page needs to offer mute links: where to post them, and which pull requests are muted
@@ -660,28 +672,6 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
         "Serve the lists as JSON to local scripts (opens the local port at startup)",
         cfg.local_api,
     ));
-    // The one box that makes GitHoot act rather than show. The label says what it will *do*, not
-    // what it enables, because somebody finding an unexpected `githoot/` branch tomorrow has to be
-    // able to trace it back to a line they deliberately ticked.
-    h.push_str(&checkbox(
-        "dispatcher",
-        "Start an agent for each pull request that needs one (creates branches and worktrees)",
-        cfg.dispatcher,
-    ));
-    // Two paths, and they have to be reachable from here rather than from an environment variable.
-    // GitHoot is started from a tray icon, a shortcut or autostart, none of which carry a shell's
-    // environment, so a knob only settable by launching the app a particular way is a knob most
-    // people cannot reach. The dispatcher then silently finds no clones, for everybody.
-    for (key, label, value, fallback) in [
-        ("dispatcherCloneRoot", "Clones live in", &cfg.clone_root, "~/projects"),
-        ("dispatcherWorktreeRoot", "Worktrees go in", &cfg.worktree_root, "~/worktrees"),
-    ] {
-        h.push_str(&format!(
-            "<label class=\"path\"><span>{label}</span>\
-             <input type=\"text\" name=\"{key}\" value=\"{}\" placeholder=\"{fallback}\" spellcheck=\"false\"></label>",
-            esc(value)
-        ));
-    }
     h.push_str("</div>\n");
 
     h.push_str("<h2 class=\"section\">Log detail</h2><div class=\"card\">");
@@ -774,19 +764,35 @@ pub fn accounts_page(token: &str, view: &PortalsView, tabs: &Nav) -> String {
     h
 }
 
-/// The shipped dispatcher and its prompts. `None` on macOS or while `localApi` is off, where the
-/// page says what it needs instead of offering a button that could only fail.
-pub fn dispatcher_page(token: &str, d: Option<&DispatcherView>, tabs: &Nav) -> String {
-    let mut h = shell("Dispatcher", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
+/// The Integrations tab: every integration this build knows, installed or not.
+pub fn integrations_page(token: &str, rows: &[IntegrationRow], tabs: &Nav) -> String {
+    let mut h = shell("Integrations", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
     h.push_str(&nav(token, tabs));
-    match d {
-        Some(d) => h.push_str(&dispatcher_card(d, token)),
-        None => h.push_str(&format!(
-            "<div class=\"empty\"><p>The dispatcher needs Linux or Windows, and the local API. Turn on \
-             <strong>Serve the lists as JSON to local scripts</strong> in <a href=\"/{}/settings\">Settings</a> and restart.</p></div>\n",
-            esc(token)
-        )),
+    h.push_str(
+        "<p class=\"sub\">What GitHoot may do with the pull requests it finds, beyond showing them. \
+         Each is off until you install it, and removing one keeps its settings and files.</p>\n",
+    );
+    for row in rows {
+        h.push_str(&format!(
+            "<div class=\"card\"><div class=\"row\"><strong><a href=\"/{}/integrations/{}\">{}</a></strong> · \
+             <span class=\"portal-status\">{}</span></div><p class=\"sub\">{}</p></div>\n",
+            esc(token),
+            esc(row.id),
+            esc(row.name),
+            esc(&row.status),
+            esc(row.summary),
+        ));
     }
+    h.push_str("</main>\n</body>\n</html>\n");
+    h
+}
+
+/// One integration's page: the generic card, its settings, then whatever it adds.
+pub fn integration_page(token: &str, v: &IntegrationView, tabs: &Nav) -> String {
+    let mut h = shell(v.name, crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
+    h.push_str(&nav(token, tabs));
+    h.push_str(&integration_card(token, v));
+    h.push_str(&v.body);
     h.push_str("</main>\n</body>\n</html>\n");
     h
 }
@@ -957,91 +963,68 @@ pub fn muted_page(rows: &[MutedRow], token: &str, now_unix: u64, tabs: &Nav) -> 
     h
 }
 
-/// The agent dispatcher: whether it is on, and what it would need to work.
+/// Whether it is installed, what it is missing, the switch, the rehearsal, and its settings.
 ///
-/// There is no button here any more. The dispatcher is a thread in this process rather than a
-/// script somebody installs, so the only thing to say is whether the setting is on, and, when it
-/// is, whether the three tools it shells out to actually run. The prompts sit below and are always
-/// editable, because editing what an agent will be told before switching it on is the sane order.
-fn dispatcher_card(d: &DispatcherView, token: &str) -> String {
-    let status = if !d.enabled {
-        "Off".to_string()
-    } else if d.missing.is_empty() {
-        "On".to_string()
-    } else {
-        // On but unable to do anything is not "on" in any sense that matters to the reader.
-        format!("On, but not dispatching: missing {}", d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join(", "))
+/// The switch sits on the page that explains the integration, because that is the right page to turn
+/// it on from. Dry run is offered installed or not, and that is the point: the only safe way to learn
+/// what installing it would do is to ask first.
+fn integration_card(token: &str, v: &IntegrationView) -> String {
+    let status = integration_status(v.installed, v.unsupported, v.missing);
+    let action = format!("/{}/integrations/{}", esc(token), esc(v.id));
+    let button = |name: &str, label: &str| {
+        format!(
+            "<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"action\" value=\"{name}\">\
+             <button class=\"small\" type=\"submit\">{label}</button></form>"
+        )
     };
 
     let mut notes = String::new();
-    if d.enabled && !d.missing.is_empty() {
+    if let Some(why) = v.unsupported {
+        notes.push_str(&format!("<p class=\"sub\">{}</p>", esc(why)));
+    } else if v.installed && !v.missing.is_empty() {
         notes.push_str(&format!(
-            "<p class=\"sub\">Put <code>{}</code> on your PATH. Until then nothing is dispatched.</p>",
-            d.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
+            "<p class=\"sub\">Put <code>{}</code> on your PATH. Until then it does nothing.</p>",
+            v.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
         ));
-        // Herdr is the one a user is least likely to have, so it gets a way to fix it.
-        if d.missing.contains(&"herdr") {
-            notes.push_str("<p class=\"sub\"><a href=\"https://herdr.dev/docs/install/\">How to install Herdr</a></p>");
-        }
     }
-
-    let message = d.message.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
-
-    // The switch and the rehearsal, side by side. Dry run is offered whether or not it is on, and
-    // that is the point: the only safe way to learn what switching it on would do is to ask first.
-    let button = |action: &str, label: &str| {
-        format!(
-            "<form method=\"post\" action=\"/{}/settings/dispatcher\">             <input type=\"hidden\" name=\"action\" value=\"{action}\">             <button class=\"small\" type=\"submit\">{label}</button></form>",
-            esc(token)
-        )
+    let flash = v.flash.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
+    let switch = match (v.unsupported, v.installed) {
+        (Some(_), true) => button("remove", "Remove"),
+        (Some(_), false) => String::new(),
+        (None, true) => button("remove", "Remove"),
+        (None, false) => button("install", "Install"),
     };
-    let dry = format!(
-        "<div class=\"actions\">{}{}</div>",
-        if d.enabled { button("off", "Turn off") } else { button("on", "Turn on") },
-        button("dryrun", "Dry run"),
-    );
-    let said = if d.dry_run.is_empty() {
+    let dry = if v.unsupported.is_some() { String::new() } else { button("dryrun", "Dry run") };
+    let said = if v.dry_run.is_empty() {
         String::new()
     } else {
-        format!("<pre class=\"dry\">{}</pre>", d.dry_run.iter().map(|l| esc(l)).collect::<Vec<_>>().join("
-"))
+        format!("<pre class=\"dry\">{}</pre>", v.dry_run.iter().map(|l| esc(l)).collect::<Vec<_>>().join("\n"))
     };
-    format!(
-        "<h2 class=\"section\">Agent dispatcher</h2>
-         <div class=\"card\"><div class=\"row\"><strong>Dispatcher</strong> · <span class=\"portal-status\">{status}</span></div>         <p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request that needs you,          on a branch of its own, under your own <code>gh</code>. It needs <code>herdr</code>, <code>gh</code> and          <code>git</code>. This is the only thing GitHoot does that is not reading, so          <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code>.          Set <code>dispatcherCloneRoot</code> in <code>config.txt</code> if your clones are elsewhere.</p>         {notes}{message}{dry}{said}</div>
-{}",
-        esc(d.clone_root),
-        esc(d.worktree_root),
-        prompts_card(d, token)
-    )
-}
 
-/// The dispatcher's prompts as edit boxes, one form, one Save. Shown only once the dispatcher is
-/// installed, because until then there is nothing that reads them.
-///
-/// An emptied box is the reset: the file is removed and the shipped default comes back on the next
-/// tick. Said on the card, because a blank box that silently keeps the old text would be worse.
-fn prompts_card(d: &DispatcherView, token: &str) -> String {
     let mut h = format!(
-        "<h2 class=\"section\">Dispatcher prompts</h2>\n<div class=\"card\">\
-         <form method=\"post\" action=\"/{}/settings/dispatcher\"><input type=\"hidden\" name=\"action\" value=\"prompts\">\
-         <p class=\"sub\">What the agent is told, per bar, plus the nudge it gets when a pull request changes under it. \
-         Placeholders: <code>{{url}}</code> <code>{{repo}}</code> <code>{{number}}</code> <code>{{branch}}</code> \
-         <code>{{title}}</code> <code>{{author}}</code>. The last two are written by whoever opened the pull request: \
-         keep them in the labelled data block. Clear a box to go back to the shipped default.</p>",
-        esc(token)
+        "<h2 class=\"section\">{name}</h2>\n<div class=\"card\"><div class=\"row\"><strong>{name}</strong> · \
+         <span class=\"portal-status\">{status}</span></div><p class=\"sub\">{summary}</p>{notes}{flash}\
+         <div class=\"actions\">{switch}{dry}</div>{said}</div>\n",
+        name = esc(v.name),
+        status = esc(&status),
+        summary = esc(v.summary),
     );
-    for p in d.prompts {
+    if !v.settings.is_empty() {
         h.push_str(&format!(
-            "<label class=\"row\"><strong>{}</strong> <span class=\"sub\">{}</span></label>\
-             <textarea name=\"prompt_{}\" rows=\"14\" spellcheck=\"false\">{}</textarea>",
-            esc(p.name),
-            if p.is_default { "shipped default" } else { "yours" },
-            esc(p.name),
-            esc(&p.text),
+            "<h2 class=\"section\">Settings</h2>\n<div class=\"card\"><form method=\"post\" action=\"{action}\">\
+             <input type=\"hidden\" name=\"action\" value=\"settings\">"
         ));
+        for (key, label, value, placeholder) in &v.settings {
+            h.push_str(&format!(
+                "<label class=\"path\"><span>{}</span><input type=\"text\" name=\"{}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"></label>",
+                esc(label),
+                esc(key),
+                esc(value),
+                esc(placeholder)
+            ));
+        }
+        h.push_str("<button class=\"small\" type=\"submit\">Save settings</button></form></div>\n");
     }
-    h.push_str("<button class=\"small\" type=\"submit\">Save prompts</button></form></div>\n");
     h
 }
 
@@ -1191,7 +1174,7 @@ fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str) -> String 
 mod tests {
     use super::*;
 
-    const NAV: Nav = Nav { current: Tab::Settings, muted: 0, dispatcher: false };
+    const NAV: Nav = Nav { current: Tab::Settings, muted: 0 };
 
     const NOW: u64 = 1_789_000_000;
 
@@ -1643,85 +1626,85 @@ mod tests {
         PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n" }
     }
 
-    // ── The dispatcher card ───────────────────────────────────────────────────
+    // ── Integrations ──────────────────────────────────────────────────────────
 
-    fn dispatcher(enabled: bool, missing: &'static [&'static str]) -> DispatcherView<'static> {
-        DispatcherView {
-            enabled,
+    fn integration(installed: bool, missing: &'static [&'static str]) -> IntegrationView<'static> {
+        IntegrationView {
+            id: "herdr",
+            name: "Herdr dispatcher",
+            summary: "Starts agents.",
+            installed,
+            unsupported: None,
             missing,
-            message: None,
-            prompts: &[],
+            flash: None,
             dry_run: &[],
-            clone_root: "/d/projects",
-            worktree_root: "/d/worktrees",
+            settings: vec![("cloneRoot", "Clones live in", "/d/projects".to_string(), "~/projects")],
+            body: "<p>its own part</p>".to_string(),
         }
     }
 
-    /// Hidden entirely unless asked for: on macOS the page must not mention a feature that does
-    /// not exist in that binary.
+    /// Not installed is the default and must read as plainly that, offering Install on the spot. A
+    /// page that explains what a thing does is the right page to turn it on from.
     #[test]
-    fn the_dispatcher_card_is_absent_unless_a_view_is_given() {
-        assert!(!dispatcher_page("tok", None, &NAV).contains("Agent dispatcher"));
-    }
-
-    /// Off is the default and must read as a plain "Off", offering the switch itself rather than
-    /// directions to another tab. A page that explains what a thing does is the right page to turn
-    /// it on from.
-    #[test]
-    fn a_dispatcher_that_is_off_offers_the_switch_on_the_spot() {
-        let html = dispatcher_page("tok", Some(&dispatcher(false, &[])), &NAV);
-        assert!(html.contains("Agent dispatcher"));
-        assert!(html.contains("portal-status\">Off<"), "{html}");
-        assert!(html.contains(r#"value="on""#) && html.contains(">Turn on<"), "the switch itself");
-        assert!(!html.contains(r#"value="off""#), "nothing to turn off while it is off");
+    fn an_integration_not_installed_offers_install_and_a_rehearsal() {
+        let html = integration_page("tok", &integration(false, &[]), &NAV);
+        assert!(html.contains("portal-status\">Not installed<"), "{html}");
+        assert!(html.contains(r#"value="install""#) && html.contains(">Install<"));
+        assert!(!html.contains(r#"value="remove""#), "nothing to remove while it is not installed");
         assert!(html.contains(">Dry run<"), "and a way to rehearse before committing to it");
+        assert!(html.contains(r#"action="/tok/integrations/herdr""#));
     }
 
-    /// On offers the way back out, and never both directions at once.
     #[test]
-    fn a_dispatcher_that_is_on_offers_the_way_back_out() {
-        let html = dispatcher_page("tok", Some(&dispatcher(true, &[])), &NAV);
-        assert!(html.contains(r#"value="off""#) && html.contains(">Turn off<"));
-        assert!(!html.contains(r#"value="on""#), "one switch, not two");
+    fn an_installed_integration_offers_the_way_back_out() {
+        let html = integration_page("tok", &integration(true, &[]), &NAV);
+        assert!(html.contains("portal-status\">Installed<"), "{html}");
+        assert!(html.contains(r#"value="remove""#) && !html.contains(r#"value="install""#), "one switch, not two");
     }
 
-    /// On with everything present is the healthy case and says nothing more than that.
+    /// Installed with a tool gone must not read as healthy: it is switched on and doing nothing.
     #[test]
-    fn a_dispatcher_that_is_on_and_able_says_only_on() {
-        let html = dispatcher_page("tok", Some(&dispatcher(true, &[])), &NAV);
-        assert!(html.contains("portal-status\">On<"), "{html}");
-        assert!(!html.contains("not dispatching"));
+    fn an_installed_integration_missing_a_tool_says_it_is_idle() {
+        let html = integration_page("tok", &integration(true, &["herdr", "gh"]), &NAV);
+        assert!(html.contains("Installed, but idle: missing herdr, gh"), "{html}");
+        assert!(html.contains("<code>herdr</code>, <code>gh</code>"));
     }
 
-    /// On with a tool gone must not read as healthy: it is switched on and doing nothing.
+    /// Where the build cannot run it, the page says why and offers nothing that could only fail.
     #[test]
-    fn a_dispatcher_missing_a_tool_says_it_is_not_dispatching() {
-        let html = dispatcher_page("tok", Some(&dispatcher(true, &["herdr", "gh"])), &NAV);
-        assert!(html.contains("On, but not dispatching: missing herdr, gh"), "{html}");
-        assert!(html.contains("<code>herdr</code>") && html.contains("<code>gh</code>"));
-        assert!(
-            html.contains(r#"href="https://herdr.dev/docs/install/""#),
-            "a missing herdr must link to its install guide"
-        );
+    fn an_unsupported_integration_offers_no_install() {
+        let v = IntegrationView { unsupported: Some("Needs Linux or Windows."), ..integration(false, &[]) };
+        let html = integration_page("tok", &v, &NAV);
+        assert!(html.contains("Not available here") && html.contains("Needs Linux or Windows."));
+        assert!(!html.contains(r#"value="install""#) && !html.contains(">Dry run<"));
     }
 
-    /// The prompts are editable whether or not the dispatcher is on. Deciding what an agent will
-    /// be told *before* switching it on is the sane order, and there is no install step any more
-    /// that could have gated them.
+    /// Setting values are the user's text going into an attribute.
     #[test]
-    fn the_prompts_are_editable_even_while_it_is_off() {
-        let html = dispatcher_page("tok", Some(&dispatcher(false, &[])), &NAV);
-        assert!(html.contains(r#"action="/tok/settings/dispatcher""#));
+    fn integration_settings_are_a_form_of_their_own_with_escaped_values() {
+        let v = IntegrationView {
+            settings: vec![("cloneRoot", "Clones live in", "\"><script>".to_string(), "~/projects")],
+            ..integration(true, &[])
+        };
+        let html = integration_page("tok", &v, &NAV);
+        assert!(html.contains(r#"name="action" value="settings""#));
+        assert!(html.contains(r#"name="cloneRoot""#) && !html.contains("\"><script>"));
+        assert!(!html.contains(r#"action="/tok/settings">"#), "never the general settings form");
     }
 
-    /// The prompts form posts to its own route, on a page with no settings form on it, so saving
-    /// prompts can never cost an unsaved settings edit.
     #[test]
-    fn the_dispatcher_page_carries_no_settings_form() {
-        let html = dispatcher_page("tok", Some(&dispatcher(true, &[])), &NAV);
-        assert!(html.contains("Agent dispatcher"));
-        assert!(!html.contains(r#"action="/tok/settings">"#));
-        assert!(html.contains(r#"action="/tok/settings/dispatcher""#));
+    fn an_integration_page_carries_its_own_part_and_a_flash_once_given() {
+        let v = IntegrationView { flash: Some("Installed."), dry_run: &[], ..integration(true, &[]) };
+        let html = integration_page("tok", &v, &NAV);
+        assert!(html.contains("<p>its own part</p>") && html.contains("<strong>Installed.</strong>"));
+    }
+
+    #[test]
+    fn the_integrations_tab_lists_each_with_its_state_and_page() {
+        let rows = [IntegrationRow { id: "herdr", name: "Herdr dispatcher", summary: "Starts agents.", status: "Not installed".into() }];
+        let html = integrations_page("tok", &rows, &Nav { current: Tab::Integrations, muted: 0 });
+        assert!(html.contains(r#"href="/tok/integrations/herdr""#) && html.contains("Not installed"));
+        assert!(html.contains(r#"aria-current="page">Integrations<"#));
     }
 
     // ── Mutes on the PR page ──────────────────────────────────────────────────
@@ -1819,14 +1802,13 @@ mod tests {
     /// muted pull request whose bar is empty, is one click from anywhere; the current tab is not a link.
     #[test]
     fn every_own_page_carries_the_nav_and_marks_where_you_are() {
-        let n = Nav { current: Tab::Settings, muted: 2, dispatcher: true };
+        let n = Nav { current: Tab::Settings, muted: 2 };
         let settings = settings_page(&default_cfg(), "tok", &[], &n);
         assert!(settings.contains(r#"<span class="on" aria-current="page">Settings</span>"#));
-        for path in ["accounts", "muted", "dispatcher"] {
+        for path in ["accounts", "muted", "integrations"] {
             assert!(settings.contains(&format!(r#"href="/tok/{path}""#)), "{path}");
         }
         assert!(settings.contains(">Muted (2)<"));
-        assert!(!settings_page(&default_cfg(), "tok", &[], &NAV).contains("/tok/dispatcher"), "no dispatcher tab on macOS or with the API shut");
         let a = accounts_page("tok", &view(&[], None), &Nav { current: Tab::Accounts, ..n });
         assert!(a.contains(r#"aria-current="page">Accounts<"#) && a.contains(r#"href="/tok/settings""#));
         assert!(muted_page(&[], "tok", NOW, &Nav { current: Tab::Muted, ..n }).contains(r#"aria-current="page">Muted (2)<"#));
@@ -1838,7 +1820,7 @@ mod tests {
         let html = settings_page(&default_cfg(), "tok", &[], &NAV);
         assert!(html.contains(r#"<form method="post" action="/tok/settings">"#));
         assert!(!html.contains("http-equiv=\"refresh\""), "no auto-refresh on the page with your edits");
-        assert!(!html.contains("Portals") && !html.contains("Agent dispatcher") && !html.contains("settings/authenticate"));
+        assert!(!html.contains("Portals") && !html.contains("/tok/integrations/") && !html.contains("settings/authenticate"));
     }
 
     /// The page posts its mute links back to itself, so it must not null its own `Origin`.
@@ -1848,30 +1830,6 @@ mod tests {
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#));
         assert!(!html.contains("no-referrer\""), "the document policy must not be no-referrer");
         assert!(html.contains(r#"rel="noreferrer""#), "outbound links still send nothing");
-    }
-
-    /// The boxes are there whether it is on or off. There is no install step to gate them on any
-    /// more, and reading what an agent would be told is the most useful thing the page offers
-    /// someone deciding whether to switch it on at all.
-    #[test]
-    fn prompt_boxes_are_shown_whether_it_is_on_or_off() {
-        let rows = [PromptRow { name: "approved", text: "x {url}".into(), is_default: true }];
-        for on in [false, true] {
-            let html = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(on, &[]) }), &NAV);
-            assert!(html.contains("Dispatcher prompts"), "on={on}");
-            assert!(html.contains(r#"name="prompt_approved""#), "on={on}");
-            assert!(html.contains("shipped default"), "on={on}");
-        }
-    }
-
-    /// Prompt text is user content going into an HTML attribute-free element: it must still be
-    /// escaped, or a `</textarea>` in a prompt would break out of its box.
-    #[test]
-    fn prompt_text_is_escaped_inside_its_box() {
-        let rows = [PromptRow { name: "update", text: "</textarea><script>1</script> & {url}".into(), is_default: false }];
-        let html = dispatcher_page("tok", Some(&DispatcherView { prompts: &rows, ..dispatcher(true, &[]) }), &NAV);
-        assert!(!html.contains("</textarea><script>"));
-        assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
     }
 
     fn settings_with(portals: &[PortalStatus], signin: Option<&str>) -> String {

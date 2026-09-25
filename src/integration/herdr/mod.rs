@@ -3,8 +3,8 @@
 //! **This is the one thing GitHoot does that is not reading.** Everywhere else it polls GitHub,
 //! draws an icon and opens a page; here it creates branches and worktrees and starts agents. That
 //! boundary used to be a process boundary: a shipped script, installed by a button, kept alive by
-//! systemd or Task Scheduler. It is now a setting, `dispatcher`, off by default and off in every
-//! `config.txt` that does not say otherwise.
+//! systemd or Task Scheduler. It is now the first integration (see `crate::integration`), off
+//! until you install it on the Integrations tab, which writes `integration.herdr.enabled=on`.
 //!
 //! The move inward is not a tidy-up. Two things forced it:
 //!
@@ -26,10 +26,16 @@
 //!   * Each version of a pull request is looked at exactly once, recorded whatever the outcome.
 //!   * The agent works on a branch of its own, `githoot/<slug>`, never the pull request's.
 //!
-//! What GitHoot knows it no longer re-fetches: the bars come from `scheduler::pr_snapshot`, the
-//! same judgement the icon and the pages use. The local API is no longer part of this path at all.
+//! What GitHoot knows it no longer re-fetches: the bars come from the integration runner, the same
+//! judgement the icon and the pages use, with muted pull requests already taken out. Its files live
+//! in `~/.githoot/integrations/herdr/`: one state file per bar, the prompts, and two small caches.
 
+pub mod prompts;
+
+use super::{Batch, Context, Info, Integration, Said, Setting};
+use crate::page::esc;
 use crate::portal::types::PrEntry;
+use crate::portal::PortalKind;
 use crate::state::PrAxis;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -109,8 +115,8 @@ pub struct Settings {
     pub clone_root: PathBuf,
     pub worktree_root: PathBuf,
     pub agent_kind: String,
-    /// Prints what it would do and touches nothing, including the state file. The default for a
-    /// hand run (`--dispatch`), and never the default for the thread.
+    /// Says what it would do and touches nothing, including the state file. What the page's Dry run
+    /// button asks for, and never what the runner does.
     pub dry_run: bool,
 }
 
@@ -176,12 +182,12 @@ pub fn missing_tools() -> Vec<&'static str> {
 // state now, not a script's. Restart-safe on purpose, unlike the in-memory ledger, so that
 // restarting the tray never re-fires every pull request in a bar.
 
-fn state_path(home: &Path, axis: PrAxis) -> PathBuf {
-    home.join("dispatch").join(format!("{}.txt", axis.slug()))
+fn state_path(dir: &Path, axis: PrAxis) -> PathBuf {
+    dir.join(format!("{}.txt", axis.slug()))
 }
 
-pub fn read_state(home: &Path, axis: PrAxis) -> std::collections::BTreeMap<String, Handled> {
-    std::fs::read_to_string(state_path(home, axis))
+pub fn read_state(dir: &Path, axis: PrAxis) -> std::collections::BTreeMap<String, Handled> {
+    std::fs::read_to_string(state_path(dir, axis))
         .unwrap_or_default()
         .lines()
         .filter_map(|line| {
@@ -200,11 +206,11 @@ pub fn read_state(home: &Path, axis: PrAxis) -> std::collections::BTreeMap<Strin
 /// Written through a temporary file, so a crash mid-write cannot leave a half-parsed state that
 /// would make every pull request in the bar look new.
 pub fn write_state(
-    home: &Path,
+    dir: &Path,
     axis: PrAxis,
     state: &std::collections::BTreeMap<String, Handled>,
 ) -> std::io::Result<()> {
-    let path = state_path(home, axis);
+    let path = state_path(dir, axis);
     std::fs::create_dir_all(path.parent().expect("the state path always has a parent"))?;
     let text: String = state
         .iter()
@@ -249,8 +255,8 @@ impl Target {
 // ── Asking GitHub what changed ───────────────────────────────────────────────
 
 /// Your own login, cached on disk. Used only to tell your comments from everyone else's.
-pub fn viewer(home: &Path) -> Option<String> {
-    let path = home.join("dispatch").join("viewer");
+pub fn viewer(dir: &Path) -> Option<String> {
+    let path = dir.join("viewer");
     if let Ok(cached) = std::fs::read_to_string(&path) {
         let cached = cached.trim().to_string();
         if !cached.is_empty() {
@@ -261,7 +267,7 @@ pub fn viewer(home: &Path) -> Option<String> {
     if login.is_empty() {
         return None;
     }
-    let _ = std::fs::create_dir_all(path.parent().expect("dispatch dir"));
+    let _ = std::fs::create_dir_all(path.parent().expect("integration dir"));
     let _ = std::fs::write(&path, &login);
     Some(login)
 }
@@ -437,12 +443,12 @@ pub struct Report {
 
 /// The head branch, from `gh`, cached on disk. GitHoot does not carry it and asking every tick
 /// would burn rate limit for a value that does not change.
-fn head_branch(home: &Path, t: &Target) -> Result<String, String> {
+fn head_branch(dir: &Path, t: &Target) -> Result<String, String> {
     let name: String = format!("{}#{}", t.repo, t.number)
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
         .collect();
-    let path = home.join("dispatch").join("branches").join(name);
+    let path = dir.join("branches").join(name);
     if let Ok(cached) = std::fs::read_to_string(&path) {
         let cached = cached.trim().to_string();
         if !cached.is_empty() {
@@ -466,14 +472,14 @@ fn head_branch(home: &Path, t: &Target) -> Result<String, String> {
 /// Returns the line to log either way. Nothing here is retried inside a pass: by the rule at the
 /// top of the module the version is recorded as looked at whatever happened, and the retry that
 /// can actually go differently is the one that comes when the pull request changes.
-fn start(home: &Path, t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<String, Trouble> {
+fn start(dir: &Path, t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<String, Trouble> {
     let clone = settings.clone_of(&t.repo);
     if !clone.join(".git").exists() {
-        // Not recorded, so that correcting `dispatcherCloneRoot` takes effect on the next
+        // Not recorded, so that correcting `integration.herdr.cloneRoot` takes effect on the next
         // pass rather than waiting for somebody to comment on the pull request again.
         return Err(Trouble::Setup(format!("no clone at {}", clone.display())));
     }
-    let branch = head_branch(home, t).map_err(Trouble::Passing)?;
+    let branch = head_branch(dir, t).map_err(Trouble::Passing)?;
 
     // The branch name is chosen by whoever opened the pull request and reaches git as an argument,
     // so it must not be able to look like an option. `check-ref-format` rejects anything git would,
@@ -582,14 +588,14 @@ fn start(home: &Path, t: &Target, slug: &str, settings: &Settings, template: &st
 ///
 /// The state is written once at the end, through a temporary file, and a dry run writes nothing at
 /// all so that a hand run can never change what the real one would do next.
-pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, home: &Path, templates: &Templates) -> Report {
+pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, templates: &Templates) -> Report {
     let mut report = Report::default();
-    let Some(me) = viewer(home) else {
+    let Some(me) = viewer(dir) else {
         report.problems.push("gh could not say who you are - is it signed in?".to_string());
         return report;
     };
     let agents = live_agents();
-    let previous = read_state(home, axis);
+    let previous = read_state(dir, axis);
     let mut next = std::collections::BTreeMap::new();
 
     for t in targets {
@@ -647,7 +653,7 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, home: &Path, 
                     Err(e) => report.problems.push(format!("{}#{}: nudge failed: {e}", t.repo, t.number)),
                 }
             }
-            Action::Start => match start(home, t, &slug, settings, &templates.bar) {
+            Action::Start => match start(dir, t, &slug, settings, &templates.bar) {
                 Ok(said) => {
                     report.started += 1;
                     report.lines.push(format!("{}#{}: {said}", t.repo, t.number));
@@ -665,7 +671,7 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, home: &Path, 
 
     // A dry run writes nothing at all, so pressing Dry run can never change what the next real
     // pass would do. That is the whole value of the button.
-    let written = if settings.dry_run { Ok(()) } else { write_state(home, axis, &next) };
+    let written = if settings.dry_run { Ok(()) } else { write_state(dir, axis, &next) };
     if let Err(e) = written {
         report.problems.push(format!("could not write the dispatch state: {e}"));
     }
@@ -678,194 +684,253 @@ pub struct Templates {
     pub update: String,
 }
 
-// ── When a pass happens ──────────────────────────────────────────────────────
+// ── The integration ──────────────────────────────────────────────────────────
 
-/// How often a pass runs. GitHoot polls GitHub at most once a minute, so the snapshot this reads
-/// cannot change faster than that; anything quicker would be work to discover nothing.
-const EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+pub struct Herdr;
 
-/// The last dry run the settings page asked for, so the answer survives the redirect back.
-static LAST_DRY_RUN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static INFO: Info = Info {
+    id: "herdr",
+    name: "Herdr dispatcher",
+    summary: "Starts a Herdr agent for each pull request that needs you, on a branch of its own.",
+    // `gh` answers who you are, the head branch and the comments. Nothing here would work against
+    // another forge's pull request, so none ever reaches it.
+    portals: &[PortalKind::GitHub],
+    settings: &[
+        Setting {
+            key: "cloneRoot",
+            label: "Clones live in",
+            placeholder: "~/projects",
+            help: "Where your clones live, one directory per repository name: owner/thing needs <this>/thing. Empty means ~/projects.",
+        },
+        Setting {
+            key: "worktreeRoot",
+            label: "Worktrees go in",
+            placeholder: "~/worktrees",
+            help: "Where the worktree for each pull request goes, named githoot/pr-<number>-<repo>. Empty means ~/worktrees.",
+        },
+    ],
+    unsupported: if cfg!(target_os = "macos") { Some("The Herdr dispatcher needs Linux or Windows.") } else { None },
+};
 
-pub fn last_dry_run() -> Vec<String> {
-    LAST_DRY_RUN.lock().map(|l| l.clone()).unwrap_or_default()
+impl Integration for Herdr {
+    fn info(&self) -> &'static Info {
+        &INFO
+    }
+
+    /// Brings any prompt you have not edited up to this release's default, and leaves the ones you
+    /// have alone. Every boot, installed or not, because a release that improves a prompt still has
+    /// to reach the people who never touched it, and editing the prompts before installing is the
+    /// sane order.
+    fn prepare(&self, ctx: &Context) {
+        match prompts::refresh_defaults(&ctx.dir) {
+            Ok(kept) if !kept.is_empty() => crate::infoln!("herdr: left your edited prompts {} alone", kept.join(", ")),
+            Ok(_) => {}
+            Err(e) => crate::errorln!("herdr: could not refresh the default prompts: {e}"),
+        }
+    }
+
+    fn missing(&self) -> Vec<&'static str> {
+        missing_tools()
+    }
+
+    fn pass(&self, ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
+        let settings = settings_now(ctx, dry_run);
+        let mut out = Said::default();
+        for batch in batches {
+            let axis = batch.axis;
+            if dry_run && batch.muted > 0 {
+                out.said.push(format!("[{}] {} muted, skipped", axis.slug(), batch.muted));
+            }
+            let targets: Vec<Target> = batch.entries.iter().filter_map(Target::from_entry).collect();
+            if targets.is_empty() {
+                continue;
+            }
+            let templates = Templates {
+                bar: prompts::text(&ctx.dir, axis.slug()),
+                update: prompts::text(&ctx.dir, "update"),
+            };
+            let report = tick(axis, &targets, &settings, &ctx.dir, &templates);
+            out.said.extend(report.lines.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+            out.trouble.extend(report.problems.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+            out.setup.extend(report.setup.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+            if dry_run && report.looked_at > 0 {
+                out.said.push(format!("[{}] {} pull request(s) looked at", axis.slug(), report.looked_at));
+            }
+        }
+        if dry_run && out.said.is_empty() && out.trouble.is_empty() && out.setup.is_empty() {
+            out.said.push("nothing needed an agent".to_string());
+        }
+        out
+    }
+
+    fn page(&self, ctx: &Context, token: &str) -> String {
+        let settings = settings_now(ctx, true);
+        let missing = missing_tools();
+        let rows = prompts::prompts(&ctx.dir);
+        page_body(token, &settings, &missing, &rows)
+    }
+
+    /// Only the four known names are read off the form, by name; nothing the form invents can become
+    /// a filename. See `prompts::save_prompts`.
+    fn action(&self, ctx: &Context, action: &str, form: &crate::serve::Form) -> Option<Result<String, String>> {
+        if action != "prompts" {
+            return None;
+        }
+        crate::infoln!("settings page saved the herdr prompts");
+        let given: Vec<(String, String)> = prompts::DEFAULT_PROMPTS
+            .iter()
+            .filter_map(|(name, _)| form.get(&format!("prompt_{name}")).map(|v| (name.to_string(), v.to_string())))
+            .collect();
+        Some(
+            prompts::save_prompts(&ctx.dir, &given)
+                .map(|()| "Prompts saved. The next pass uses them.".to_string())
+                .map_err(|e| format!("could not write the prompts: {e}")),
+        )
+    }
 }
 
-/// Reads the settings a pass needs out of `config.txt`, with the roots it does not yet expose as
-/// settings taken from the environment so they can be moved without a release.
-/// `config.txt` first, then the environment, then a default under your home directory.
+/// The roots a pass needs: the integration's setting first, then the environment, then a default
+/// under your home directory.
 ///
 /// The environment comes second rather than first because it is the exception: it is there for a
 /// one-off `GITHOOT_CLONE_ROOT=... githoot` while trying something, and a value somebody wrote in
 /// `config.txt` should not be quietly overridden by a stale variable in a shell profile.
-fn settings_now(app_asset_path: &Path, dry_run: bool) -> Settings {
-    let cfg = crate::config::Config::load(app_asset_path).0;
+fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
     let home = dirs::home_dir().unwrap_or_default();
     let pick = |set: &str, env: &str, fallback: PathBuf| {
-        if !set.trim().is_empty() {
-            return PathBuf::from(set.trim());
+        if !set.is_empty() {
+            return PathBuf::from(set);
         }
         std::env::var_os(env).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()).unwrap_or(fallback)
     };
     Settings {
-        clone_root: pick(&cfg.clone_root, "GITHOOT_CLONE_ROOT", home.join("projects")),
-        worktree_root: pick(&cfg.worktree_root, "GITHOOT_WORKTREE_ROOT", home.join("worktrees")),
+        clone_root: pick(ctx.setting("cloneRoot"), "GITHOOT_CLONE_ROOT", home.join("projects")),
+        worktree_root: pick(ctx.setting("worktreeRoot"), "GITHOOT_WORKTREE_ROOT", home.join("worktrees")),
         agent_kind: std::env::var("GITHOOT_AGENT_KIND").unwrap_or_else(|_| "claude".to_string()),
         dry_run,
     }
 }
 
-/// The roots a pass would use right now, for the settings page to show. Diagnosing "it found no
-/// clones" from a card that does not say where it looked is guesswork.
-pub fn roots(app_asset_path: &Path) -> (String, String) {
-    let s = settings_now(app_asset_path, true);
-    (s.clone_root.display().to_string(), s.worktree_root.display().to_string())
+// ── Its page ─────────────────────────────────────────────────────────────────
+
+/// What sits below the generic card: what it does, where it will look, how to get Herdr, and the
+/// prompts. Whether it is installed, what it is missing and the Dry run button are the generic
+/// card's job, the same for every integration.
+fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prompts::Prompt]) -> String {
+    let herdr = if missing.contains(&"herdr") {
+        "<p class=\"sub\"><a href=\"https://herdr.dev/docs/install/\">How to install Herdr</a></p>"
+    } else {
+        ""
+    };
+    format!(
+        "<div class=\"card\"><p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request \
+         that needs you, on a branch of its own, under your own <code>gh</code>. It needs <code>herdr</code>, <code>gh</code> \
+         and <code>git</code>. This is the one thing GitHoot does that is not reading, so \
+         <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>\
+         <p class=\"sub\">Right now it would look for clones in <code>{}</code> and put worktrees in <code>{}</code>.</p>{herdr}</div>\n{}",
+        esc(&settings.clone_root.display().to_string()),
+        esc(&settings.worktree_root.display().to_string()),
+        prompts_card(token, prompts)
+    )
 }
 
-/// One pass over every bar GitHoot is watching, using the lists it already has.
+/// The prompts as edit boxes, one form, one Save. Always shown, installed or not, because editing
+/// what an agent will be told before switching it on is the sane order.
 ///
-/// **The honesty gate.** A bar whose list is `None` is one GitHoot has no confirmed answer for,
-/// not an empty one. Acting on it would mean going quiet for exactly as long as GitHub is broken
-/// and looking identical to a quiet morning, so an unconfirmed bar is skipped entirely.
-pub fn pass(app_asset_path: &Path, dry_run: bool) -> Said {
-    let settings = settings_now(app_asset_path, dry_run);
-    let now = crate::mute::unix_now();
-    let mut said = Vec::new();
-    let mut trouble = Vec::new();
-    let mut setup = Vec::new();
-
-    for axis in PrAxis::ALL {
-        let snapshot = crate::scheduler::pr_snapshot(axis);
-        let mut targets = Vec::new();
-        let mut muted = 0usize;
-        for (_, list) in &snapshot.groups {
-            // `None` is "not known", and is the whole reason this is not `unwrap_or_default`.
-            let Some(entries) = list else { continue };
-            for entry in entries {
-                if crate::mute::until(entry.key(), now).is_some() {
-                    muted += 1;
-                    continue;
-                }
-                if let Some(target) = Target::from_entry(entry) {
-                    targets.push(target);
-                }
-            }
-        }
-        // Said in a dry run only, and worth saying: a bar whose every pull request is muted looks
-        // from the outside exactly like an empty one, and "nothing needed an agent" is then true
-        // but useless to somebody wondering why their pull request was ignored.
-        if dry_run && muted > 0 {
-            said.push(format!("[{}] {muted} muted, skipped", axis.slug()));
-        }
-        if targets.is_empty() {
-            continue;
-        }
-
-        let home = app_asset_path;
-        let templates = Templates {
-            bar: crate::prompts::text(home, axis.slug()),
-            update: crate::prompts::text(home, "update"),
-        };
-        let report = tick(axis, &targets, &settings, home, &templates);
-        for line in report.lines {
-            said.push(format!("[{}] {line}", axis.slug()));
-        }
-        for problem in report.problems {
-            trouble.push(format!("[{}] {problem}", axis.slug()));
-        }
-        for problem in report.setup {
-            setup.push(format!("[{}] {problem}", axis.slug()));
-        }
-        if dry_run && report.looked_at > 0 {
-            said.push(format!("[{}] {} pull request(s) looked at", axis.slug(), report.looked_at));
-        }
+/// An emptied box is the reset: the default is written back and the shipped text returns. Said on
+/// the card, because a blank box that silently keeps the old text would be worse.
+fn prompts_card(token: &str, prompts: &[prompts::Prompt]) -> String {
+    let mut h = format!(
+        "<h2 class=\"section\">Prompts</h2>\n<div class=\"card\">\
+         <form method=\"post\" action=\"/{}/integrations/herdr\"><input type=\"hidden\" name=\"action\" value=\"prompts\">\
+         <p class=\"sub\">What the agent is told, per bar, plus the nudge it gets when a pull request changes under it. \
+         Placeholders: <code>{{url}}</code> <code>{{repo}}</code> <code>{{number}}</code> <code>{{branch}}</code> \
+         <code>{{title}}</code> <code>{{author}}</code>. The last two are written by whoever opened the pull request: \
+         keep them in the labelled data block. Clear a box to go back to the shipped default.</p>",
+        esc(token)
+    );
+    for p in prompts {
+        h.push_str(&format!(
+            "<label class=\"row\"><strong>{}</strong> <span class=\"sub\">{}</span></label>\
+             <textarea name=\"prompt_{}\" rows=\"14\" spellcheck=\"false\">{}</textarea>",
+            esc(p.name),
+            if p.is_default { "shipped default" } else { "yours" },
+            esc(p.name),
+            esc(&p.text),
+        ));
     }
-    if said.is_empty() && trouble.is_empty() && setup.is_empty() {
-        said.push("nothing needed an agent".to_string());
-    }
-    Said { said, trouble, setup }
-}
-
-/// What a pass has to say, split by how loudly and how often to say it.
-#[derive(Debug, Default)]
-pub struct Said {
-    /// Routine. Info level.
-    pub said: Vec<String>,
-    /// Went wrong. Error level, every time.
-    pub trouble: Vec<String>,
-    /// A setting needs fixing. Error level, but only when the set changes.
-    pub setup: Vec<String>,
-}
-
-/// Runs a pass without acting and remembers what it said, for the page's Dry run button.
-pub fn dry_run_now(app_asset_path: &Path) {
-    let out = pass(app_asset_path, true);
-    // All three, in one block. Somebody pressing Dry run wants the whole answer, and splitting it
-    // between a page and a log file would be the same mistake twice.
-    let mut lines = out.said;
-    lines.extend(out.trouble);
-    lines.extend(out.setup);
-    if let Ok(mut last) = LAST_DRY_RUN.lock() {
-        *last = lines;
-    }
-}
-
-/// Said once per change rather than once per pass, because a missing tool repeated every thirty
-/// seconds would bury everything else in the log.
-static LAST_COMPLAINT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-
-fn complain_once(said: String) {
-    let Ok(mut last) = LAST_COMPLAINT.lock() else { return };
-    if *last == said {
-        return;
-    }
-    if !said.is_empty() {
-        crate::errorln!("dispatcher: {said}");
-    } else if !last.is_empty() {
-        crate::infoln!("dispatcher: everything it needs is back");
-    }
-    *last = said;
-}
-
-/// The thread. Always started, and it reads the setting on every pass rather than at boot.
-///
-/// That is deliberate, and it is the difference between a switch and a note telling you to
-/// restart. The thread costs one config read every thirty seconds while the dispatcher is off,
-/// which is nothing, and in exchange the button on the Dispatcher tab means what a button should.
-/// Nothing is created, fetched or started until a pass finds the setting on.
-pub fn spawn(app_asset_path: PathBuf) {
-    std::thread::Builder::new()
-        .name("dispatch".to_string())
-        .spawn(move || loop {
-            std::thread::sleep(EVERY);
-            if !crate::config::Config::load(&app_asset_path).0.dispatcher {
-                continue;
-            }
-            let missing = missing_tools();
-            complain_once(if missing.is_empty() { String::new() } else { format!("missing {}", missing.join(", ")) });
-            if !missing.is_empty() {
-                continue;
-            }
-            let out = pass(&app_asset_path, false);
-            for line in out.said {
-                crate::infoln!("dispatcher: {line}");
-            }
-            // Never silenced by the log level. A pull request that could not be dispatched has to
-            // be visible at `logLevel=error`, which is the default and what most people run.
-            for problem in out.trouble {
-                crate::errorln!("dispatcher: {problem}");
-            }
-            // Said once per change. These repeat every pass by nature, and a wrong clone root
-            // would otherwise write a line per pull request every thirty seconds forever.
-            complain_once(out.setup.join("; "));
-        })
-        .map(|_| ())
-        .unwrap_or_else(|e| crate::errorln!("dispatcher: could not start its thread: {e}"));
+    h.push_str("<button class=\"small\" type=\"submit\">Save prompts</button></form></div>\n");
+    h
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings() -> Settings {
+        Settings {
+            clone_root: PathBuf::from("/d/projects"),
+            worktree_root: PathBuf::from("/d/worktrees"),
+            agent_kind: "claude".to_string(),
+            dry_run: true,
+        }
+    }
+
+    /// The boxes are there whether it is installed or not. Reading what an agent would be told is the
+    /// most useful thing the page offers someone deciding whether to install it at all.
+    #[test]
+    fn its_page_offers_the_prompt_boxes_and_posts_them_to_itself() {
+        let rows = [prompts::Prompt { name: "approved", text: "x {url}".into(), is_default: true }];
+        let html = page_body("tok", &settings(), &[], &rows);
+        assert!(html.contains(r#"action="/tok/integrations/herdr""#) && html.contains(r#"value="prompts""#));
+        assert!(html.contains(r#"name="prompt_approved""#) && html.contains("shipped default"));
+        assert!(html.contains("/d/projects") && html.contains("/d/worktrees"));
+    }
+
+    /// Prompt text is user content: a `</textarea>` in a prompt must not break out of its box.
+    #[test]
+    fn prompt_text_is_escaped_inside_its_box() {
+        let rows = [prompts::Prompt { name: "update", text: "</textarea><script>1</script> & {url}".into(), is_default: false }];
+        let html = page_body("tok", &settings(), &[], &rows);
+        assert!(!html.contains("</textarea><script>"));
+        assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
+    }
+
+    /// Herdr is the tool a user is least likely to have, so its absence comes with the way to fix it.
+    #[test]
+    fn a_missing_herdr_links_to_its_install_guide() {
+        assert!(page_body("tok", &settings(), &["herdr"], &[]).contains(r#"href="https://herdr.dev/docs/install/""#));
+        assert!(!page_body("tok", &settings(), &["gh"], &[]).contains("herdr.dev/docs/install"));
+    }
+
+    /// Only its own action. Install, remove, dry run and settings are the generic page's.
+    #[test]
+    fn it_answers_only_the_prompts_action() {
+        let cfg = crate::config::Config::from_text("");
+        let ctx = Context::new(Path::new("/nonexistent"), &cfg, "herdr");
+        let form = crate::serve::parse_form("action=install");
+        assert!(Herdr.action(&ctx, "install", &form).is_none());
+        assert!(Herdr.action(&ctx, "anything", &form).is_none());
+    }
+
+    /// Nothing to look at is said in a dry run, and nothing is run to find that out.
+    #[test]
+    fn a_dry_run_over_empty_bars_says_nothing_needed_an_agent() {
+        let cfg = crate::config::Config::from_text("");
+        let ctx = Context::new(Path::new("/nonexistent"), &cfg, "herdr");
+        let batches = [Batch { axis: PrAxis::ReadyToMerge, entries: Vec::new(), muted: 2 }];
+        let out = Herdr.pass(&ctx, &batches, true);
+        assert_eq!(out.said, ["[approved] 2 muted, skipped"]);
+        assert!(Herdr.pass(&ctx, &[], true).said == ["nothing needed an agent"]);
+        assert!(Herdr.pass(&ctx, &[], false).said.is_empty(), "a real pass with nothing to do is silent");
+    }
+
+    /// Its files are its own: state and caches under the integration's directory, nowhere else.
+    #[test]
+    fn its_state_lives_in_the_integration_directory() {
+        let dir = Path::new("/x/integrations/herdr");
+        assert_eq!(state_path(dir, PrAxis::ChangesRequested), dir.join("work-required.txt"));
+    }
 
     fn seen(updated: &str, comment: &str) -> Handled {
         Handled { updated: updated.to_string(), comment: comment.to_string() }

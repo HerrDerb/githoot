@@ -1,20 +1,22 @@
-# The dispatcher
+# The Herdr dispatcher
 
 **The one thing GitHoot does that is not reading.** Everywhere else it polls GitHub, draws an icon
 and opens a page. Here it creates git branches, creates worktrees, and starts agents. That is a
 different kind of program, so it is off by default and a typo leaves it off.
 
-It is a setting, `dispatcher`, and a thread inside GitHoot. There is nothing to install.
+It is the first [integration](integrations.md): built into GitHoot, off until you install it on the
+**Integrations** tab.
 
 ## What it does, each pass
 
-Every thirty seconds, for each bar GitHoot is watching:
+After every poll, and at least every thirty seconds, for each bar GitHoot is watching:
 
 1. Take the bar from GitHoot's own poll. **A bar GitHoot has no confirmed answer for is skipped
    entirely.** That is not the same as an empty bar: acting on it would mean going quiet for
    exactly as long as GitHub is broken, and looking identical to a quiet morning.
-2. Skip muted pull requests. They drop out of the state file, so when the mute ends the pull
-   request is new to the dispatcher as well.
+2. Skip muted pull requests, and pull requests from any forge but GitHub: the dispatcher asks `gh`
+   about each one, so it cannot act on anything else. Muted ones drop out of the state file, so when
+   the mute ends the pull request is new to the dispatcher as well.
 3. For each of the rest, compare `updated_at` with what was recorded last time. Unchanged: nothing,
    silently, which is almost every pull request almost always.
 4. Changed: ask GitHub once for the newest comment, review or reply **not written by you**. Only
@@ -30,7 +32,7 @@ its `updated_at` is recorded and it is not touched again until GitHub changes it
 thirty seconds would burn your API rate limit on a `gh` lookup that cannot go differently. Retrying
 when the pull request changes is the retry that can.
 
-The exception is a **setup** failure, such as no clone where `dispatcherCloneRoot` says there should
+The exception is a **setup** failure, such as no clone where `integration.herdr.cloneRoot` says there should
 be one. That is a mistake you can correct, and the very next pass can then succeed, so it is not
 recorded. It is said once rather than every pass, or a wrong path would write a line per pull
 request every thirty seconds forever.
@@ -41,14 +43,16 @@ it is usually *your* pull request, and git refuses one branch in two worktrees. 
 assisting you, not replacing you, so it has to be able to start while you are mid-edit. The branch
 name also makes an accidental push obvious.
 
-## Turning it on
+## Installing it
 
-The **Dispatcher** tab has the switch, and the card says where it will look:
+**Integrations ▸ Herdr dispatcher** has the Install button, the two folders, and a line saying where
+it will look right now:
 
-> Clones: `D:\projects` · Worktrees: `D:\worktrees`
+> Right now it would look for clones in `D:\projects` and put worktrees in `D:\worktrees`.
 
-There is no restart: the thread reads the setting on every pass. The same switch is a checkbox on
-the Settings tab.
+There is no restart: the runner reads `config.txt` on every pass. **Remove** switches it off again and
+keeps its prompts, state and settings, so installing it later picks up where it left off. Not on
+macOS, where the page says so and offers no Install.
 
 **Press Dry run first.** It runs a real pass with every effect suppressed and writes no state, so it
 cannot change what the next real pass would do. It explains every outcome, including the quiet ones
@@ -58,9 +62,9 @@ a real pass does not bother to say, which is the whole point of pressing it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `dispatcher` | `off` | The switch. Off by default, and an unrecognised value leaves it off |
-| `dispatcherCloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
-| `dispatcherWorktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
+| `integration.herdr.enabled` | `off` | Installed or not. What Install and Remove write. An unrecognised value leaves it off |
+| `integration.herdr.cloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
+| `integration.herdr.worktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
 
 `GITHOOT_CLONE_ROOT` and `GITHOOT_WORKTREE_ROOT` still work, but only as a one-off override for a run
 started from a shell. The settings come first, deliberately: GitHoot is started from a tray icon, a
@@ -70,13 +74,13 @@ shortcut or autostart, none of which carry a shell's environment.
 
 ### What it needs
 
-`herdr`, `gh` (signed in) and `git`, on `PATH`. The card names any that will not run, and nothing is
+`herdr`, `gh` (signed in) and `git`, on `PATH`. The page names any that will not run, and nothing is
 dispatched until they all do.
 
 ## The prompts
 
 One file per bar, plus the nudge an agent gets when its pull request changes under it. Edit them on
-the **Dispatcher** tab, or in `prompts/` beside `config.txt`.
+its page, installed or not, or in `~/.githoot/integrations/herdr/prompts/`.
 
 **Clear a box to go back to the shipped default.** Beside the prompts sits `.shipped`, holding a
 hash of the text GitHoot last wrote into each one. At every start, a prompt that still matches its
@@ -139,6 +143,25 @@ same applies to any shell that chain-launches another, such as a PowerShell 5.1 
 GitHoot treats this as a setup failure, so the pull request is not recorded and the next pass picks
 it up once the config is fixed.
 
+## Its files
+
+Everything it keeps is in `~/.githoot/integrations/herdr/`: one state file per bar, `prompts/`, and
+two caches (`viewer`, your login, and `branches/`, each pull request's head branch).
+
+## Upgrading from 2.4.0 or 3.0.0
+
+The dispatcher was a setting of its own then. It is an integration now, and nothing is migrated:
+
+- **The keys are gone.** `dispatcher`, `dispatcherCloneRoot` and `dispatcherWorktreeRoot` are no
+  longer read. If one of them was doing something (`dispatcher=on`, or a folder set), the log says so
+  once per start; the `off` and empty lines every fresh file carried are left alone quietly. Install it on the Integrations tab and set the
+  two folders on its page, or write the `integration.herdr.*` keys above.
+- **Its files moved.** `~/.githoot/dispatch/` and `~/.githoot/prompts/` are no longer read. Move
+  `prompts/` into `~/.githoot/integrations/herdr/` to keep edited prompts, and the files in
+  `dispatch/` in there too if you want pull requests it already looked at to stay looked at.
+  Otherwise the first pass after Install treats every pull request in the bars as new and **starts
+  an agent for each one**. Press Dry run first to see how many that is.
+
 ## Upgrading from the shipped script
 
 Before 2.4.0 the dispatcher was a bash script installed by a button, kept alive by a systemd user
@@ -151,8 +174,8 @@ rm ~/.local/bin/ght-dispatch ~/.local/bin/ght-dispatch-loop \
    ~/.config/systemd/user/ght-dispatch.service
 ```
 
-Your prompts moved from `~/.config/ght-dispatch/prompts/` to `prompts/` beside `config.txt`. Copy
-any you had edited across; the rest are shipped defaults and will be written for you.
+Your prompts moved from `~/.config/ght-dispatch/prompts/` to `~/.githoot/integrations/herdr/prompts/`.
+Copy any you had edited across; the rest are shipped defaults and will be written for you.
 
 The dispatcher no longer uses [the local API](local-api.md), so `localApi` is only needed if you
 have your own scripts reading the bars.

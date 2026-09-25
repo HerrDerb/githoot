@@ -1,11 +1,11 @@
 # The shipped prompts
 
-What the dispatcher tells an agent, one file per bar plus the nudge an agent gets when its pull
-request changes under it. These four files are compiled into GitHoot and written beside `config.txt`
-the first time it starts.
+What the Herdr dispatcher tells an agent, one file per bar plus the nudge an agent gets when its pull
+request changes under it. These four files are compiled into GitHoot and written to
+`~/.githoot/integrations/herdr/prompts/` the first time it starts.
 
-**Edit them there, or on the Dispatcher tab, not here.** A file in this directory is the shipped
-default; a file in your own `prompts/` directory is yours and GitHoot will not overwrite it.
+**Edit them there, or on Integrations ▸ Herdr dispatcher, not here.** A file in this directory is the
+shipped default; a file in your own `prompts/` directory is yours and GitHoot will not overwrite it.
 
 | File | When it is used |
 |---|---|

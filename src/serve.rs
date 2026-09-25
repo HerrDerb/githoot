@@ -84,8 +84,10 @@ pub enum Route {
     Muted,
     /// The portals and their sign-ins.
     Accounts,
-    /// The shipped dispatcher and its prompts.
-    DispatcherPage,
+    /// Every integration this build knows, installed or not.
+    Integrations,
+    /// One integration's page. The id is always one `integration::find` knows.
+    IntegrationPage(&'static str),
     /// The Unmute link on the muted page.
     Unmute,
     /// The settings form.
@@ -94,10 +96,8 @@ pub enum Route {
     SaveSettings,
     /// Starting a portal's sign-in from the settings page.
     Authenticate,
-    /// Installing or removing the shipped dispatcher from the settings page. Linux and Windows;
-    /// on macOS the path is simply a miss, because the feature does not exist there.
-    #[cfg(not(target_os = "macos"))]
-    Dispatcher,
+    /// A button on an integration's page: install, remove, dry run, its settings, or its own.
+    IntegrationAction(&'static str),
     Owl,
     /// The path exists but not for this method.
     MethodNotAllowed,
@@ -312,11 +312,12 @@ pub fn route_for(
                 _ => Route::MethodNotAllowed,
             };
         }
-        #[cfg(not(target_os = "macos"))]
-        if (leaf, tail) == ("settings", "dispatcher") {
-            return match method {
-                Method::Post => Route::Dispatcher,
-                _ => Route::MethodNotAllowed,
+        // Only an id the registry knows resolves, so the segment can never name a file or a key.
+        if leaf == "integrations" {
+            return match (crate::integration::find(tail), method) {
+                (None, _) => Route::NotFound,
+                (Some(i), Method::Post) => Route::IntegrationAction(i.info().id),
+                (Some(i), _) => Route::IntegrationPage(i.info().id),
             };
         }
         return match (PrAxis::from_slug(leaf), tail, method) {
@@ -340,8 +341,8 @@ pub fn route_for(
         ("muted", _) => Route::Muted,
         ("accounts", Method::Post) => Route::MethodNotAllowed,
         ("accounts", _) => Route::Accounts,
-        ("dispatcher", Method::Post) => Route::MethodNotAllowed,
-        ("dispatcher", _) => Route::DispatcherPage,
+        ("integrations", Method::Post) => Route::MethodNotAllowed,
+        ("integrations", _) => Route::Integrations,
         ("settings", Method::Post) => Route::SaveSettings,
         ("settings", _) => Route::Settings,
         // Everything else is a read, so a write to it is the wrong method rather than a miss — the
@@ -736,17 +737,14 @@ pub fn open_accounts_page() -> bool {
     }
 }
 
-/// The nav line's facts, read fresh per page: how many are muted, and whether the dispatcher tab
-/// exists at all.
+/// The nav line's facts, read fresh per page: how many are muted.
 ///
-/// The tab no longer depends on `localApi`. It did while the dispatcher was a separate process that
-/// read the bars back over HTTP; in process there is nothing to serve it, so the tab is simply a
-/// place to read the status and edit the prompts, on every platform that has a dispatcher.
+/// The Integrations tab is on every platform. Where an integration cannot run, its page says so
+/// rather than the tab disappearing, so the list of what exists is the same everywhere.
 fn nav_for(current: page::Tab) -> page::Nav {
     page::Nav {
         current,
         muted: crate::mute::all(unix_now()).len(),
-        dispatcher: cfg!(not(target_os = "macos")),
     }
 }
 
@@ -895,14 +893,33 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 },
             )
         }
-        Route::DispatcherPage => {
+        Route::Integrations => {
             // Only with settings installed. `Config::load` on an empty path writes a default
             // `config.txt` into the current directory, which a test run did to the repo once.
-            let state = SETTINGS.get().and_then(|_| {
-                let (cfg, _) = crate::config::Config::load(&settings_path());
-                dispatcher_view(&cfg, request.query.as_deref())
-            });
-            let html = page::dispatcher_page(token, state.as_ref().map(|d| d.view()).as_ref(), &nav_for(page::Tab::Dispatcher));
+            let cfg = SETTINGS.get().map(|_| crate::config::Config::load(&settings_path()).0);
+            let rows: Vec<page::IntegrationRow> = crate::integration::all()
+                .iter()
+                .map(|i| {
+                    let info = i.info();
+                    let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
+                    // Only asked while installed: spawning processes to draw a list is waste.
+                    let missing = if installed && info.unsupported.is_none() { i.missing() } else { Vec::new() };
+                    page::IntegrationRow {
+                        id: info.id,
+                        name: info.name,
+                        summary: info.summary,
+                        status: page::integration_status(installed, info.unsupported, &missing),
+                    }
+                })
+                .collect();
+            let html = page::integrations_page(token, &rows, &nav_for(page::Tab::Integrations));
+            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
+        }
+        Route::IntegrationPage(id) => {
+            let Some((integration, home)) = crate::integration::find(id).zip(settings_home()) else {
+                return respond(&mut stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
+            };
+            let html = integration_page(integration, &home, token);
             respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
         }
         Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
@@ -935,8 +952,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                 Head { referrer: Referrer::SameOrigin, ..Head::default() },
             )
         }
-        #[cfg(not(target_os = "macos"))]
-        Route::Dispatcher => dispatcher_action(&mut stream, &head, &request, token, port),
+        Route::IntegrationAction(id) => integration_action(&mut stream, &head, &request, token, port, id),
         Route::MethodNotAllowed => {
             respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
         }
@@ -1172,101 +1188,46 @@ fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &
 /// Only *asks*: the flow runs on the poll thread, where the credential lives and where blocking for
 /// as long as the user takes costs nothing but a paused poll. The redirect back names the portal so
 /// the page can say the sign-in has started even before the poll thread has published "in progress".
-/// Everything the settings page needs to draw the dispatcher section, owned so the borrowed
-/// `page::DispatcherView` can point into it. `None` on macOS, and `None` while `localApi` is off,
-/// because a section offering to install a consumer of an API that is shut would be a promise
-/// with nothing behind it.
-#[cfg(not(target_os = "macos"))]
-struct DispatcherState {
-    enabled: bool,
-    missing: Vec<&'static str>,
-    message: Option<String>,
-    prompts: Vec<page::PromptRow>,
-    /// What the last Dry run said, or empty. Kept in the dispatcher rather than the query string
-    /// because a pass over three bars says far more than a URL can carry.
-    dry_run: Vec<String>,
-    /// Where a pass would look, resolved. On the card because "it found no clones" is not
-    /// diagnosable from a page that will not say where it looked.
-    roots: (String, String),
-}
-
-#[cfg(not(target_os = "macos"))]
-impl DispatcherState {
-    fn view(&self) -> page::DispatcherView<'_> {
-        page::DispatcherView {
-            enabled: self.enabled,
-            missing: &self.missing,
-            message: self.message.as_deref(),
-            prompts: &self.prompts,
-            dry_run: &self.dry_run,
-            clone_root: &self.roots.0,
-            worktree_root: &self.roots.1,
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn dispatcher_view(cfg: &crate::config::Config, query: Option<&str>) -> Option<DispatcherState> {
-    let home = settings_home()?;
-    let message = match query_value(query, "dispatcher").as_deref() {
-        Some("prompts") => Some("Prompts saved. The next pass uses them.".to_string()),
-        Some("dryrun") => Some("Dry run only. Nothing was started and nothing was recorded.".to_string()),
-        Some("on") => Some("On. The next pass starts agents for real.".to_string()),
-        Some("off") => Some("Off. Nothing further will be started.".to_string()),
-        Some("failed") => Some(format!("Failed: {}", query_value(query, "why").unwrap_or_default())),
-        _ => None,
+/// One integration's page, drawn from what it declares and what it adds.
+fn integration_page(integration: &'static dyn crate::integration::Integration, home: &std::path::Path, token: &str) -> String {
+    let cfg = crate::config::Config::load(home).0;
+    let info = integration.info();
+    let ctx = crate::integration::Context::new(home, &cfg, info.id);
+    let installed = cfg.integration_enabled(info.id);
+    let missing = if installed && info.unsupported.is_none() { integration.missing() } else { Vec::new() };
+    let flash = crate::integration::take_flash(info.id);
+    let dry_run = crate::integration::last_dry_run(info.id);
+    let view = page::IntegrationView {
+        id: info.id,
+        name: info.name,
+        summary: info.summary,
+        installed,
+        unsupported: info.unsupported,
+        missing: &missing,
+        flash: flash.as_deref(),
+        dry_run: &dry_run,
+        settings: info.settings.iter().map(|s| (s.key, s.label, ctx.setting(s.key).to_string(), s.placeholder)).collect(),
+        body: integration.page(&ctx, token),
     };
-    Some(DispatcherState {
-        enabled: cfg.dispatcher,
-        // Only worth asking when it is meant to be running; three processes spawned to draw a card
-        // nobody switched on is three too many.
-        missing: if cfg.dispatcher { crate::dispatch::missing_tools() } else { Vec::new() },
-        message,
-        prompts: crate::prompts::prompts(&home)
-            .into_iter()
-            .map(|p| page::PromptRow { name: p.name, text: p.text, is_default: p.is_default })
-            .collect(),
-        dry_run: crate::dispatch::last_dry_run(),
-        roots: crate::dispatch::roots(&home),
-    })
+    page::integration_page(token, &view, &nav_for(page::Tab::Integrations))
 }
 
-/// GitHoot's own directory, the one holding `config.txt`. The prompts live beside it now, so this
-/// no longer goes anywhere near a home directory of its own.
-#[cfg(not(target_os = "macos"))]
+/// GitHoot's own directory, the one holding `config.txt`.
 fn settings_home() -> Option<std::path::PathBuf> {
     SETTINGS.get().map(|s| s.app_asset_path.clone())
 }
 
-#[cfg(target_os = "macos")]
-fn dispatcher_view(_: &crate::config::Config, _: Option<&str>) -> Option<DispatcherState> {
-    None
-}
-
-/// On macOS there is no dispatcher, and so nothing to hold. Only exists so the page handler that
-/// asks for one compiles on every platform; `dispatcher_view` never builds it there.
-#[cfg(target_os = "macos")]
-struct DispatcherState;
-
-#[cfg(target_os = "macos")]
-impl DispatcherState {
-    fn view(&self) -> page::DispatcherView<'_> {
-        unreachable!("no dispatcher state is ever built on macOS")
-    }
-}
-
-/// The install and uninstall buttons.
+/// A button on an integration's page.
 ///
-/// The same guards as every other write, then one more: `404` unless `localApi` is on, because the
-/// dispatcher is a consumer of that API and installing one against a shut door would only ever fail.
-/// The form names an action and nothing else; there is no field that could steer what gets written
-/// or where, which is the property `contrib/README.md` promises.
-#[cfg(not(target_os = "macos"))]
-fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+/// The same guards as every other write. The form names an action and, for `settings`, values for
+/// keys the integration declared; nothing on it can steer which file is written or which key, which
+/// `integration::set` checks and `config::set_integration` checks again. Every outcome goes back to
+/// the page as one line, shown once.
+fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16, id: &'static str) {
     if !origin_is_ours(request.origin.as_deref(), port) {
         return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
     }
-    let Some(home) = settings_home() else {
+    let (Some(integration), Some(home)) = (crate::integration::find(id), settings_home()) else {
         return respond(stream, 503, "text/plain; charset=utf-8", b"No settings directory", true);
     };
     let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
@@ -1275,57 +1236,47 @@ fn dispatcher_action(stream: &mut TcpStream, head: &str, request: &Request, toke
         Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
     };
     let form = parse_form(&body);
-    let outcome = match form.get("action").map(|a| a.as_ref()) {
+    let action = form.get("action").map(String::as_str).unwrap_or_default();
+    let outcome: Result<String, String> = match action {
+        // Writes one line of `config.txt`; the runner reads it on its next pass. No restart, and no
+        // second source of truth for whether the thing is installed.
+        "install" | "remove" => {
+            infoln!("settings page asked to {action} {id}");
+            crate::integration::install(&home, integration, action == "install").map(|()| {
+                if action == "install" { "Installed. The next pass acts for real." } else { "Removed. Nothing further will be done." }
+                    .to_string()
+            })
+        }
         // Runs a real pass with every effect suppressed, against the lists GitHoot already holds.
-        // It writes no state either, so pressing it can never change what the next real pass does.
-        Some("dryrun") => {
-            infoln!("settings page asked for a dispatcher dry run");
-            crate::dispatch::dry_run_now(&home);
-            Ok("dryrun".to_string())
+        "dryrun" => {
+            infoln!("settings page asked for a {id} dry run");
+            crate::integration::dry_run_now(&home, integration);
+            Ok("Dry run only. Nothing was done and nothing was recorded.".to_string())
         }
-        // The switch. It writes one line of `config.txt`, the same one the Settings checkbox
-        // writes, and the dispatch thread picks it up on its next pass: no restart, and no second
-        // source of truth for whether the thing is on.
-        Some(verb @ ("on" | "off")) => {
-            infoln!("settings page turned the dispatcher {verb}");
-            crate::config::set_dispatcher(&home, verb == "on").map(|()| verb.to_string())
+        // Only the keys the integration declared are read off the form, by name. A box submitted
+        // empty is a deliberate clear, back to that setting's default.
+        "settings" => integration
+            .info()
+            .settings
+            .iter()
+            .filter_map(|s| form.get(s.key).map(|v| (s.key, v)))
+            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, value))
+            .map(|()| "Settings saved. The next pass uses them.".to_string()),
+        other => {
+            let cfg = crate::config::Config::load(&home).0;
+            let ctx = crate::integration::Context::new(&home, &cfg, id);
+            match integration.action(&ctx, other, &form) {
+                Some(outcome) => outcome,
+                None => return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
+            }
         }
-        // Only the four known names are read off the form, by name; nothing the form invents can
-        // become a filename. See `prompts::save_prompts`.
-        Some("prompts") => {
-            infoln!("settings page saved the dispatcher prompts");
-            let given: Vec<(String, String)> = crate::prompts::DEFAULT_PROMPTS
-                .iter()
-                .filter_map(|(name, _)| {
-                    form.get(&format!("prompt_{name}")).map(|v| (name.to_string(), v.to_string()))
-                })
-                .collect();
-            crate::prompts::save_prompts(&home, &given)
-                .map(|()| "prompts".to_string())
-                .map_err(|e| format!("could not write the prompts: {e}"))
-        }
-        _ => return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
     };
-    match outcome {
-        Ok(what) => redirect(stream, &format!("/{token}/dispatcher?dispatcher={what}")),
-        Err(why) => {
-            errorln!("dispatcher: {why}");
-            redirect(stream, &format!("/{token}/dispatcher?dispatcher=failed&why={}", encode_query_value(&why)))
-        }
-    }
-}
-
-/// Percent-encodes a value for a query string. Only what a redirect after an error needs.
-#[cfg(not(target_os = "macos"))]
-fn encode_query_value(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    let line = outcome.unwrap_or_else(|why| {
+        errorln!("{id}: {why}");
+        format!("Failed: {why}")
+    });
+    crate::integration::flash(integration, line);
+    redirect(stream, &format!("/{token}/integrations/{id}"));
 }
 
 /// A mute or unmute link.
@@ -1655,14 +1606,30 @@ mod tests {
         assert!(mute_post(ours, "key=PR_a&days=3").starts_with("HTTP/1.1 404 "), "no poll ran: nothing is on the page");
     }
 
-    /// Accounts and Dispatcher are pages to read; their actions keep their own POST routes.
+    /// Accounts and the Integrations list are pages to read; an integration's page takes its own
+    /// buttons as a POST to itself.
     #[test]
-    fn the_accounts_and_dispatcher_pages_are_get_only() {
+    fn the_accounts_and_integration_pages_route_by_method() {
         assert_eq!(route_write(&format!("/{TOKEN}/accounts"), Method::Get), Route::Accounts);
         assert_eq!(route_write(&format!("/{TOKEN}/accounts"), Method::Post), Route::MethodNotAllowed);
-        assert_eq!(route_write(&format!("/{TOKEN}/dispatcher"), Method::Get), Route::DispatcherPage);
-        assert_eq!(route_write(&format!("/{TOKEN}/dispatcher"), Method::Post), Route::MethodNotAllowed);
+        assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Get), Route::Integrations);
+        assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Post), Route::MethodNotAllowed);
+        assert_eq!(route_write(&format!("/{TOKEN}/integrations/herdr"), Method::Get), Route::IntegrationPage("herdr"));
+        assert_eq!(route_write(&format!("/{TOKEN}/integrations/herdr"), Method::Post), Route::IntegrationAction("herdr"));
         assert_eq!(route_get(&format!("/{TOKEN}/accounts"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    }
+
+    /// Only an id the registry knows resolves. Anything else is a miss, so the segment can never be
+    /// used to name a file, a key or another integration's page.
+    #[test]
+    fn an_unknown_integration_is_a_miss_and_the_old_dispatcher_routes_are_gone() {
+        for path in ["integrations/nope", "integrations/..", "integrations/HERDR", "dispatcher", "settings/dispatcher"] {
+            assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Get), Route::NotFound, "{path}");
+            assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Post), Route::NotFound, "{path}");
+        }
+        let path = format!("/{TOKEN}/integrations/herdr");
+        assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
+        assert_eq!(route_get(&path, Some("evil.com"), TOKEN, PORT), Route::Forbidden);
     }
 
     #[test]
@@ -1670,8 +1637,9 @@ mod tests {
         let r = round_trip(&format!("GET /{TOKEN}/accounts HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
         assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page">Accounts<"#));
-        let d = round_trip(&format!("GET /{TOKEN}/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
-        assert!(d.starts_with("HTTP/1.1 200 OK\r\n") && d.contains("needs Linux or Windows, and the local API"), "{d}");
+        let i = round_trip(&format!("GET /{TOKEN}/integrations HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(i.starts_with("HTTP/1.1 200 OK\r\n") && i.contains("Herdr dispatcher"), "{i}");
+        assert!(i.contains("Not installed") || i.contains("Not available here"), "{i}");
     }
 
     #[test]
@@ -1706,51 +1674,26 @@ mod tests {
         assert!(response.contains("Referrer-Policy: same-origin"), "{response}");
     }
 
-    // ── The dispatcher install route ──────────────────────────────────────────
-
-    /// A `GET` here must never install anything, and a wrong token must not learn the route exists.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn the_dispatcher_route_is_post_only_and_token_gated() {
-        let path = format!("/{TOKEN}/settings/dispatcher");
-        assert_eq!(route_write(&path, Method::Post), Route::Dispatcher);
-        assert_eq!(route_write(&path, Method::Get), Route::MethodNotAllowed);
-        assert_eq!(route_write(&path, Method::Head), Route::MethodNotAllowed);
-        assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
-        assert_eq!(route_get(&path, Some("evil.com"), TOKEN, PORT), Route::Forbidden);
-    }
+    // ── Integration buttons ───────────────────────────────────────────────────
 
     /// The guard order over a real socket. `Origin` is checked before anything else, so a
-    /// cross-site form gets `403` and nothing is written; with our own `Origin` but the setting
-    /// off, `404`, the same answer the entries route gives. Neither reaches `install`, which is the
-    /// only thing that would touch the real home directory, and why the success path is not driven
-    /// over a socket from a test.
-    #[cfg(not(target_os = "macos"))]
+    /// cross-site form gets `403` and nothing is written; with our own `Origin` but no settings
+    /// directory installed, which is every ordinary test, `503` rather than writing to a path it had
+    /// to guess at. Neither reaches `config.txt`, which is why the success path is not driven over a
+    /// socket from a test.
     #[test]
-    fn a_dispatcher_post_is_refused_before_it_can_write_anything() {
+    fn an_integration_post_is_refused_before_it_can_write_anything() {
         let hostile = round_trip(&format!(
-            "POST /{TOKEN}/settings/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
-             Origin: https://evil.com\r\nContent-Length: 14\r\n\r\naction=prompts"
+            "POST /{TOKEN}/integrations/herdr HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: https://evil.com\r\nContent-Length: 14\r\n\r\naction=install"
         ));
         assert!(hostile.starts_with("HTTP/1.1 403 "), "{hostile}");
-
-        // Our own `Origin`, but no settings directory installed, which is every ordinary test.
-        // `503` rather than writing to a path it had to guess at.
         let homeless = round_trip(&format!(
-            "POST /{TOKEN}/settings/dispatcher HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
-             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 14\r\n\r\naction=prompts"
+            "POST /{TOKEN}/integrations/herdr HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 14\r\n\r\naction=install"
         ));
         assert!(homeless.starts_with("HTTP/1.1 503 "), "{homeless}");
-
-        // The install and uninstall actions are gone with the scripts they installed; the route
-        // answers for prompts and nothing else, so an invented action is a bad request.
-        assert!(!SETTINGS_DISPATCH_ACTIONS.contains(&"install"), "nothing here installs anything any more");
     }
-
-    /// Every action `dispatcher_action` will act on. One list, so the test above cannot go stale
-    /// by asserting about an action that was quietly added back.
-    #[cfg(not(target_os = "macos"))]
-    const SETTINGS_DISPATCH_ACTIONS: [&str; 4] = ["prompts", "dryrun", "on", "off"];
 
     /// The CSRF guard. A form on another site can make the browser send a cross-origin `POST` — the
     /// `Host` allowlist cannot see that, because the browser puts *our* host in it. `Origin` is what
@@ -2031,7 +1974,7 @@ mod tests {
     /// header does.
     #[test]
     fn the_settings_document_declares_the_same_policy_as_its_response() {
-        let html = page::settings_page(&test_config(), "tok", &[], &page::Nav { current: page::Tab::Settings, muted: 0, dispatcher: false });
+        let html = page::settings_page(&test_config(), "tok", &[], &page::Nav { current: page::Tab::Settings, muted: 0 });
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#), "got {html}");
         assert!(!html.contains("no-referrer"));
     }
@@ -2371,19 +2314,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The dispatcher card as this machine would actually see it: real preflight against the real
-    /// `PATH` and home, real `systemctl --user is-active`, rendered through the real handler over a
-    /// real socket. Read-only: nothing is installed. It asserts the button is *offered*, which is the
-    /// same as asserting preflight found every tool, so a machine missing `herdr` fails here loudly
-    /// rather than silently showing a card with no button.
+    /// The Herdr page as this machine would actually see it: the real tool check against the real
+    /// `PATH`, the real prompts, rendered through the real handler over a real socket. Read-only:
+    /// nothing is installed. Prints the page so `--nocapture` shows what a user would see.
     ///
     /// `#[ignore]`d for the same reason as the test above: it installs the process-wide `SETTINGS`.
-    /// Tolerates running after that test by recreating whatever directory `SETTINGS` points at.
-    /// Prints the card so `--nocapture` shows what a user would see.
     #[cfg(not(target_os = "macos"))]
     #[test]
     #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
-    fn the_dispatcher_card_renders_for_this_machine_over_a_real_connection() {
+    fn the_herdr_page_renders_for_this_machine_over_a_real_connection() {
         let dir = endpoint_dir("card");
         let (wake_tx, _wake_rx) = std::sync::mpsc::channel();
         install(Settings {
@@ -2393,8 +2332,6 @@ mod tests {
             local_api: true,
             wake: std::sync::Mutex::new(wake_tx),
         });
-        // The page reads `localApi` from config.txt, so it has to be on in whatever directory
-        // SETTINGS actually holds, which may be another ignored test's if both ran.
         let cfg_dir = settings_path();
         std::fs::create_dir_all(&cfg_dir).unwrap();
         std::fs::write(cfg_dir.join("config.txt"), "localApi=on\n").unwrap();
@@ -2408,32 +2345,17 @@ mod tests {
 
         let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         client
-            .write_all(format!("GET /{token}/dispatcher HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+            .write_all(format!("GET /{token}/integrations/herdr HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
             .expect("write");
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read");
 
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-        let start = response.find("Agent dispatcher").expect("the card must render while localApi is on");
-        // Through the prompts card when there is one, else through the dispatcher card alone.
-        let end = response[start..]
-            .find("Save prompts</button></form></div>\n")
-            .map(|i| start + i + "Save prompts</button></form></div>\n".len())
-            .or_else(|| response[start..].find("</div>\n").map(|i| start + i + 7))
-            .unwrap_or(response.len());
-        let card = &response[start..end];
-        println!("\n{card}\n");
-        assert!(
-            card.contains(r#"value="install""#),
-            "no install button: preflight found a tool missing on this machine, or the card is broken:\n{card}"
-        );
-        assert!(!card.contains("Cannot install"), "{card}");
-        // With the dispatcher installed on this machine, the four prompt boxes must be offered too.
-        if card.contains("portal-status\">Installed") {
-            assert!(card.contains("Dispatcher prompts"), "installed but no prompt boxes:\n{card}");
-            for name in ["work-required", "requested-reviews", "approved", "update"] {
-                assert!(card.contains(&format!("name=\"prompt_{name}\"")), "no box for {name}");
-            }
+        let start = response.find("Herdr dispatcher").expect("the page must render");
+        println!("\n{}\n", &response[start..]);
+        assert!(response.contains(r#"value="install""#), "not installed, so Install is offered");
+        for name in ["work-required", "requested-reviews", "approved", "update"] {
+            assert!(response.contains(&format!("name=\"prompt_{name}\"")), "no box for {name}");
         }
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -155,7 +155,8 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [The PR page](docs/pr-page.md) | What the menu entries open, why it is served locally, and what guards it |
 | [Settings page](docs/menu-and-settings.md#the-settings-page) | Every setting as a form in your browser, and the guard writing needed |
 | [The local API](docs/local-api.md) | Serving the judged lists as JSON to your own scripts, off by default |
-| [The dispatcher](docs/dispatcher.md) | Turning the bars into Herdr agents. The one thing GitHoot does that is not reading, so it is off by default |
+| [Integrations](docs/integrations.md) | What GitHoot may do with the pull requests it finds, installed from the settings page |
+| [The Herdr dispatcher](docs/dispatcher.md) | The first integration: turning the bars into Herdr agents. The one thing GitHoot does that is not reading, so it is off until installed |
 | [The hoot](docs/hoot.md) | Exactly which transitions make a sound, and which stay quiet |
 | [Troubleshooting](docs/troubleshooting.md) | Tooltip meanings, the log, the Defender verdict |
 | [Updates and releases](docs/updates-and-releases.md) | Verification, recovery, immutable releases, signing keys |

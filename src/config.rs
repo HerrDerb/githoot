@@ -36,9 +36,8 @@ const KEY_SOUND: &str = "sound";
 const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 const KEY_LOCAL_API: &str = "localApi";
-const KEY_DISPATCHER: &str = "dispatcher";
-const KEY_CLONE_ROOT: &str = "dispatcherCloneRoot";
-const KEY_WORKTREE_ROOT: &str = "dispatcherWorktreeRoot";
+/// Every integration's settings live under `integration.<id>.`, and only there. See `crate::integration`.
+const INTEGRATION_PREFIX: &str = "integration.";
 
 /// Every component GitHub publishes on its status page, in the order the page lists them.
 ///
@@ -117,7 +116,20 @@ pub fn all_status_components() -> Vec<String> {
 /// `notifications` → `notificationIndication` used to be the other entry. Both spellings are gone
 /// now: the feature they named was removed in 2.0.0, so there is no replacement to point at and an
 /// old line is simply an unknown key, which `parse` has always ignored.
-const RENAMED_KEYS: [(&str, &str); 1] = [("update_check", KEY_UPDATE_CHECK)];
+///
+/// The dispatcher's three keys moved under `integration.herdr.` when it became the first
+/// integration. Same clean break: `dispatcher=on` alone no longer starts anything.
+///
+/// The third field says whether an old line only matters when it is on. Every file 2.4.0 and 3.0.0
+/// wrote carries `dispatcher=off`, which did nothing then and does nothing now; warning about it
+/// would be noise in every one of those logs. `update_check=off` is the opposite case, and the one
+/// this list was made for.
+const RENAMED_KEYS: [(&str, &str, bool); 4] = [
+    ("update_check", KEY_UPDATE_CHECK, false),
+    ("dispatcher", "integration.herdr.enabled", true),
+    ("dispatcherCloneRoot", "integration.herdr.cloneRoot", false),
+    ("dispatcherWorktreeRoot", "integration.herdr.worktreeRoot", false),
+];
 
 /// Whether [`Config::load`] found no `config.txt` and successfully wrote one.
 ///
@@ -194,22 +206,13 @@ pub struct Config {
     /// `endpoint.json` so a script can find the ephemeral port and this run's token. Off, the route
     /// answers 404 and nothing is written, which is exactly how the app behaved before it existed.
     pub local_api: bool,
-    /// Whether GitHoot starts a Herdr agent for each pull request that needs one.
+    /// Each integration's settings, by integration id and then by key: `integration.herdr.cloneRoot=x`
+    /// is `integrations["herdr"]["cloneRoot"] = "x"`.
     ///
-    /// **The only setting that makes GitHoot do something rather than show something.** On, a
-    /// thread creates branches and worktrees and launches agents under your own `gh`; off, GitHoot
-    /// reads GitHub and draws an icon, which is everything it did before this existed. Off by
-    /// default and left off by a typo, for the same reason `localApi` is.
-    pub dispatcher: bool,
-    /// Where your clones live, one directory per repository name. Empty means `~/projects`.
-    ///
-    /// A setting rather than an environment variable, and that is not a style choice: GitHoot is
-    /// started from a tray, a shortcut or autostart, none of which carry a shell's environment. A
-    /// knob you can only set by launching the app a particular way is a knob most people cannot
-    /// reach, and the dispatcher silently finds no clones for all of them.
-    pub clone_root: String,
-    /// Where the dispatcher's per-pull-request worktrees go. Empty means `~/worktrees`.
-    pub worktree_root: String,
+    /// Kept as text rather than typed here, because the keys belong to the integration and not to this
+    /// module: `config` must not grow a field every time an integration does. What may be *written* is
+    /// checked against what the integration declared, in `integration::set`.
+    pub integrations: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 /// Where the settings file lives.
@@ -269,7 +272,7 @@ pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
 /// Public because the settings page renders from it: one list, so a key cannot appear in the form
 /// without the page knowing whether to warn about it, and cannot be added to the file without
 /// appearing in the form.
-pub const WRITABLE_KEYS: [(&str, bool); 12] = [
+pub const WRITABLE_KEYS: [(&str, bool); 9] = [
     (KEY_REVIEW_REQUESTED, false),
     (KEY_READY_TO_MERGE, false),
     (KEY_CHANGES_REQUESTED, false),
@@ -280,12 +283,6 @@ pub const WRITABLE_KEYS: [(&str, bool); 12] = [
     (KEY_STATUS_COMPONENTS, false),
     // Not live: the listener binds once, at startup.
     (KEY_LOCAL_API, false),
-    // Live, all three: the dispatch thread is always running and reads the setting and both paths
-    // fresh on every pass, so turning it on or correcting a root takes effect within one pass. The
-    // settings page must not claim a restart is needed when it is not.
-    (KEY_DISPATCHER, true),
-    (KEY_CLONE_ROOT, true),
-    (KEY_WORKTREE_ROOT, true),
 ];
 
 /// Every component GitHub publishes, for the settings page's checkboxes.
@@ -302,9 +299,6 @@ fn value_of(wanted: &Config, key: &str) -> String {
         KEY_CHANGES_REQUESTED => flag(wanted.pr_enabled[2]),
         KEY_COPILOT_REVIEWS => flag(wanted.copilot_reviews),
         KEY_LOCAL_API => flag(wanted.local_api),
-        KEY_DISPATCHER => flag(wanted.dispatcher),
-        KEY_CLONE_ROOT => wanted.clone_root.clone(),
-        KEY_WORKTREE_ROOT => wanted.worktree_root.clone(),
         KEY_SOUND => flag(wanted.sound),
         KEY_UPDATE_CHECK => flag(wanted.update_check),
         KEY_LOG_LEVEL => match wanted.log_level {
@@ -359,11 +353,22 @@ pub fn set_copilot_reviews(app_asset_path: &Path, on: bool) -> Result<(), String
     set_flag(&config_path(app_asset_path), KEY_COPILOT_REVIEWS, on)
 }
 
-/// The Dispatcher tab's own switch, so the one page that explains what the dispatcher does is also
-/// the page that turns it on. It writes the same single line a tick of the Settings checkbox does,
-/// leaving every other byte of the file alone.
-pub fn set_dispatcher(app_asset_path: &Path, on: bool) -> Result<(), String> {
-    set_flag(&config_path(app_asset_path), KEY_DISPATCHER, on)
+/// Writes one integration setting, `integration.<id>.<key>`, the same single-line edit every other
+/// setting gets, leaving every other byte of the file alone.
+///
+/// Only reached through `integration::set`, which has already checked the key is one the integration
+/// declared. The shape is checked again here anyway, because this is the function that writes a line
+/// into a file the user owns: an id or key outside `[A-Za-z]`, or a value with a line break, never
+/// reaches the file whoever the caller is.
+pub fn set_integration(app_asset_path: &Path, id: &str, key: &str, value: &str) -> Result<(), String> {
+    let letters = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic());
+    if !letters(id) || !letters(key) || value.contains(['\n', '\r']) {
+        return Err(format!("refused to write integration setting {id:?}.{key:?}"));
+    }
+    let path = config_path(app_asset_path);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = with_value_set(&content, &format!("{INTEGRATION_PREFIX}{id}.{key}"), value);
+    std::fs::write(&path, updated).map_err(|e| format!("could not write {} ({e})", path.display()))
 }
 
 /// Reads the file, replaces one value, writes it back.
@@ -481,15 +486,8 @@ impl Config {
             sound: form.ticked(KEY_SOUND),
             copilot_reviews: form.ticked(KEY_COPILOT_REVIEWS),
             local_api: form.ticked(KEY_LOCAL_API),
-            dispatcher: form.ticked(KEY_DISPATCHER),
-            // Absent from the form entirely means "not shown to me", which is not the same as
-            // "cleared": the current value is kept. A box submitted empty is a deliberate clear,
-            // and clears back to the default.
-            clone_root: form.get(KEY_CLONE_ROOT).map(|v| v.trim().to_string()).unwrap_or_else(|| current.clone_root.clone()),
-            worktree_root: form
-                .get(KEY_WORKTREE_ROOT)
-                .map(|v| v.trim().to_string())
-                .unwrap_or_else(|| current.worktree_root.clone()),
+            // Not on this form: each integration's page writes its own, through `integration::set`.
+            integrations: current.integrations.clone(),
             log_level: form
                 .get(KEY_LOG_LEVEL)
                 .and_then(|v| Level::parse(v))
@@ -534,10 +532,26 @@ impl Config {
             // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
             // *missing* key as on and open the door on every install that never asked.
             local_api: values.get(KEY_LOCAL_API).is_some_and(|v| is_on(v)),
-            dispatcher: values.get(KEY_DISPATCHER).is_some_and(|v| is_on(v)),
-            clone_root: values.get(KEY_CLONE_ROOT).map(|v| v.trim().to_string()).unwrap_or_default(),
-            worktree_root: values.get(KEY_WORKTREE_ROOT).map(|v| v.trim().to_string()).unwrap_or_default(),
+            integrations: integration_values(values),
         }
+    }
+
+    /// Whether `integration.<id>.enabled` is on. Default **off**, for the reason `localApi` is: an
+    /// integration acts rather than shows, so a missing key or a typo must leave it off.
+    pub fn integration_enabled(&self, id: &str) -> bool {
+        self.integrations.get(id).and_then(|m| m.get("enabled")).is_some_and(|v| is_on(v))
+    }
+
+    /// Every `integration.<id>.*` value, keyed without the prefix. Empty for an id the file never names.
+    pub fn integration_settings(&self, id: &str) -> std::collections::BTreeMap<String, String> {
+        self.integrations.get(id).cloned().unwrap_or_default()
+    }
+
+    /// The mapping `load` does, from text, for tests elsewhere in the crate that need a `Config`
+    /// without a file.
+    #[cfg(test)]
+    pub fn from_text(text: &str) -> Self {
+        Self::from_values(&parse(text))
     }
 
     /// Whether `axis`'s bar, menu entry and search are wanted at all.
@@ -652,27 +666,47 @@ fn default_config() -> String {
          # endpoint.json is written beside this file (owner-only) with that port and this run's\n\
          # token, so a script can find the address. Off, nothing is written and the route answers\n\
          # 404. Restart to apply.\n\
-         {KEY_LOCAL_API}=off\n\
-         \n\
-         # Start a Herdr agent for each pull request that needs one.\n\
-         #\n\
-         # The only setting that makes GitHoot do something rather than show something: it creates\n\
-         # branches and worktrees and launches agents, under your own gh credential. Needs herdr,\n\
-         # gh and git on PATH. Off by default, and like the line above a typo leaves it off.\n\
-         # Read docs/dispatcher.md before turning it on. Takes effect within one pass.\n\
-         {KEY_DISPATCHER}=off\n\
-         \n\
-         # Where the dispatcher looks for your clones, one directory per repository name. A pull\n\
-         # request in owner/thing needs a clone at <this>/thing. Empty means ~/projects.\n\
-         #\n\
-         # Set this if your clones are anywhere else. Without it the dispatcher finds nothing and\n\
-         # says so once per pull request in the log.\n\
-         {KEY_CLONE_ROOT}=\n\
-         \n\
-         # Where the dispatcher puts the worktree it makes for each pull request. Empty means\n\
-         # ~/worktrees. One directory per pull request, named githoot/pr-<number>-<repo>.\n\
-         {KEY_WORKTREE_ROOT}=\n"
-    )
+         {KEY_LOCAL_API}=off\n"
+    ) + &integrations_section()
+}
+
+/// The integrations part of a fresh `config.txt`, one block per integration, from what each declares.
+///
+/// Generated rather than written out, so a new integration's keys appear in a fresh file the day it
+/// ships, and a key the integration no longer declares cannot linger in the template.
+fn integrations_section() -> String {
+    let mut out = String::from(
+        "\n\
+         # Integrations: what GitHoot may do with the pull requests it finds, beyond showing them.\n\
+         # Each is off until you install it on the settings page's Integrations tab, which writes\n\
+         # the enabled line below. Like localApi, a typo leaves it off. Changes here take effect\n\
+         # within one pass, no restart. See docs/integrations.md.\n",
+    );
+    for integration in crate::integration::all() {
+        let info = integration.info();
+        out.push_str(&format!("\n# {}: {}\n{INTEGRATION_PREFIX}{}.enabled=off\n", info.name, info.summary, info.id));
+        for setting in info.settings {
+            out.push_str(&format!("# {}\n{INTEGRATION_PREFIX}{}.{}=\n", setting.help, info.id, setting.key));
+        }
+    }
+    out
+}
+
+/// Every `integration.<id>.<key>` line, grouped by id. A line with no key after the id is ignored,
+/// as an unknown key always has been.
+fn integration_values(
+    values: &std::collections::HashMap<&str, &str>,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    let mut out: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> = Default::default();
+    for (key, value) in values {
+        let Some((id, setting)) = key.strip_prefix(INTEGRATION_PREFIX).and_then(|rest| rest.split_once('.')) else {
+            continue;
+        };
+        if !id.is_empty() && !setting.is_empty() {
+            out.entry(id.to_string()).or_default().insert(setting.to_string(), value.trim().to_string());
+        }
+    }
+    out
 }
 
 /// Writes the default file if there is none, and reports whether it did.
@@ -704,14 +738,30 @@ fn write_default_if_absent(path: &Path) -> FirstRun {
 ///
 /// The old key genuinely has no effect. Without this the only symptom would be a feature quietly
 /// behaving differently after an upgrade, which is the kind of thing people spend an hour on.
+///
+/// Once per key per run. `load` is called on every integration pass, and a line repeated every thirty
+/// seconds would bury the log it is meant to be read in.
 fn warn_about_renamed_keys(values: &std::collections::HashMap<&str, &str>) {
-    for (old, new) in RENAMED_KEYS {
-        if values.contains_key(old) {
-            errorln!(
-                "{CONFIG_FILE} uses \"{old}\", which is no longer read. Rename it to \"{new}\"."
-            );
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut warned) = WARNED.lock() else { return };
+    for warning in renamed_key_warnings(values) {
+        if !warned.contains(&warning) {
+            errorln!("{warning}");
+            warned.push(warning);
         }
     }
+}
+
+/// What `warn_about_renamed_keys` would say, with no logging. An old line with nothing in it, or an
+/// old switch that was off where only on ever did anything, is not worth a word.
+fn renamed_key_warnings(values: &std::collections::HashMap<&str, &str>) -> Vec<String> {
+    RENAMED_KEYS
+        .iter()
+        .filter(|(old, _, only_when_on)| {
+            values.get(old).is_some_and(|v| !v.trim().is_empty() && (!only_when_on || is_on(v)))
+        })
+        .map(|(old, new, _)| format!("{CONFIG_FILE} uses \"{old}\", which is no longer read. Rename it to \"{new}\"."))
+        .collect()
 }
 
 /// Whether a value reads as "off".
@@ -830,21 +880,22 @@ mod tests {
     fn the_writable_keys_are_exactly_the_keys_that_are_read() {
         let mut writable: Vec<&str> = WRITABLE_KEYS.iter().map(|(k, _)| *k).collect();
         let text = default_config();
-        let mut generated: Vec<&str> = parse(&text).keys().copied().collect();
+        let mut generated: Vec<&str> =
+            parse(&text).keys().copied().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).collect();
         writable.sort_unstable();
         generated.sort_unstable();
         assert_eq!(writable, generated);
     }
 
     /// `live` means "takes effect without a restart", which is what the settings page tells the
-    /// user. It is not a synonym for "has a tray checkbox": the dispatcher has no tray entry and is
-    /// still live, because its thread re-reads the setting on every pass. Everything else here
-    /// binds at startup, and saying otherwise on the page would be a broken promise, not a typo.
+    /// user. Everything else here binds at startup, and saying otherwise on the page would be a
+    /// broken promise, not a typo. Integration settings are not in this list at all: they are
+    /// written from their own page, and every one of them is live.
     #[test]
     fn exactly_the_settings_that_need_no_restart_are_live() {
         let live: Vec<&str> =
             WRITABLE_KEYS.iter().filter(|(_, live)| *live).map(|(k, _)| *k).collect();
-        assert_eq!(live, [KEY_COPILOT_REVIEWS, KEY_SOUND, KEY_DISPATCHER, KEY_CLONE_ROOT, KEY_WORKTREE_ROOT]);
+        assert_eq!(live, [KEY_COPILOT_REVIEWS, KEY_SOUND]);
         assert!(is_live(KEY_SOUND) && !is_live(KEY_LOG_LEVEL));
         assert!(!is_live(KEY_LOCAL_API), "the listener binds once, at startup");
     }
@@ -962,12 +1013,10 @@ mod tests {
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // The two keys shipped off. Written explicitly anyway, so the file says the doors exist.
         assert_eq!(values.get(KEY_LOCAL_API), Some(&"off"));
-        assert_eq!(values.get(KEY_DISPATCHER), Some(&"off"));
-        // Written empty on purpose: the file names the knob and its default in one place.
-        assert_eq!(values.get(KEY_CLONE_ROOT), Some(&""));
-        assert_eq!(values.get(KEY_WORKTREE_ROOT), Some(&""));
-        // And nothing else, so a key added to the template without being read is caught.
-        assert_eq!(values.len(), 12, "unexpected keys in the template: {values:?}");
+        // And nothing else, so a key added to the template without being read is caught. The
+        // integration keys are held to the registry by their own test below.
+        let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
+        assert_eq!(own, 9, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -1023,12 +1072,9 @@ mod tests {
             KEY_STATUS_COMPONENTS,
             KEY_COPILOT_REVIEWS,
             KEY_LOCAL_API,
-            KEY_DISPATCHER,
-            KEY_CLONE_ROOT,
-            KEY_WORKTREE_ROOT,
         ];
         let text = default_config();
-        for key in parse(&text).keys() {
+        for key in parse(&text).keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)) {
             assert!(known.contains(key), "{key:?} is written but never read");
         }
     }
@@ -1123,16 +1169,95 @@ mod tests {
         assert!(text.lines().filter(|l| l.starts_with('#')).count() >= 8, "should explain itself");
     }
 
+    // ── Integrations ────────────────────────────────────────────────────────
+
+    /// A fresh file names every integration's switch, off, and every setting it declares, empty, and
+    /// nothing an integration does not declare.
+    #[test]
+    fn the_template_carries_exactly_what_the_integrations_declare() {
+        let text = default_config();
+        let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| k.starts_with(INTEGRATION_PREFIX)).collect();
+        let mut declared: Vec<String> = Vec::new();
+        for integration in crate::integration::all() {
+            let info = integration.info();
+            declared.push(format!("{INTEGRATION_PREFIX}{}.enabled", info.id));
+            declared.extend(info.settings.iter().map(|s| format!("{INTEGRATION_PREFIX}{}.{}", info.id, s.key)));
+        }
+        written.sort_unstable();
+        declared.sort_unstable();
+        assert_eq!(written, declared);
+        let values = parse(&text);
+        assert_eq!(values.get("integration.herdr.enabled"), Some(&"off"));
+        assert!(!from(&text).integration_enabled("herdr"), "installed by nobody means not installed");
+    }
+
+    #[test]
+    fn integration_keys_reach_their_integration() {
+        let cfg = from("integration.herdr.enabled=on\nintegration.herdr.cloneRoot= /src \nintegration.other.x=1\n");
+        assert!(cfg.integration_enabled("herdr"));
+        assert_eq!(cfg.integration_settings("herdr").get("cloneRoot").map(String::as_str), Some("/src"));
+        assert!(!cfg.integration_enabled("other"));
+        assert!(cfg.integration_settings("nope").is_empty());
+        // A typo leaves it off, as it does localApi.
+        assert!(!from("integration.herdr.enabled=onn\n").integration_enabled("herdr"));
+        assert!(!from("integration.herdr=on\n").integration_enabled("herdr"));
+    }
+
+    /// 2.4.0 and 3.0.0 shipped `dispatcher=on`. It is warned about, and it starts nothing.
+    #[test]
+    fn the_old_dispatcher_keys_install_nothing() {
+        let cfg = from("dispatcher=on\ndispatcherCloneRoot=/src\n");
+        assert!(!cfg.integration_enabled("herdr"));
+        assert!(cfg.integration_settings("herdr").is_empty());
+        assert!(RENAMED_KEYS.iter().any(|(old, new, _)| *old == "dispatcher" && *new == "integration.herdr.enabled"));
+    }
+
+    #[test]
+    fn an_integration_setting_is_one_line_edit_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("githoot-config-integration-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(config_path(&dir), "# mine\nsound=off\n").unwrap();
+        set_integration(&dir, "herdr", "enabled", "on").unwrap();
+        set_integration(&dir, "herdr", "cloneRoot", "/src").unwrap();
+        let text = std::fs::read_to_string(config_path(&dir)).unwrap();
+        assert!(text.starts_with("# mine\nsound=off\n"), "got {text:?}");
+        assert!(from(&text).integration_enabled("herdr"));
+        assert!(set_integration(&dir, "herdr", "x\ny", "on").is_err());
+        assert!(set_integration(&dir, "../h", "enabled", "on").is_err());
+        assert!(set_integration(&dir, "herdr", "cloneRoot", "a\nlocalApi=on").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── Renamed keys ────────────────────────────────────────────────────────
+
+    /// Every `config.txt` written by 2.4.0 or 3.0.0 carries the dispatcher's three lines at their
+    /// defaults. Those did nothing then and do nothing now, so they must not put an error in the log;
+    /// the runner loads the file every pass, and a warning per pass would bury everything else.
+    #[test]
+    fn old_lines_that_did_nothing_are_not_warned_about() {
+        let text = "dispatcher=off\ndispatcherCloneRoot=\ndispatcherWorktreeRoot=\n";
+        assert!(renamed_key_warnings(&parse(text)).is_empty());
+    }
+
+    /// An old line that did something is exactly the case the warning exists for.
+    #[test]
+    fn old_lines_that_did_something_are_warned_about() {
+        let warned = renamed_key_warnings(&parse("dispatcher=on\ndispatcherCloneRoot=/src\nupdate_check=off\n"));
+        assert_eq!(warned.len(), 3, "{warned:?}");
+        assert!(warned.iter().any(|w| w.contains("\"dispatcher\"") && w.contains("integration.herdr.enabled")));
+        // update_check=off is the case the list was made for: a switched-off updater switching back on.
+        assert!(warned.iter().any(|w| w.contains("update_check")));
+    }
 
     /// The old names must not be read. This is the clean break, asserted rather than assumed: an
     /// accidentally reinstated alias would make the rename a no-op and the warning a lie.
     #[test]
     fn the_old_key_names_are_not_read() {
-        let values = parse("update_check=off\n");
+        let text: String = RENAMED_KEYS.iter().map(|(old, _, _)| format!("{old}=off\n")).collect();
+        let values = parse(&text);
         assert_eq!(values.get(KEY_UPDATE_CHECK), None);
         // …but they are recognised well enough to be warned about.
-        for (old, _) in RENAMED_KEYS {
+        for (old, _, _) in RENAMED_KEYS {
             assert!(values.contains_key(old), "{old:?} should be seen, just not obeyed");
         }
     }
@@ -1143,7 +1268,7 @@ mod tests {
     fn every_rename_points_at_a_real_key() {
         let text = default_config();
         let template = parse(&text);
-        for (old, new) in RENAMED_KEYS {
+        for (old, new, _) in RENAMED_KEYS {
             assert!(template.contains_key(new), "{old:?} points at {new:?}, which is not a real key");
         }
     }

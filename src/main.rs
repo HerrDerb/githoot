@@ -8,14 +8,13 @@ mod api;
 mod autostart;
 mod config;
 mod dialog;
-mod dispatch;
 mod icons;
+mod integration;
 mod log;
 mod mute;
 mod overview;
 mod page;
 mod portal;
-mod prompts;
 mod scheduler;
 mod serve;
 mod settings_watch;
@@ -587,19 +586,10 @@ fn main() {
         errorln!("localApi is on but the local listener could not start");
     }
 
-    // Brings any prompt you have not edited up to this release's default, and leaves the ones you
-    // have alone. Every boot rather than on an install step, because there is no install step any
-    // more: a release that improves a prompt still has to reach the people who never touched it.
-    match prompts::refresh_defaults(&app_asset_path) {
-        Ok(kept) if !kept.is_empty() => infoln!("prompts: left your edited {} alone", kept.join(", ")),
-        Ok(_) => {}
-        Err(e) => errorln!("prompts: could not refresh the defaults: {e}"),
-    }
-
-    // The only thread that acts rather than reads. Always started; it checks the setting itself on
-    // every pass, which is what lets the Dispatcher tab's switch take effect without a restart.
-    // While the setting is off it reads config.txt every thirty seconds and does nothing else.
-    dispatch::spawn(app_asset_path.clone());
+    // The only thread that acts rather than reads. Always started, installed or not: it reads
+    // config.txt on every pass, which is what lets Install on the Integrations tab take effect
+    // without a restart. Prepares every integration first, which brings unedited prompts up to date.
+    integration::start(app_asset_path.clone());
 
     indicator.set_menu(&mut menu);
 
@@ -1646,19 +1636,10 @@ fn main() {
         errorln!("localApi is on but the local listener could not start");
     }
 
-    // Brings any prompt you have not edited up to this release's default, and leaves the ones you
-    // have alone. Every boot rather than on an install step, because there is no install step any
-    // more: a release that improves a prompt still has to reach the people who never touched it.
-    match prompts::refresh_defaults(&app_asset_path) {
-        Ok(kept) if !kept.is_empty() => infoln!("prompts: left your edited {} alone", kept.join(", ")),
-        Ok(_) => {}
-        Err(e) => errorln!("prompts: could not refresh the defaults: {e}"),
-    }
-
-    // The only thread that acts rather than reads. Always started; it checks the setting itself on
-    // every pass, which is what lets the Dispatcher tab's switch take effect without a restart.
-    // While the setting is off it reads config.txt every thirty seconds and does nothing else.
-    dispatch::spawn(app_asset_path.clone());
+    // The only thread that acts rather than reads. Always started, installed or not: it reads
+    // config.txt on every pass, which is what lets Install on the Integrations tab take effect
+    // without a restart. Prepares every integration first, which brings unedited prompts up to date.
+    integration::start(app_asset_path.clone());
 
     let mut app = App {
         tray,
