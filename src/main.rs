@@ -17,9 +17,11 @@ mod page;
 mod portal;
 mod scheduler;
 mod serve;
+mod setting;
 mod settings_watch;
 mod sound;
 mod state;
+mod ui;
 mod update;
 mod version;
 

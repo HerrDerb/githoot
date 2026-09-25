@@ -704,30 +704,40 @@ static INFO: Info = Info {
             label: "Start agents for pull requests that need work from you",
             kind: Kind::Flag { default_on: true },
             help: "Start agents for the amber bar: your pull requests that need work.",
+            group: "Bars",
+            live: true,
         },
         Setting {
             key: "requestedReviews",
             label: "Start agents for reviews requested of you",
             kind: Kind::Flag { default_on: true },
             help: "Start agents for the red bar: reviews requested of you.",
+            group: "Bars",
+            live: true,
         },
         Setting {
             key: "approved",
             label: "Start agents for your approved pull requests",
             kind: Kind::Flag { default_on: false },
             help: "Start agents for the green bar: your approved pull requests. Off by default.",
+            group: "Bars",
+            live: true,
         },
         Setting {
             key: "cloneRoot",
             label: "Clones live in",
             kind: Kind::Text { placeholder: "~/projects" },
             help: "Where your clones live, one directory per repository name: owner/thing needs <this>/thing. Empty means ~/projects.",
+            group: "Folders",
+            live: true,
         },
         Setting {
             key: "worktreeRoot",
             label: "Worktrees go in",
             kind: Kind::Text { placeholder: "~/worktrees" },
             help: "Where the worktree for each pull request goes, named githoot/pr-<number>-<repo>. Empty means ~/worktrees.",
+            group: "Folders",
+            live: true,
         },
     ],
     unsupported: if cfg!(target_os = "macos") { Some("The Herdr dispatcher needs Linux or Windows.") } else { None },
@@ -947,11 +957,12 @@ fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prom
         ""
     };
     format!(
-        "<div class=\"card\"><p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request \
-         that needs you, on a branch of its own, under your own <code>gh</code>. It needs <code>herdr</code>, <code>gh</code> \
-         and <code>git</code>. This is the one thing GitHoot does that is not reading, so \
+        "<section class=\"block\" id=\"needs\"><h2 class=\"section\">What it needs</h2><div class=\"card\">\
+         <p class=\"sub\"><code>herdr</code>, <code>gh</code> signed in, and <code>git</code>, on your PATH. It is the one \
+         thing GitHoot does that is not reading: it creates branches and worktrees and starts \
+         <a href=\"https://herdr.dev\">Herdr</a> agents under your own <code>gh</code>, so \
          <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>\
-         <p class=\"sub\">Right now it would look for clones in <code>{}</code> and put worktrees in <code>{}</code>.</p>{herdr}</div>\n{}",
+         <p class=\"sub\">Right now it would look for clones in <code>{}</code> and put worktrees in <code>{}</code>.</p>{herdr}</div></section>\n{}",
         esc(&settings.clone_root.display().to_string()),
         esc(&settings.worktree_root.display().to_string()),
         prompts_card(token, prompts)
@@ -965,7 +976,7 @@ fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prom
 /// the card, because a blank box that silently keeps the old text would be worse.
 fn prompts_card(token: &str, prompts: &[prompts::Prompt]) -> String {
     let mut h = format!(
-        "<h2 class=\"section\">Prompts</h2>\n<div class=\"card\">\
+        "<section class=\"block\" id=\"prompts\"><h2 class=\"section\">Prompts</h2>\n<div class=\"card\">\
          <form method=\"post\" action=\"/{}/integrations/herdr\"><input type=\"hidden\" name=\"action\" value=\"prompts\">\
          <p class=\"sub\">What the agent is told, per bar, plus the nudge it gets when a pull request changes under it. \
          Placeholders: <code>{{url}}</code> <code>{{repo}}</code> <code>{{number}}</code> <code>{{branch}}</code> \
@@ -983,7 +994,7 @@ fn prompts_card(token: &str, prompts: &[prompts::Prompt]) -> String {
             esc(&p.text),
         ));
     }
-    h.push_str("<button class=\"small\" type=\"submit\">Save prompts</button></form></div>\n");
+    h.push_str("<button class=\"small\" type=\"submit\">Save prompts</button></form></div></section>\n");
     h
 }
 

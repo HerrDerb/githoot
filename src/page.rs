@@ -9,157 +9,7 @@
 //! and because opening one browser tab per pull request was the alternative.
 
 use crate::portal::types::{CheckRollup, PrEntry, ReviewState, Reviewer};
-use crate::portal::{AuthStatus, AuthStyle, PortalInfo, PortalStatus, SignInPrompt};
-
-/// Everything the settings page shows about portals, and the two markers a redirect back from a
-/// button carries: the id whose sign-in was just asked for, and the id just signed out of. Both
-/// exist because the poll thread may not have published the outcome by the time the browser follows
-/// the redirect, so the page says what was asked and reloads once to catch up.
-#[derive(Clone, Copy)]
-pub struct PortalsView<'a> {
-    pub portals: &'a [PortalStatus],
-    pub signin_started: Option<&'a str>,
-    pub signed_out: Option<&'a str>,
-    pub now_unix: u64,
-    /// Names the copy button's script in the CSP. Empty means no script is emitted.
-    pub nonce: &'a str,
-}
-
-/// Which of GitHoot's own pages is showing. They share one line of links at the top.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tab {
-    Settings,
-    Accounts,
-    Muted,
-    Integrations,
-}
-
-/// The nav line, shared by the four pages so each can be single-purpose and still one click from
-/// the others.
-///
-/// **Why four pages and not one.** They used to share the settings page, and two of them fought the
-/// settings form: a sign-in's auto-refresh reloaded the page under a half-edited form, and the
-/// dispatcher's own buttons reloaded it too. Anything that reloads now lives on a page with no form
-/// of yours on it. The Integrations tab and each integration's page count as one tab.
-#[derive(Clone, Copy, Debug)]
-pub struct Nav {
-    pub current: Tab,
-    /// How many pull requests are muted, shown on the tab when there are any.
-    pub muted: usize,
-}
-
-fn nav(token: &str, n: &Nav) -> String {
-    let muted = if n.muted > 0 { format!("Muted ({})", n.muted) } else { "Muted".to_string() };
-    let tabs = vec![
-        (Tab::Settings, "settings", "Settings".to_string()),
-        (Tab::Accounts, "accounts", "Accounts".to_string()),
-        (Tab::Muted, "muted", muted),
-        (Tab::Integrations, "integrations", "Integrations".to_string()),
-    ];
-    let links: Vec<String> = tabs
-        .into_iter()
-        .map(|(tab, path, label)| {
-            if tab == n.current {
-                format!("<span class=\"on\" aria-current=\"page\">{}</span>", esc(&label))
-            } else {
-                format!("<a href=\"/{}/{path}\">{}</a>", esc(token), esc(&label))
-            }
-        })
-        .collect();
-    format!("<nav class=\"tabs\">{}</nav>\n", links.join(""))
-}
-
-/// One integration as the Integrations tab lists it.
-pub struct IntegrationRow<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub summary: &'a str,
-    pub status: String,
-    /// The button the row carries.
-    pub switch: Switch,
-    /// The line the last Install or Uninstall pressed here left, shown once.
-    pub flash: Option<String>,
-}
-
-/// Which way a row's button goes, or that it has none: where the build cannot run an integration
-/// that is not installed, there is nothing to offer.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Switch {
-    Install,
-    Uninstall,
-    None,
-}
-
-/// Install is the one thing a visitor to a page for something not installed came to do, so it is
-/// the full-size button; Uninstall and everything else stay in the small secondary style. `from`
-/// names the page to reload afterwards.
-fn switch_form(token: &str, id: &str, switch: Switch, from: Option<&str>) -> String {
-    let (action, button) = match switch {
-        Switch::Install => ("install", "<button type=\"submit\">Install</button>"),
-        Switch::Uninstall => ("uninstall", "<button class=\"small\" type=\"submit\">Uninstall</button>"),
-        Switch::None => return String::new(),
-    };
-    let from = from.map(|f| format!("<input type=\"hidden\" name=\"from\" value=\"{}\">", esc(f))).unwrap_or_default();
-    format!(
-        "<form method=\"post\" action=\"/{}/integrations/{}\"><input type=\"hidden\" name=\"action\" value=\"{action}\">{from}{button}</form>",
-        esc(token),
-        esc(id)
-    )
-}
-
-/// Everything the generic part of an integration's page shows, as plain data.
-pub struct IntegrationView<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub summary: &'a str,
-    pub installed: bool,
-    /// Why this build cannot run it. No Install button then, and the reason instead.
-    pub unsupported: Option<&'a str>,
-    /// Tools it needs that will not run. Only ever asked while installed, because spawning processes
-    /// to draw a card for something nobody installed is waste.
-    pub missing: &'a [&'a str],
-    /// The outcome of the last button press, shown once.
-    pub flash: Option<&'a str>,
-    /// What the last Dry run said, in the order a pass produced it. Empty until one is asked for.
-    pub dry_run: &'a [String],
-    /// Its declared settings with their current values, in declaration order.
-    pub settings: Vec<SettingRow<'a>>,
-    /// What the integration adds below. Already HTML, escaped by the integration.
-    pub body: String,
-}
-
-/// One declared setting as its form shows it.
-pub struct SettingRow<'a> {
-    pub key: &'a str,
-    pub label: &'a str,
-    /// The text as the file has it. Unused for a flag.
-    pub value: String,
-    /// What an empty text value means. Unused for a flag.
-    pub placeholder: &'a str,
-    /// `Some(on)` for a flag, drawn as a checkbox; `None` for text.
-    pub flag: Option<bool>,
-}
-
-/// The button an integration gets: Uninstall whenever it is installed, even where it cannot run, so
-/// a hand-edited `config.txt` can always be undone from the page; Install only where it can run.
-pub fn integration_switch(installed: bool, unsupported: Option<&str>) -> Switch {
-    match (installed, unsupported) {
-        (true, _) => Switch::Uninstall,
-        (false, None) => Switch::Install,
-        (false, Some(_)) => Switch::None,
-    }
-}
-
-/// "Installed", "Not installed", and the two states that must not read as either.
-pub fn integration_status(installed: bool, unsupported: Option<&str>, missing: &[&str]) -> String {
-    match (unsupported, installed, missing.is_empty()) {
-        (Some(_), _, _) => "Not available here".to_string(),
-        (None, false, _) => "Not installed".to_string(),
-        (None, true, true) => "Installed".to_string(),
-        // Installed but unable to do anything is not "installed" in any sense that matters to the reader.
-        (None, true, false) => format!("Installed, but idle: missing {}", missing.join(", ")),
-    }
-}
+use crate::portal::PortalInfo;
 
 /// What a PR page needs to offer mute links: where to post them, and which pull requests are muted
 /// right now and until when. `None` wherever a page is rendered without them (most tests), which
@@ -293,7 +143,7 @@ fn accent(axis: PrAxis) -> String {
 }
 
 /// The page's own heading for `axis` — what the bar means, not what the menu entry does.
-fn heading(axis: PrAxis) -> &'static str {
+pub(crate) fn heading(axis: PrAxis) -> &'static str {
     match axis {
         PrAxis::ReviewRequested => "Awaiting your review",
         PrAxis::ReadyToMerge => "Approved",
@@ -374,10 +224,27 @@ button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6
 font:inherit;font-weight:600;cursor:pointer}\
 code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}\
 .actions{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-top:.6rem}\
-.tabs{display:flex;flex-wrap:wrap;gap:1.2rem;margin:.2rem 0 1.2rem;padding-bottom:.4rem;border-bottom:1px solid var(--line)}\
-.tabs a{color:var(--dim);text-decoration:none}\
-.tabs a:hover{color:var(--ink)}\
-.tabs .on{color:var(--ink);font-weight:600;box-shadow:0 .45rem 0 -.25rem var(--accent)}\
+main.site-main{max-width:72rem}\
+.site{display:grid;grid-template-columns:13rem minmax(0,1fr);gap:2rem;align-items:start}\
+.side{position:sticky;top:1rem;display:flex;flex-direction:column;gap:.1rem;font-size:.92rem}\
+.side a{display:block;padding:.4rem .7rem;border-radius:6px;color:var(--dim);text-decoration:none}\
+.side a:hover{background:var(--card);color:var(--ink)}\
+.side a.child{padding-left:1.6rem;font-size:.88rem}\
+.side a.up{color:var(--ink);font-weight:600}\
+.side a.on{background:var(--card);color:var(--ink);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}\
+.badge{font-size:.72rem;padding:.05rem .45rem;border-radius:999px;background:var(--accent);color:#fff;margin-left:.3rem}\
+.pane>.block:first-child .section,.pane>.lead+.block .section{margin-top:0}\
+.lead{margin:0 0 1rem}\
+h1.crumbs{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem}\
+h1.crumbs a{color:var(--dim);font-weight:500;text-decoration:none}\
+h1.crumbs a:hover{color:var(--ink);text-decoration:underline}\
+h1.crumbs .sep{color:var(--dim);font-weight:400}\
+.help{margin:.1rem 0 .5rem 1.6rem}\
+fieldset{border:0;margin:0;padding:0}\
+legend{font-weight:600;padding:0;margin:.2rem 0 .3rem}\
+@media(max-width:760px){.site{grid-template-columns:1fr;gap:1rem}\
+.side{position:static;flex-direction:row;flex-wrap:wrap;gap:.3rem}\
+.side a.child{padding-left:.7rem}}\
 .mute{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin-top:.5rem;font-size:.85rem;color:var(--dim)}\
 .mute form{display:inline;margin:0}\
 button.link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-weight:400;\
@@ -393,6 +260,11 @@ border-radius:8px;font:.82rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,mon
 white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .actions form{margin:0}\
 .small{padding:.4rem 1rem;font-size:.9rem}\
+.card a.ghost,a.ghost,button.ghost{display:inline-flex;align-items:center;gap:.4rem;padding:.4rem 1rem;font-size:.9rem;\
+font-weight:600;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);\
+text-decoration:none}\
+.card a.ghost:hover,a.ghost:hover,button.ghost:hover{border-color:var(--accent);text-decoration:none}\
+a.ghost svg{width:1rem;height:1rem;flex:none}\
 textarea{display:block;box-sizing:border-box;width:100%;min-height:14rem;margin:.3rem 0 1rem;\
 padding:.6rem .7rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:inherit;\
 font:.9rem/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}\
@@ -675,286 +547,6 @@ fn newest_first(list: &[PrEntry]) -> Vec<&PrEntry> {
     sorted
 }
 
-/// The settings form.
-///
-/// A plain HTML form and nothing else — no script, so the page's CSP stays `default-src 'none'` and
-/// only `form-action` has to open up. Every control posts its own key name, so what the browser sends
-/// and what lands in `config.txt` are the same words, and `Config::from_form` is the only thing that
-/// turns one into the other.
-///
-/// `saved` is how many keys the last submission actually changed, for the banner. `None` means the
-/// page was opened rather than submitted.
-///
-/// `portals` is every configured portal with how its sign-in stands, and `signin_started` is the id
-/// of the portal whose sign-in the previous request just asked for, from the redirect back. That
-/// banner exists because the poll thread may not have published "in progress" yet by the time the
-/// browser follows the redirect, and a page that still offered the button would invite a second
-/// click while the first device code dialog is on its way up.
-pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str], tabs: &Nav) -> String {
-    let mut h = shell("Settings", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
-    h.push_str(&nav(token, tabs));
-    if !restarts.is_empty() {
-        h.push_str(&format!(
-            "<div class=\"empty\"><strong>Saved.</strong> {} need{} a restart to take effect: {}.</div>\n",
-            if restarts.len() == 1 { "One setting" } else { "Some settings" },
-            if restarts.len() == 1 { "s" } else { "" },
-            esc(&restarts.join(", "))
-        ));
-    }
-    h.push_str(&format!("<form method=\"post\" action=\"/{}/settings\">\n", esc(token)));
-
-    h.push_str("<h2 class=\"section\">Pull request signals</h2><div class=\"card\">");
-    for (axis, what) in [
-        (PrAxis::ReviewRequested, "Somebody wants your review"),
-        (PrAxis::ReadyToMerge, "Your pull request was approved"),
-        (PrAxis::ChangesRequested, "Your pull request needs work"),
-    ] {
-        h.push_str(&checkbox(crate::config::pr_key(axis), what, cfg.pr_enabled(axis)));
-    }
-    h.push_str("</div>\n");
-
-    h.push_str("<h2 class=\"section\">Behaviour</h2><div class=\"card\">");
-    h.push_str(&checkbox("copilotReviews", "Count Copilot's unresolved comments as work", cfg.copilot_reviews));
-    h.push_str(&checkbox("sound", "Hoot when a pull request needs you", cfg.sound));
-    h.push_str(&checkbox("updateCheck", "Check for a newer release", cfg.update_check));
-    // The label says what it opens, not just what it offers. An EDR or firewall prompt at the next
-    // launch has to be traceable to a box somebody deliberately ticked.
-    h.push_str(&checkbox(
-        "localApi",
-        "Serve the lists as JSON to local scripts (opens the local port at startup)",
-        cfg.local_api,
-    ));
-    h.push_str("</div>\n");
-
-    h.push_str("<h2 class=\"section\">Log detail</h2><div class=\"card\">");
-    for (value, what) in [
-        ("error", "Failures only"),
-        ("info", "Add lifecycle detail, for diagnosing"),
-    ] {
-        let on = matches!(cfg.log_level, crate::log::Level::Info) == (value == "info");
-        h.push_str(&format!(
-            "<label class=\"row\"><input type=\"radio\" name=\"logLevel\" value=\"{value}\"{}> {what}</label>",
-            if on { " checked" } else { "" }
-        ));
-    }
-    h.push_str("</div>\n");
-
-    h.push_str(
-        "<h2 class=\"section\">Which parts of GitHub count as an outage</h2>\n\
-         <p class=\"sub\">GitHub's page-wide verdict says \"degraded\" whenever any single component \
-         is, including the ones a pull-request tray never touches. Tick nothing to watch the whole \
-         page.</p><div class=\"card\">",
-    );
-    for name in crate::config::all_components() {
-        let on = cfg.status_components.iter().any(|c| c == name);
-        h.push_str(&format!(
-            "<label class=\"row\"><input type=\"checkbox\" name=\"statusComponents\" value=\"{}\"{}> {}</label>",
-            esc(name),
-            if on { " checked" } else { "" },
-            esc(name)
-        ));
-    }
-    h.push_str("</div>\n");
-
-    h.push_str("<p><button type=\"submit\">Save</button></p>\n</form>\n");
-    h.push_str(
-        "<footer>Written to <code>config.txt</code>, one line per changed setting — your comments \
-         and any keys this version has never heard of are left alone.</footer>\n",
-    );
-    h.push_str("</main>\n</body>\n</html>\n");
-    h
-}
-
-/// The portals and their sign-ins. Its own page because a sign-in reloads the page every few seconds
-/// until it lands, and on the settings page that reload threw away whatever you were editing.
-pub fn accounts_page(token: &str, view: &PortalsView, tabs: &Nav) -> String {
-    let PortalsView { portals, signin_started, signed_out, now_unix, nonce } = *view;
-    // Reload every few seconds while a sign-in is in flight, or has just been asked for, so the
-    // code appears without a click and the card turns to "Signed in" on its own.
-    // A redirect marker means the poll thread was just asked for something and the page should
-    // catch up as soon as it plausibly has: one second. A running flow reloads at the slower pace.
-    let refresh = if signin_started.is_some() || signed_out.is_some() {
-        Some(CATCH_UP_REFRESH_SECS)
-    } else if portals.iter().any(|p| matches!(p.auth, AuthStatus::SigningIn(_))) {
-        Some(SIGN_IN_REFRESH_SECS)
-    } else {
-        None
-    };
-    let mut h = shell("Accounts", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, refresh.map(|secs| (secs, "accounts")));
-    h.push_str(&nav(token, tabs));
-    if let Some(started) = signin_started.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
-        h.push_str(&format!(
-            "<div class=\"empty\"><strong>Sign-in to {} started.</strong> This page refreshes itself; \
-             what to do appears below in a moment.</div>\n",
-            esc(&started.info.display_name)
-        ));
-    }
-
-    if let Some(gone) = signed_out.and_then(|id| portals.iter().find(|p| p.info.id.0 == id)) {
-        h.push_str(&format!(
-            "<div class=\"empty\"><strong>Signed out of {}.</strong> The saved credential was \
-             deleted; sign in again whenever you like.</div>\n",
-            esc(&gone.info.display_name)
-        ));
-    }
-
-    // Its own forms, outside the settings form below: a form cannot nest, and a sign-in is an
-    // action rather than a setting to save.
-    h.push_str("<h2 class=\"section\">Portals</h2>\n");
-    let mut code_on_screen = false;
-    for portal in portals {
-        h.push_str(&portal_card(portal, token, now_unix));
-        code_on_screen |= matches!(portal.auth, AuthStatus::SigningIn(Some(_)));
-    }
-
-    // The one script this page ever carries, and only while there is a code to copy. Named by
-    // nonce like the PR page's refresh script, so the CSP stays `default-src 'none'` otherwise.
-    if code_on_screen && !nonce.is_empty() {
-        h.push_str(&format!("<script nonce=\"{}\">{COPY_SCRIPT}</script>\n", esc(nonce)));
-    }
-    h.push_str("</main>\n</body>\n</html>\n");
-    h
-}
-
-/// The Integrations tab: every integration this build knows, installed or not.
-pub fn integrations_page(token: &str, rows: &[IntegrationRow], tabs: &Nav) -> String {
-    let mut h = shell("Integrations", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
-    h.push_str(&nav(token, tabs));
-    h.push_str(
-        "<p class=\"sub\">What GitHoot may do with the pull requests it finds, beyond showing them. \
-         Each is off until you install it, and uninstalling one keeps its settings and files.</p>\n",
-    );
-    for row in rows {
-        let flash = row.flash.as_deref().map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
-        let switch = switch_form(token, row.id, row.switch, Some("list"));
-        let actions = if switch.is_empty() { String::new() } else { format!("<div class=\"actions\">{switch}</div>") };
-        h.push_str(&format!(
-            "<div class=\"card\"><div class=\"row\"><strong><a href=\"/{}/integrations/{}\">{}</a></strong> · \
-             <span class=\"portal-status\">{}</span></div><p class=\"sub\">{}</p>{flash}{actions}</div>\n",
-            esc(token),
-            esc(row.id),
-            esc(row.name),
-            esc(&row.status),
-            esc(row.summary),
-        ));
-    }
-    h.push_str("</main>\n</body>\n</html>\n");
-    h
-}
-
-/// One integration's page: the generic card, its settings, then whatever it adds.
-pub fn integration_page(token: &str, v: &IntegrationView, tabs: &Nav) -> String {
-    let mut h = shell(v.name, crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
-    h.push_str(&nav(token, tabs));
-    h.push_str(&integration_card(token, v));
-    h.push_str(&v.body);
-    h.push_str("</main>\n</body>\n</html>\n");
-    h
-}
-
-/// Copies the device code and opens the sign-in address in a new tab when the button is clicked,
-/// then says so on the button for a moment.
-///
-/// `navigator.clipboard` needs a secure context, which `*.localhost` is in every current browser;
-/// where it is refused anyway the code is selected instead, one keystroke from copied. The address
-/// comes from the button's own `data-url`, which the page sets only for an allowlisted URL, and the
-/// tab is opened inside the click handler so popup blockers let it through. No dependencies, no
-/// state, nothing that runs before a click.
-const COPY_SCRIPT: &str = "(function(){var b=document.getElementById('copy-code'),i=document.getElementById('device-code');if(!b||!i)return;var url=b.getAttribute('data-url');function done(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy and open';},1500);if(url){window.open(url,'_blank','noopener,noreferrer');}}function copy(){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(i.value).catch(function(){i.select();});}i.select();try{document.execCommand('copy');}catch(e){}return Promise.resolve();}b.addEventListener('click',function(){copy().then(done,done);});})();";
-
-/// How often the settings page reloads while a sign-in runs. Short enough that the code shows
-/// within a moment of the click and the card flips to "Signed in" soon after the browser finishes;
-/// long enough not to fight the user reading the code.
-const SIGN_IN_REFRESH_SECS: u32 = 3;
-
-/// How soon the page reloads after a button's redirect, to show what the poll thread made of the
-/// click. The click is handled within milliseconds; the second is the browser's round trip.
-const CATCH_UP_REFRESH_SECS: u32 = 1;
-
-/// One portal on the settings page: its name, how its sign-in stands, and one button. Sign in while
-/// not signed in; Sign out while signed in, which deletes the saved credential; Cancel while a
-/// sign-in runs. Only a dead end the portal declared (nothing installed, switched off in the file)
-/// gets no button, because a sign-in would change nothing there.
-fn portal_card(portal: &PortalStatus, token: &str, now_unix: u64) -> String {
-    let name = esc(&portal.info.display_name);
-    let action = |field: &str, label: &str| {
-        format!(
-            "<form method=\"post\" action=\"/{}/settings/authenticate\"><input type=\"hidden\" \
-             name=\"portal\" value=\"{}\">{}<button type=\"submit\">{label}</button></form>",
-            esc(token),
-            esc(&portal.info.id.0),
-            if field.is_empty() {
-                String::new()
-            } else {
-                format!("<input type=\"hidden\" name=\"{field}\" value=\"1\">")
-            }
-        )
-    };
-    let (status, form) = match &portal.auth {
-        AuthStatus::SignedIn => ("Signed in".to_string(), action("signout", "Sign out")),
-        AuthStatus::NotSignedIn => (
-            format!("Not signed in. <span class=\"sub\">{}</span>", sign_in_hint(&portal.info)),
-            action("", &format!("Sign in to {name}")),
-        ),
-        AuthStatus::SigningIn(None) => ("Starting sign-in…".to_string(), action("cancel", "Cancel")),
-        AuthStatus::SigningIn(Some(prompt)) => {
-            (sign_in_step(&portal.info, prompt, now_unix), action("cancel", "Cancel"))
-        }
-        AuthStatus::Off(reason) => (esc(reason), String::new()),
-    };
-    // A `div`, not a `p`: the running sign-in puts a block (the code row) inside the status.
-    format!(
-        "<div class=\"card\"><div class=\"row\"><strong>{name}</strong> · <span class=\"portal-status\">{status}</span></div>{form}</div>\n"
-    )
-}
-
-/// What the user has to do right now: the code, where to enter it, and how long they have. The
-/// link opens in a new tab on purpose, the one place this app does that: this page has to stay open
-/// to show the outcome, and the code is also on the clipboard.
-///
-/// The address came over the network, so it is a link only under the portal's own prefix, like
-/// every other URL on these pages; anything else is shown as text.
-fn sign_in_step(info: &PortalInfo, prompt: &SignInPrompt, now_unix: u64) -> String {
-    let left = prompt.expires_at.saturating_sub(now_unix);
-    let deadline = if left == 0 {
-        "The code has expired; cancel and start again.".to_string()
-    } else {
-        format!("Expires in {} min.", left.div_ceil(60))
-    };
-    // The button opens the address only when it passed the allowlist; otherwise it only copies,
-    // and the address is shown as text for the user to judge.
-    let safe = safe_url(&prompt.url, &info.link_prefix);
-    let where_ = match safe {
-        Some(url) => format!(
-            "<a href=\"{}\" target=\"_blank\" rel=\"noreferrer noopener\">{}</a>",
-            esc(url),
-            esc(url)
-        ),
-        None => esc(&prompt.url),
-    };
-    let open = safe.map(|url| format!(" data-url=\"{}\"", esc(url))).unwrap_or_default();
-    format!(
-        "Enter this code at {where_}. {deadline}<div class=\"code-row\"><input id=\"device-code\" \
-         class=\"device-code\" type=\"text\" readonly value=\"{}\" aria-label=\"Device code\">\
-         <button type=\"button\" id=\"copy-code\"{open}>Copy and open</button></div><span class=\"sub\">\
-         This page updates itself when you are done.</span>",
-        esc(&prompt.code)
-    )
-}
-
-/// What the sign-in will look like, so the button is not a surprise.
-fn sign_in_hint(info: &PortalInfo) -> String {
-    match info.capabilities.auth_style {
-        AuthStyle::DeviceFlow => format!(
-            "A code and a link to {} appear here; enter the code there to finish.",
-            esc(&info.display_name)
-        ),
-        AuthStyle::PastedToken => {
-            format!("You will be asked for a token you created on {}.", esc(&info.display_name))
-        }
-    }
-}
-
 /// What the settings route says when `serve::install` was never called.
 pub fn settings_unavailable(token: &str) -> String {
     let mut h = shell("Settings", crate::icons::css_hex(crate::icons::REVIEW_DOT_COLOR), token, None);
@@ -964,136 +556,24 @@ pub fn settings_unavailable(token: &str) -> String {
     h
 }
 
-/// One row of the muted page: a live mute, and the pull request it names if a bar still holds it.
-pub struct MutedRow<'a> {
-    pub key: &'a str,
-    pub until: u64,
-    /// The bar it was found in, the entry, and that portal's link prefix. `None` when no bar holds it
-    /// any more, typically because it was merged or closed while muted.
-    pub found: Option<(PrAxis, &'a PrEntry, &'a str)>,
-}
-
-/// Every muted pull request in one place, across all three bars, each with Unmute.
-///
-/// This exists because a muted pull request can otherwise be unreachable: an empty bar hides its
-/// menu entry, so a bar whose only pull request is muted has no page to unmute it from. Reached from
-/// the settings page, and from the muted section of any bar.
-pub fn muted_page(rows: &[MutedRow], token: &str, now_unix: u64, tabs: &Nav) -> String {
-    let mut h = shell("Muted pull requests", crate::icons::css_hex(crate::icons::MERGE_DOT_COLOR), token, None);
-    h.push_str(&nav(token, tabs));
-    h.push_str("<p class=\"sub\">A muted pull request stays out of its bar until the mute ends, then comes back as new.</p>\n");
-    if rows.is_empty() {
-        h.push_str("<div class=\"empty\"><p>Nothing is muted.</p></div>\n");
-    }
-    let unmute = |key: &str, until: u64| {
-        format!(
-            "<div class=\"mute\">Muted, back in {} · <form method=\"post\" action=\"/{}/muted\">\
-             <input type=\"hidden\" name=\"key\" value=\"{}\"><button class=\"link\" type=\"submit\">Unmute</button></form></div>",
-            esc(&crate::mute::remaining(until, now_unix)),
-            esc(token),
-            esc(key)
-        )
-    };
-    for axis in PrAxis::ALL {
-        let here: Vec<_> = rows.iter().filter(|r| r.found.is_some_and(|(a, _, _)| a == axis)).collect();
-        if here.is_empty() {
-            continue;
-        }
-        h.push_str(&format!("<h2 class=\"section\">{}</h2>\n", esc(heading(axis))));
-        for r in here {
-            let (_, e, prefix) = r.found.expect("filtered to found rows");
-            h.push_str(&card(e, prefix, now_unix, &unmute(r.key, r.until)));
-        }
-    }
-    let gone: Vec<_> = rows.iter().filter(|r| r.found.is_none()).collect();
-    if !gone.is_empty() {
-        h.push_str("<h2 class=\"section\">No longer in any bar</h2>\n");
-        h.push_str("<p class=\"sub\">Merged, closed, or simply not waiting on you right now. The mute ends by itself; \
-                    unmute it to have it count as new the next time it turns up.</p>\n");
-        for r in gone {
-            h.push_str(&format!("<div class=\"card\"><h2><code>{}</code></h2>{}</div>\n", esc(r.key), unmute(r.key, r.until)));
-        }
-    }
-    h.push_str("</main>\n</body>\n</html>\n");
-    h
-}
-
-/// Whether it is installed, what it is missing, the switch, the rehearsal, and its settings.
-///
-/// The switch sits on the page that explains the integration, because that is the right page to turn
-/// it on from. Dry run is offered installed or not, and that is the point: the only safe way to learn
-/// what installing it would do is to ask first.
-fn integration_card(token: &str, v: &IntegrationView) -> String {
-    let status = integration_status(v.installed, v.unsupported, v.missing);
-    let action = format!("/{}/integrations/{}", esc(token), esc(v.id));
-    let button = |name: &str, label: &str| {
-        format!(
-            "<form method=\"post\" action=\"{action}\"><input type=\"hidden\" name=\"action\" value=\"{name}\">\
-             <button class=\"small\" type=\"submit\">{label}</button></form>"
-        )
-    };
-
-    let mut notes = String::new();
-    if let Some(why) = v.unsupported {
-        notes.push_str(&format!("<p class=\"sub\">{}</p>", esc(why)));
-    } else if v.installed && !v.missing.is_empty() {
-        notes.push_str(&format!(
-            "<p class=\"sub\">Put <code>{}</code> on your PATH. Until then it does nothing.</p>",
-            v.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
-        ));
-    }
-    let flash = v.flash.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
-    let switch = switch_form(token, v.id, integration_switch(v.installed, v.unsupported), None);
-    let dry = if v.unsupported.is_some() { String::new() } else { button("dryrun", "Dry run") };
-    let said = if v.dry_run.is_empty() {
-        String::new()
-    } else {
-        format!("<pre class=\"dry\">{}</pre>", v.dry_run.iter().map(|l| esc(l)).collect::<Vec<_>>().join("\n"))
-    };
-
-    let mut h = format!(
-        "<h2 class=\"section\">{name}</h2>\n<div class=\"card\"><div class=\"row\"><strong>{name}</strong> · \
-         <span class=\"portal-status\">{status}</span></div><p class=\"sub\">{summary}</p>{notes}{flash}\
-         <div class=\"actions\">{switch}{dry}</div>{said}</div>\n",
-        name = esc(v.name),
-        status = esc(&status),
-        summary = esc(v.summary),
-    );
-    if !v.settings.is_empty() {
-        h.push_str(&format!(
-            "<h2 class=\"section\">Settings</h2>\n<div class=\"card\"><form method=\"post\" action=\"{action}\">\
-             <input type=\"hidden\" name=\"action\" value=\"settings\">"
-        ));
-        for row in &v.settings {
-            match row.flag {
-                Some(on) => h.push_str(&checkbox(row.key, row.label, on)),
-                None => h.push_str(&format!(
-                    "<label class=\"path\"><span>{}</span><input type=\"text\" name=\"{}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"></label>",
-                    esc(row.label),
-                    esc(row.key),
-                    esc(&row.value),
-                    esc(row.placeholder)
-                )),
-            }
-        }
-        h.push_str("<button class=\"small\" type=\"submit\">Save settings</button></form></div>\n");
-    }
-    h
-}
-
-fn checkbox(name: &str, label: &str, on: bool) -> String {
-    format!(
-        "<label class=\"row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{}> {}</label>",
-        esc(name),
-        if on { " checked" } else { "" },
-        esc(label)
-    )
-}
-
 /// Everything both kinds of page share: head, stylesheet, owl and heading.
 /// `refresh_secs` makes the page reload itself, the one way a page with no script can follow
 /// something changing on the poll thread. Used only while a sign-in is running.
 fn shell(title: &str, accent: String, token: &str, refresh: Option<(u32, &str)>) -> String {
+    shell_with(title, accent, token, refresh.map(|(secs, path)| (secs, path.to_string())), "", None)
+}
+
+/// `shell`, with a class on `main` and, optionally, a heading of the caller's own: the settings site
+/// uses them for its wider, two-column layout and its breadcrumb title. `heading` is HTML the caller
+/// has already escaped; `title` is still plain text, for the browser tab.
+pub(crate) fn shell_with(
+    title: &str,
+    accent: String,
+    token: &str,
+    refresh: Option<(u32, String)>,
+    main_class: &str,
+    heading: Option<&str>,
+) -> String {
     let mut h = String::with_capacity(4096);
     h.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
     h.push_str("<meta charset=\"utf-8\">\n");
@@ -1112,11 +592,15 @@ fn shell(title: &str, accent: String, token: &str, refresh: Option<(u32, &str)>)
     h.push_str(&format!("<title>{} — GitHoot</title>\n", esc(title)));
     h.push_str(&format!("<link rel=\"icon\" href=\"/{}/owl.png\">\n", esc(token)));
     h.push_str(&format!("<style>{STYLESHEET}\n:root{{--accent:{accent}}}</style>\n"));
-    h.push_str("</head>\n<body>\n<main>\n");
+    if main_class.is_empty() {
+        h.push_str("</head>\n<body>\n<main>\n");
+    } else {
+        h.push_str(&format!("</head>\n<body>\n<main class=\"{}\">\n", esc(main_class)));
+    }
+    let heading = heading.map(str::to_string).unwrap_or_else(|| format!("<h1>{}</h1>", esc(title)));
     h.push_str(&format!(
-        "<header><img src=\"/{}/owl.png\" alt=\"\" width=\"36\" height=\"36\"><h1>{}</h1></header>\n",
+        "<header><img src=\"/{}/owl.png\" alt=\"\" width=\"36\" height=\"36\">{heading}</header>\n",
         esc(token),
-        esc(title)
     ));
     h.push_str("<div class=\"rule\"></div>\n");
     h
@@ -1151,7 +635,7 @@ fn portal_link(prefix: &str, url: &str, text: &str) -> String {
 }
 
 /// One pull request.
-fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str) -> String {
+pub(crate) fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str) -> String {
     let title = e.title.as_deref().unwrap_or("(untitled)");
     // A URL that is not the portal's own is shown but not offered as a link — see `safe_url`.
     let headline = match safe_url(&e.url, link_prefix) {
@@ -1226,8 +710,6 @@ fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const NAV: Nav = Nav { current: Tab::Settings, muted: 0 };
 
     const NOW: u64 = 1_789_000_000;
 
@@ -1510,7 +992,6 @@ mod tests {
         let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
         assert!(html.contains("<h2><a "), "a PR title is a plain h2 with a link in it");
         assert!(!html.contains("class=\"section\""), "and the PR page has no section headings");
-        assert!(settings(&default_cfg()).contains("<h2 class=\"section\">"));
     }
 
     #[test]
@@ -1659,152 +1140,6 @@ mod tests {
         assert!(html.contains("/items"), "it has to know where to fetch from");
     }
 
-    /// The settings page has a form and no list, so it gets no refresh loop.
-    #[test]
-    fn the_settings_page_has_no_refresh_script() {
-        assert!(!settings_page(&default_cfg(), "tok", &[], &NAV).contains("<script"));
-    }
-
-    // ── The settings page ─────────────────────────────────────────────────────
-
-    fn settings(cfg: &crate::config::Config) -> String {
-        settings_page(cfg, "tok", &[], &NAV)
-    }
-
-    fn portal(auth: AuthStatus) -> PortalStatus {
-        PortalStatus { info: GITHUB.clone(), auth }
-    }
-
-    fn view<'a>(portals: &'a [PortalStatus], signin: Option<&'a str>) -> PortalsView<'a> {
-        PortalsView { portals, signin_started: signin, signed_out: None, now_unix: NOW, nonce: "n" }
-    }
-
-    // ── Integrations ──────────────────────────────────────────────────────────
-
-    fn integration(installed: bool, missing: &'static [&'static str]) -> IntegrationView<'static> {
-        IntegrationView {
-            id: "herdr",
-            name: "Herdr dispatcher",
-            summary: "Starts agents.",
-            installed,
-            unsupported: None,
-            missing,
-            flash: None,
-            dry_run: &[],
-            settings: vec![SettingRow { key: "cloneRoot", label: "Clones live in", value: "/d/projects".into(), placeholder: "~/projects", flag: None }],
-            body: "<p>its own part</p>".to_string(),
-        }
-    }
-
-    /// Not installed is the default and must read as plainly that, offering Install on the spot. A
-    /// page that explains what a thing does is the right page to turn it on from.
-    #[test]
-    fn an_integration_not_installed_offers_install_and_a_rehearsal() {
-        let html = integration_page("tok", &integration(false, &[]), &NAV);
-        assert!(html.contains("portal-status\">Not installed<"), "{html}");
-        assert!(html.contains(r#"value="install""#) && html.contains(">Install<"));
-        assert!(!html.contains(r#"value="uninstall""#), "nothing to uninstall while it is not installed");
-        assert!(html.contains(">Dry run<"), "and a way to rehearse before committing to it");
-        assert!(html.contains(r#"action="/tok/integrations/herdr""#));
-    }
-
-    #[test]
-    fn an_installed_integration_offers_the_way_back_out() {
-        let html = integration_page("tok", &integration(true, &[]), &NAV);
-        assert!(html.contains("portal-status\">Installed<"), "{html}");
-        assert!(html.contains(r#"value="uninstall""#) && html.contains(">Uninstall<"));
-        assert!(!html.contains(r#"value="install""#) && !html.contains("Remove"), "one switch, not two");
-    }
-
-    /// Installed with a tool gone must not read as healthy: it is switched on and doing nothing.
-    #[test]
-    fn an_installed_integration_missing_a_tool_says_it_is_idle() {
-        let html = integration_page("tok", &integration(true, &["herdr", "gh"]), &NAV);
-        assert!(html.contains("Installed, but idle: missing herdr, gh"), "{html}");
-        assert!(html.contains("<code>herdr</code>, <code>gh</code>"));
-    }
-
-    /// Where the build cannot run it, the page says why and offers nothing that could only fail.
-    #[test]
-    fn an_unsupported_integration_offers_no_install() {
-        let v = IntegrationView { unsupported: Some("Needs Linux or Windows."), ..integration(false, &[]) };
-        let html = integration_page("tok", &v, &NAV);
-        assert!(html.contains("Not available here") && html.contains("Needs Linux or Windows."));
-        assert!(!html.contains(r#"value="install""#) && !html.contains(">Dry run<"));
-    }
-
-    /// Setting values are the user's text going into an attribute.
-    #[test]
-    fn integration_settings_are_a_form_of_their_own_with_escaped_values() {
-        let v = IntegrationView {
-            settings: vec![SettingRow { key: "cloneRoot", label: "Clones live in", value: "\"><script>".into(), placeholder: "~/projects", flag: None }],
-            ..integration(true, &[])
-        };
-        let html = integration_page("tok", &v, &NAV);
-        assert!(html.contains(r#"name="action" value="settings""#));
-        assert!(html.contains(r#"name="cloneRoot""#) && !html.contains("\"><script>"));
-        assert!(!html.contains(r#"action="/tok/settings">"#), "never the general settings form");
-    }
-
-    /// A flag is a checkbox in the same form, ticked for on.
-    #[test]
-    fn integration_flags_are_checkboxes_in_the_settings_form() {
-        let v = IntegrationView {
-            settings: vec![
-                SettingRow { key: "approved", label: "Approved", value: "off".into(), placeholder: "", flag: Some(false) },
-                SettingRow { key: "workRequired", label: "Work required", value: "on".into(), placeholder: "", flag: Some(true) },
-            ],
-            ..integration(true, &[])
-        };
-        let html = integration_page("tok", &v, &NAV);
-        assert!(html.contains(r#"<input type="checkbox" name="approved" value="on"> Approved"#), "{html}");
-        assert!(html.contains(r#"<input type="checkbox" name="workRequired" value="on" checked> Work required"#));
-        assert!(!html.contains(r#"type="text" name="approved""#));
-    }
-
-    #[test]
-    fn an_integration_page_carries_its_own_part_and_a_flash_once_given() {
-        let v = IntegrationView { flash: Some("Installed."), dry_run: &[], ..integration(true, &[]) };
-        let html = integration_page("tok", &v, &NAV);
-        assert!(html.contains("<p>its own part</p>") && html.contains("<strong>Installed.</strong>"));
-    }
-
-    fn row(status: &str, switch: Switch) -> IntegrationRow<'static> {
-        IntegrationRow { id: "herdr", name: "Herdr dispatcher", summary: "Starts agents.", status: status.into(), switch, flash: None }
-    }
-
-    #[test]
-    fn the_integrations_tab_lists_each_with_its_state_and_page() {
-        let html = integrations_page("tok", &[row("Not installed", Switch::Install)], &Nav { current: Tab::Integrations, muted: 0 });
-        assert!(html.contains(r#"href="/tok/integrations/herdr""#) && html.contains("Not installed"));
-        assert!(html.contains(r#"aria-current="page">Integrations<"#));
-    }
-
-    /// Not installed means a button you cannot miss, right in the list, full size rather than the
-    /// small secondary style. It says it came from the list, so the list is what reloads after.
-    #[test]
-    fn an_integration_not_installed_has_a_full_size_install_button_in_the_list() {
-        let html = integrations_page("tok", &[row("Not installed", Switch::Install)], &NAV);
-        assert!(html.contains(r#"<form method="post" action="/tok/integrations/herdr"><input type="hidden" name="action" value="install"><input type="hidden" name="from" value="list"><button type="submit">Install</button></form>"#), "{html}");
-        assert!(!integrations_page("tok", &[row("Not available here", Switch::None)], &NAV).contains("<form"));
-    }
-
-    /// Installed rows offer the way back out, from the same list, and the line the press left.
-    #[test]
-    fn an_installed_integration_can_be_uninstalled_from_the_list() {
-        let r = IntegrationRow { flash: Some("Uninstalled.".into()), ..row("Installed", Switch::Uninstall) };
-        let html = integrations_page("tok", &[r], &NAV);
-        assert!(html.contains(r#"value="uninstall"><input type="hidden" name="from" value="list"><button class="small" type="submit">Uninstall</button>"#), "{html}");
-        assert!(!html.contains(r#"value="install""#) && html.contains("<strong>Uninstalled.</strong>"));
-    }
-
-    #[test]
-    fn install_on_its_own_page_is_full_size_too() {
-        let html = integration_page("tok", &integration(false, &[]), &NAV);
-        assert!(html.contains(r#"value="install"><button type="submit">Install</button>"#), "{html}");
-        assert!(html.contains(r#"<button class="small" type="submit">Dry run</button>"#), "the rehearsal stays secondary");
-    }
-
     // ── Mutes on the PR page ──────────────────────────────────────────────────
 
     fn bar_page(until: &dyn Fn(&str) -> Option<u64>) -> String {
@@ -1877,50 +1212,6 @@ mod tests {
         assert!(html.find("Nothing here").unwrap() < html.find("muted-head\">Muted").unwrap());
     }
 
-    /// The muted page reaches every muted pull request, grouped by bar, with Unmute posting to
-    /// itself; one no bar holds any more is still listed, by key, so it can be unmuted too.
-    #[test]
-    fn the_muted_page_lists_every_mute_with_unmute() {
-        let a = PrEntry { id: Some("PR_a".into()), title: Some("Alpha".into()), ..entry("https://github.com/o/r/pull/1") };
-        let rows = [
-            MutedRow { key: "PR_a", until: NOW + 3 * 86_400, found: Some((PrAxis::ChangesRequested, &a, "https://github.com/")) },
-            MutedRow { key: "PR_gone", until: NOW + 86_400, found: None },
-        ];
-        let html = muted_page(&rows, "tok", NOW, &NAV);
-        assert!(html.contains(&format!(">{}</h2>", heading(PrAxis::ChangesRequested))));
-        assert!(html.contains("Alpha") && html.contains("back in 3 days"));
-        assert!(html.contains("No longer in any bar") && html.contains("<code>PR_gone</code>"));
-        assert_eq!(html.matches(r#"action="/tok/muted""#).count(), 2, "one Unmute per row");
-        assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#));
-        assert!(!muted_page(&[], "tok", NOW, &NAV).contains("Unmute"));
-        assert!(muted_page(&[], "tok", NOW, &NAV).contains("Nothing is muted."));
-    }
-
-    /// Every one of GitHoot's own pages carries the same nav, so the muted page, the one route to a
-    /// muted pull request whose bar is empty, is one click from anywhere; the current tab is not a link.
-    #[test]
-    fn every_own_page_carries_the_nav_and_marks_where_you_are() {
-        let n = Nav { current: Tab::Settings, muted: 2 };
-        let settings = settings_page(&default_cfg(), "tok", &[], &n);
-        assert!(settings.contains(r#"<span class="on" aria-current="page">Settings</span>"#));
-        for path in ["accounts", "muted", "integrations"] {
-            assert!(settings.contains(&format!(r#"href="/tok/{path}""#)), "{path}");
-        }
-        assert!(settings.contains(">Muted (2)<"));
-        let a = accounts_page("tok", &view(&[], None), &Nav { current: Tab::Accounts, ..n });
-        assert!(a.contains(r#"aria-current="page">Accounts<"#) && a.contains(r#"href="/tok/settings""#));
-        assert!(muted_page(&[], "tok", NOW, &Nav { current: Tab::Muted, ..n }).contains(r#"aria-current="page">Muted (2)<"#));
-    }
-
-    /// The point of the split: nothing that reloads by itself shares a page with the settings form.
-    #[test]
-    fn the_settings_form_shares_its_page_with_nothing_that_reloads_it() {
-        let html = settings_page(&default_cfg(), "tok", &[], &NAV);
-        assert!(html.contains(r#"<form method="post" action="/tok/settings">"#));
-        assert!(!html.contains("http-equiv=\"refresh\""), "no auto-refresh on the page with your edits");
-        assert!(!html.contains("Portals") && !html.contains("/tok/integrations/") && !html.contains("settings/authenticate"));
-    }
-
     /// The page posts its mute links back to itself, so it must not null its own `Origin`.
     #[test]
     fn the_pr_page_keeps_an_origin_for_its_mute_links() {
@@ -1928,183 +1219,6 @@ mod tests {
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#));
         assert!(!html.contains("no-referrer\""), "the document policy must not be no-referrer");
         assert!(html.contains(r#"rel="noreferrer""#), "outbound links still send nothing");
-    }
-
-    fn settings_with(portals: &[PortalStatus], signin: Option<&str>) -> String {
-        accounts_page("tok", &view(portals, signin), &NAV)
-    }
-
-    fn default_cfg() -> crate::config::Config {
-        let dir = std::env::temp_dir().join(format!("githoot-page-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let (cfg, _) = crate::config::Config::load(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        cfg
-    }
-
-    /// Every writable key needs a control, or a setting exists the page silently cannot reach.
-    #[test]
-    fn every_writable_key_has_a_control() {
-        let html = settings(&default_cfg());
-        for (key, _) in crate::config::WRITABLE_KEYS {
-            assert!(html.contains(&format!("name=\"{key}\"")), "no control for {key}");
-        }
-    }
-
-    /// The form has to post back to us, or the CSP's `form-action 'self'` blocks it and nothing saves.
-    #[test]
-    fn the_form_posts_back_to_our_own_settings_route() {
-        assert!(settings(&default_cfg()).contains(r#"<form method="post" action="/tok/settings">"#));
-    }
-
-    /// A checkbox that does not reflect what is on disk is worse than no page: it invites you to save
-    /// a state you never chose.
-    #[test]
-    fn the_controls_show_what_is_actually_configured() {
-        let mut cfg = default_cfg();
-        cfg.sound = false;
-        cfg.update_check = true;
-        cfg.status_components = vec!["Issues".to_string()];
-        let html = settings(&cfg);
-        assert!(html.contains(r#"name="sound" value="on">"#), "an off box is not checked");
-        assert!(html.contains(r#"name="updateCheck" value="on" checked>"#));
-        assert!(html.contains(r#"value="Issues" checked>"#));
-        assert!(html.contains(r#"value="Pages">"#), "an unlisted component is not checked");
-    }
-
-    /// Every component GitHub publishes is offered, not just the ones currently watched — the whole
-    /// point is that adding one back is a tick rather than a trip to the status page.
-    #[test]
-    fn every_component_is_offered() {
-        let html = settings(&default_cfg());
-        for name in crate::config::all_components() {
-            assert!(html.contains(&format!(r#"value="{name}""#)), "{name} is not offered");
-        }
-    }
-
-    // ── Portals on the settings page ──────────────────────────────────────────
-
-    /// The button appears exactly when a click would help: not signed in. It posts to its own
-    /// route, names its portal, and stays outside the settings form so the two cannot nest.
-    #[test]
-    fn a_portal_waiting_for_sign_in_gets_a_button_that_names_it() {
-        let html = settings_with(&[portal(AuthStatus::NotSignedIn)], None);
-        assert!(html.contains("<h2 class=\"section\">Portals</h2>"), "got {html}");
-        assert!(html.contains("<strong>GitHub</strong> · <span class=\"portal-status\">Not signed in."), "got {html}");
-        assert!(html.contains(r#"<form method="post" action="/tok/settings/authenticate">"#));
-        assert!(html.contains(r#"<input type="hidden" name="portal" value="github">"#));
-        assert!(html.contains("Sign in to GitHub</button>"));
-        assert!(html.contains("A code and a link"), "the device flow is explained before the click");
-        assert!(!html.contains("http-equiv=\"refresh\""), "nothing running: the page sits still");
-        assert!(!html.contains(r#"action="/tok/settings">"#), "the settings form lives on its own page now");
-    }
-
-    /// Signed in offers Sign out, which posts to the same route with `signout` set. The page after
-    /// the redirect says so and reloads once so the card catches up with the poll thread.
-    #[test]
-    fn a_signed_in_portal_offers_to_sign_out() {
-        let html = settings_with(&[portal(AuthStatus::SignedIn)], None);
-        assert!(html.contains("<span class=\"portal-status\">Signed in</span>"), "got {html}");
-        assert!(html.contains(r#"<input type="hidden" name="signout" value="1"><button type="submit">Sign out</button>"#));
-        assert!(!html.contains("Cancel</button>") && !html.contains("Sign in to GitHub</button>"));
-        assert!(!html.contains("http-equiv=\"refresh\""));
-
-        let statuses = [portal(AuthStatus::NotSignedIn)];
-        let html = accounts_page("tok", &PortalsView { signed_out: Some("github"), ..view(&statuses, None) }, &NAV);
-        assert!(html.contains("<strong>Signed out of GitHub.</strong>"), "got {html}");
-        assert!(html.contains(r#"<meta http-equiv="refresh" content="1;url=/tok/accounts">"#), "one quick reload to catch up, to the plain address: {html}");
-    }
-
-    /// A dead end the portal declared: the reason is said and no button is offered, because a
-    /// sign-in would change nothing there.
-    #[test]
-    fn a_dead_end_shows_its_reason_without_a_button() {
-        let html = settings_with(&[portal(AuthStatus::Off("PR status off: install the GitHub App to see your PRs".to_string()))], None);
-        assert!(html.contains("install the GitHub App"), "got {html}");
-        assert!(!html.contains("settings/authenticate"));
-        assert!(!html.contains("http-equiv=\"refresh\""));
-    }
-
-    /// While the flow runs the page is the dialog: it shows the code and the link, says how long is
-    /// left, offers Cancel and nothing else, and reloads itself so the outcome shows up on its own.
-    #[test]
-    fn a_running_sign_in_shows_the_code_the_link_the_deadline_and_cancel() {
-        let html = settings_with(&[portal(AuthStatus::SigningIn(None))], None);
-        assert!(html.contains("Starting sign-in"), "got {html}");
-        assert!(html.contains(r#"<input type="hidden" name="cancel" value="1"><button type="submit">Cancel</button>"#));
-        assert!(!html.contains("Sign in to GitHub</button>"), "no second sign-in while one runs");
-        assert!(html.contains(r#"<meta http-equiv="refresh" content="3;url=/tok/accounts">"#), "reloads to the plain address");
-
-        let prompt = SignInPrompt {
-            code: "ABCD-1234".to_string(),
-            url: "https://github.com/login/device".to_string(),
-            expires_at: NOW + 14 * 60 + 30,
-        };
-        let html = settings_with(&[portal(AuthStatus::SigningIn(Some(prompt.clone())))], None);
-        assert!(html.contains(r#"<input id="device-code" class="device-code" type="text" readonly value="ABCD-1234" aria-label="Device code">"#), "got {html}");
-        assert!(html.contains(r#"<button type="button" id="copy-code" data-url="https://github.com/login/device">Copy and open</button>"#), "one button copies and opens: {html}");
-        assert!(html.contains("<script nonce=\"n\">"), "the copy button needs the one script this page ever runs");
-        assert!(!html.contains("<p class=\"row\">"), "the code row is a block, so the card must not wrap it in a paragraph");
-        assert!(html.contains(r#"<a href="https://github.com/login/device" target="_blank" rel="noreferrer noopener">https://github.com/login/device</a>"#));
-        assert!(html.contains("Expires in 15 min."), "rounded up, so it never claims less time than there is");
-        assert!(html.contains("Cancel</button>"));
-
-        let expired = SignInPrompt { expires_at: NOW - 1, ..prompt };
-        let html = settings_with(&[portal(AuthStatus::SigningIn(Some(expired)))], None);
-        assert!(html.contains("The code has expired"));
-    }
-
-    /// The code and the URL come from the portal's answer, so they are escaped like anything else
-    /// that arrives over the network.
-    #[test]
-    fn the_prompt_is_escaped() {
-        let prompt = SignInPrompt { code: "<b>".to_string(), url: "javascript:x".to_string(), expires_at: NOW + 60 };
-        let html = settings_with(&[portal(AuthStatus::SigningIn(Some(prompt)))], None);
-        assert!(html.contains("&lt;b&gt;") && !html.contains("<b>"));
-        assert!(!html.contains("href=\"javascript"), "an address off the portal's own host is text, not a link");
-        assert!(!html.contains("data-url="), "and the button will not open it either");
-        assert!(html.contains("at javascript:x."), "shown, so nothing is hidden");
-    }
-
-    /// The redirect back from the button names the portal, and the page says so even if the poll
-    /// thread has not yet published "in progress". An unknown id is ignored rather than rendered.
-    #[test]
-    fn the_sign_in_started_banner_names_the_portal_and_ignores_strangers() {
-        let html = settings_with(&[portal(AuthStatus::NotSignedIn)], Some("github"));
-        assert!(html.contains("<strong>Sign-in to GitHub started.</strong>"), "got {html}");
-        assert!(html.contains("http-equiv=\"refresh\""), "and the page will catch up with the poll thread on its own");
-        let html = settings_with(&[portal(AuthStatus::NotSignedIn)], Some("gitlab"));
-        assert!(!html.contains("started."), "an id the page does not know renders nothing");
-        assert!(!html.contains("gitlab"), "and is not echoed back");
-    }
-
-    /// Text on a portal card comes from the portal and from `config.txt`, so it is escaped like a
-    /// PR title.
-    #[test]
-    fn portal_status_text_is_escaped() {
-        let html = settings_with(&[portal(AuthStatus::Off("<b>x</b>".to_string()))], None);
-        assert!(html.contains("&lt;b&gt;x&lt;/b&gt;"));
-        assert!(!html.contains("<b>x</b>"));
-    }
-
-    /// No script unless a device code is on screen, and none at all without a nonce to name it.
-    #[test]
-    fn the_settings_page_runs_no_script_unless_a_code_is_on_screen() {
-        assert!(!settings(&default_cfg()).contains("<script"));
-        assert!(!settings_unavailable("tok").contains("<script"));
-        assert!(!settings_with(&[portal(AuthStatus::SigningIn(None))], None).contains("<script"));
-        let prompt = SignInPrompt { code: "X".to_string(), url: GITHUB.link_prefix.clone(), expires_at: NOW + 60 };
-        let statuses = [portal(AuthStatus::SigningIn(Some(prompt)))];
-        let without_nonce = accounts_page("tok", &PortalsView { nonce: "", ..view(&statuses, None) }, &NAV);
-        assert!(!without_nonce.contains("<script"), "no nonce, no script: the CSP would block it anyway");
-    }
-
-    #[test]
-    fn the_restart_banner_only_shows_after_a_save() {
-        assert!(!settings(&default_cfg()).contains("Saved."));
-        let banner = settings_page(&default_cfg(), "tok", &["logLevel"], &NAV);
-        assert!(banner.contains("Saved."));
-        assert!(banner.contains("logLevel"));
     }
 
     // ── Age ───────────────────────────────────────────────────────────────────

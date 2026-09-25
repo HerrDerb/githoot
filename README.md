@@ -153,9 +153,9 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [PR status](docs/pr-status.md) | The three queries, the GraphQL rationale, the GitHub App |
 | [Portals](docs/portals.md) | The seam GitHub sits behind, and what GitLab and Bitbucket will have to bring to it |
 | [The PR page](docs/pr-page.md) | What the menu entries open, why it is served locally, and what guards it |
-| [Settings page](docs/menu-and-settings.md#the-settings-page) | Every setting as a form in your browser, and the guard writing needed |
+| [Settings pages](docs/menu-and-settings.md#the-settings-pages) | Every setting in your browser, by what it is about, with a sidebar; and the guard writing needed |
 | [The local API](docs/local-api.md) | Serving the judged lists as JSON to your own scripts, off by default |
-| [Integrations](docs/integrations.md) | What GitHoot may do with the pull requests it finds, installed from the settings page |
+| [Integrations](docs/integrations.md) | What GitHoot may do with the pull requests it finds, installed from the settings pages |
 | [The Herdr dispatcher](docs/dispatcher.md) | The first integration: turning the bars into Herdr agents. The one thing GitHoot does that is not reading, so it is off until installed |
 | [The hoot](docs/hoot.md) | Exactly which transitions make a sound, and which stay quiet |
 | [Troubleshooting](docs/troubleshooting.md) | Tooltip meanings, the log, the Defender verdict |

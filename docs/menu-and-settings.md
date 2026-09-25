@@ -7,7 +7,7 @@
 | **Install update: X.Y.Z** | A newer release exists | Shows what changed, then verifies, installs and restarts |
 | **GitHub is githubing again, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
 | *— separator —* | Something above **and** below it | |
-| **Authenticate GitHub PR Status** | PR status has no usable credential | Opens the Accounts page, where the sign-in button is |
+| **Authenticate GitHub PR Status** | PR status has no usable credential | Opens **Portals ▸ GitHub**, where the sign-in button is |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
 | **Open Approved PRs (N)** | One of yours has been approved | Opens GitHoot's own page for exactly what the green bar counts |
 | **Open Work Required (N)** | An objection stands, a conflict is blocking one, or Copilot has open comments | Opens GitHoot's own page for exactly what the amber bar counts |
@@ -87,70 +87,66 @@ tick goes back to what it was and a dialog says why.
 
 ---
 
-## The settings page
+## The settings pages
 
-**Open settings page** serves every setting as a plain HTML form on the same loopback listener the PR
-pages use, behind the same token and `Host` checks. It is the easier way in for two reasons: the
-component list becomes tick boxes instead of an exact comma-separated line, and nothing depends on
-having an editor or a desktop association — the file route needs `$EDITOR` or a file handler, and does
-nothing at all with no display server.
+**Open settings page** opens a small site on the same loopback listener the PR pages use, behind the
+same token and `Host` checks. It is organised by what you manage, with a sidebar on every page:
 
-Saving writes **one line per changed setting**, through the same surgical edit the tray checkboxes
+| Page | Holds |
+|---|---|
+| **General** | what the tray shows and does: the three bars, the hoot |
+| **Portals ▸ GitHub** | where pull requests come from: the sign-in, the Copilot rule, which parts of GitHub count as an outage |
+| **Integrations ▸ Herdr dispatcher** | where pull requests go: Install, a dry run, its settings and prompts → [integrations](integrations.md) |
+| **Muted** | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
+| **Updates** | this version, the last check, **Check now**, and the automatic check |
+| **Advanced** | the local API → [the local API](local-api.md), and how much the log records |
+
+Portals and Integrations are the two collections: a list with one card per item, its state, its main
+action and a ⚙ **Settings** button, and a page per item. The sidebar lists under each collection only
+what is in use, the portals you are signed in to and the integrations you installed, plus the page you
+are on, and marks where you are. Everything else is on the list page, where it is signed in to or
+installed. The page title says where you are too, as a trail from **Settings**, such as *Settings ›
+Integrations › Herdr dispatcher*, with every step but the last a link back.
+
+**Every page is sections, and each section saves on its own.** A Save writes that section's settings
+and no others, **one line per changed setting**, through the same surgical edit the tray checkboxes
 make: your comments, blank lines, spacing and any keys this version has never heard of survive byte for
-byte. A form you did not touch writes nothing. The page then names which of the settings you changed
-need a restart — the hoot and the Copilot rule take effect at once, everything else on the next start.
+byte. The page comes back to the same place and says, under that section, what the Save did: nothing
+changed, saved, or saved with the settings that take effect only after a restart named. Only the hoot
+and the Copilot rule take effect at once among the core settings; an integration's settings always do.
+
+**A page that reloads itself shows only the thing that is running.** A sign-in in flight and an update
+check under way reload their page until they land, and while they do, the page shows that and nothing
+else, so no half-made edit is ever on screen to lose.
 
 If the local listener cannot start, the entry falls back to opening `config.txt` in an editor, since
 losing the only way into the configuration because a socket would not bind is the worse failure.
 
-The form carries every key in the table below except the integrations', which are set on each
-integration's own page. One of them is worth naming here, because it opens something rather than
-changing how a count is drawn:
+**Updating by hand:** **Updates ▸ Check now** asks at once whether a newer release exists, whether or not
+the automatic check is on. The answer shows on the page, and a newer version is also named in the
+sidebar; install it from the tray menu as usual.
 
-| Tick box | Does |
-|---|---|
-| ☑ **Serve the lists as JSON to local scripts** | Opens the local port at startup and publishes its address, for your own tooling → [the local API](local-api.md) |
+## Signing in
 
-It is not on the tray menu. The tray carries only the three checkboxes above it, because those are
-the ones worth reaching without opening a page.
+**Portals ▸ GitHub** is where a sign-in happens. Its first section says how the sign-in stands: *Signed
+in*, *Not signed in*, the running sign-in itself, or the reason nothing can be seen.
 
-**Four tabs, on every page:** *Settings · Accounts · Muted · Integrations*.
-
-| Page | Holds |
-|---|---|
-| Settings | the settings form and its Save, and nothing else |
-| Accounts | one card per portal, and signing in and out |
-| Muted | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
-| Integrations | what GitHoot may do with the pull requests it finds, and a page per integration with Install, a dry run and its settings → [integrations](integrations.md) |
-
-**They used to be one page, and that cost edits.** A running sign-in reloads its page every few seconds,
-and an integration's buttons reload theirs; on a shared page either one threw away whatever you were
-halfway through in the settings form. Now anything that reloads lives on a page with no form of yours
-on it.
-
-## Accounts
-
-**One card per configured portal**, saying how its sign-in stands: *Signed in*, *Not signed in*, the
-running sign-in itself, or the reason nothing can be seen.
-
-**Signing in happens on this page.** *Not signed in* offers **Sign in to GitHub**; *Signed in* offers
-**Sign out**, which deletes the saved credential (`pr_token.txt`) and puts the tray where a fresh
-install starts: bars dark, exclamation up, **Authenticate** back on the menu. It does not revoke the
-authorization on GitHub's side; that is done at github.com/settings/applications. The sign-in click
-only asks:
-the device flow runs on the poll thread, and within a moment the card shows the code to enter, a link
-to where to enter it (opened in a new tab, the one place this app does that, so this page stays put),
-how long the code is good for, a **Copy** button beside the code, and a **Cancel** button. The code
-is also on your clipboard already. While the
-flow runs the page reloads itself every few seconds, with no script, so the card turns to *Signed in*
-on its own when GitHub confirms, or back to *Not signed in* if you cancel or the code expires. The
+*Not signed in* offers **Sign in to GitHub**; *Signed in* offers **Sign out**, which deletes the saved
+credential (`pr_token.txt`) and puts the tray where a fresh install starts: bars dark, exclamation up,
+**Authenticate** back on the menu. It does not revoke the authorization on GitHub's side; that is done at
+github.com/settings/applications. The sign-in click only asks: the device flow runs on the poll thread,
+and within a moment the page shows the code to enter, a link to where to enter it (opened in a new tab,
+the one place this app does that, so this page stays put), how long the code is good for, a **Copy**
+button beside the code, and a **Cancel** button. The code is also on your clipboard already. While the
+flow runs the page shows only the sign-in and reloads itself every few seconds, so it turns to *Signed
+in* on its own when GitHub confirms, or back to *Not signed in* if you cancel or the code expires. The
 tray's **Authenticate** entry only opens this page; nothing starts a sign-in but the button. When the
 local listener cannot start at all, the entry falls back to running the flow with the old native
 dialog, since there is no page to show the code on.
 
 Cancel is polled, not pushed: the poll thread is inside the flow and reads no channel there, so it
-looks for the cancel between its polls, about once a second. Both buttons post to one route, guarded
-by the same `Origin` check as a save → [Portals](portals.md).
+looks for the cancel between its polls, about once a second. Every button posts to the portal's own
+page, guarded by the same `Origin` check as a save → [Portals](portals.md).
 
 **Writing needs more than reading did**, so the page carries one guard the PR pages do not: a save is a
 `POST` and is refused unless the browser says the request came from this page itself. A form on another

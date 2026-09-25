@@ -7,7 +7,7 @@ across the app.
 
 ## Installed means switched on
 
-Every integration ships inside GitHoot. **Integrations** in the settings page lists them, each with
+Every integration ships inside GitHoot. **Integrations** in the settings pages lists them, each with
 an **Install** button, or **Uninstall** once it is installed, and each has a page with:
 
 - **Install** and **Uninstall.** They write `integration.<id>.enabled=on` or `off` to `config.txt`, the
@@ -16,8 +16,9 @@ an **Install** button, or **Uninstall** once it is installed, and each has a pag
 - **Dry run.** A real pass with every effect suppressed and nothing recorded, so it cannot change
   what the next real pass does. Offered installed or not: asking first is the only safe way to learn
   what installing would do.
-- **Its settings**, as a form of their own: text boxes and switches. Only keys the integration
-  declared can be written, a switch only as `on` or `off`, and an unticked switch saves as `off`.
+- **Its settings**, as sections, each with its own Save: text boxes and switches. Only keys the
+  integration declared can be written, a switch only as `on` or `off`, and an unticked switch saves as
+  `off`.
 - **What it is missing.** Installed but unable to run reads *Installed, but idle*, never *Installed*.
 - **Whatever it adds**, such as the dispatcher's prompts.
 

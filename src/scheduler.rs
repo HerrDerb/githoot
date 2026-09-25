@@ -52,6 +52,38 @@ const STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// entry twice is the case this exists for.
 static UPDATE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// What the update checks have found, for the Updates page. Written by the poll thread, which runs
+/// every check, automatic or asked for; read by the page on each request.
+#[derive(Clone, Default)]
+pub struct UpdateStatus {
+    /// When Check now was pressed, while that check has not landed.
+    pub asked: Option<Instant>,
+    /// The last check that landed: when, and a newer version, `None` for up to date, or why it failed.
+    pub last: Option<(Instant, Result<Option<String>, String>)>,
+}
+
+static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus { asked: None, last: None });
+
+pub fn update_status() -> UpdateStatus {
+    UPDATE_STATUS.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Check now: marks the check as asked for, so the page can say it is running from its very next
+/// load, and wakes the poll thread to run it.
+pub fn request_update_check(wake: &std::sync::mpsc::Sender<Wake>) {
+    if let Ok(mut status) = UPDATE_STATUS.lock() {
+        status.asked = Some(Instant::now());
+    }
+    let _ = wake.send(Wake::CheckUpdates);
+}
+
+fn record_update_check(result: Result<Option<String>, String>) {
+    if let Ok(mut status) = UPDATE_STATUS.lock() {
+        status.asked = None;
+        status.last = Some((Instant::now(), result));
+    }
+}
+
 /// The last pull requests each axis's poll confirmed, indexed by `PrAxis::index`.
 ///
 /// A `static` for the same reason `UPDATE_IN_FLIGHT` is: the writer is the poll thread and the
@@ -231,6 +263,9 @@ pub enum Wake {
     /// megabytes would stall notification polling for as long as it takes, so this spawns a dedicated
     /// thread and returns immediately. See `run_poll_loop`.
     UpdateNow,
+    /// The Updates page's Check now: ask whether a newer release exists, now, whether or not the
+    /// automatic check is on. Runs where the automatic one does, after the next poll.
+    CheckUpdates,
     /// The user asked for a portal's sign-in to run now: from the tray's Authenticate item, or from
     /// the settings page's button.
     ///
@@ -599,6 +634,8 @@ fn run_poll_loop(
     let mut burst: VecDeque<Duration> = VecDeque::new();
     // `None` means "never checked", which is what makes the first check happen immediately.
     let mut last_update_check: Option<Instant> = None;
+    // Set by Check now. Runs the check on the next pass whatever the setting or the interval says.
+    let mut check_asked = false;
     // The release the last check found, held so the menu click has something to install without
     // re-asking GitHub. Cleared when a check finds nothing newer.
     let mut pending_update: Option<Available> = None;
@@ -677,9 +714,10 @@ fn run_poll_loop(
         //
         // Failures are logged and dropped, never surfaced. Not being able to ask whether an update
         // exists is not something the user can act on, and a dialog for it would be noise.
-        if update_check_enabled
-            && last_update_check.is_none_or(|at| at.elapsed() >= UPDATE_CHECK_INTERVAL)
+        if check_asked
+            || (update_check_enabled && last_update_check.is_none_or(|at| at.elapsed() >= UPDATE_CHECK_INTERVAL))
         {
+            check_asked = false;
             last_update_check = Some(Instant::now());
             match crate::version::Version::current() {
                 Some(current) => match crate::update::check(&client, current) {
@@ -689,6 +727,7 @@ fn run_poll_loop(
                             available.version
                         );
                         update_available = Some(available.version.to_string());
+                        record_update_check(Ok(Some(available.version.to_string())));
                         pending_update = Some(available);
                     }
                     Ok(None) => {
@@ -696,11 +735,18 @@ fn run_poll_loop(
                         // current, so this is what takes the arrow back down.
                         update_available = None;
                         pending_update = None;
+                        record_update_check(Ok(None));
                     }
-                    Err(e) => errorln!("update check failed: {e}"),
+                    Err(e) => {
+                        errorln!("update check failed: {e}");
+                        record_update_check(Err(e.to_string()));
+                    }
                 },
                 // Unreachable from a normal build; see `Version::current`.
-                None => errorln!("update check skipped: this build's version is unparseable"),
+                None => {
+                    errorln!("update check skipped: this build's version is unparseable");
+                    record_update_check(Err("this build's version is unparseable".to_string()));
+                }
             }
         }
 
@@ -756,6 +802,10 @@ fn run_poll_loop(
                     // Deliberately *not* on this thread, unlike `Authenticate`. The download is
                     // megabytes and the timeout is minutes, and polling has to keep working
                     // throughout — a frozen icon during an install would look like a crash.
+                    Wake::CheckUpdates => {
+                        infoln!("asked to check for updates now");
+                        check_asked = true;
+                    }
                     Wake::UpdateNow => {
                         if let Some(available) = pending_update.clone() {
                             // `swap` rather than load-then-store: two menu clicks in quick succession

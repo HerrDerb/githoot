@@ -43,29 +43,9 @@ use crate::state::PrAxis;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A setting an integration declares, beyond `enabled`.
-///
-/// Every one is live: the runner reads `config.txt` fresh on each pass, so the page never has to
-/// say "restart to apply".
-pub struct Setting {
-    /// The key after `integration.<id>.`, so `cloneRoot` for `integration.herdr.cloneRoot`.
-    pub key: &'static str,
-    /// What the page's input or checkbox is labelled.
-    pub label: &'static str,
-    pub kind: Kind,
-    /// One sentence for `config.txt`, above the key.
-    pub help: &'static str,
-}
-
-/// What a setting holds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    /// Free text on one line. Empty means the setting's default, which `placeholder` shows greyed.
-    Text { placeholder: &'static str },
-    /// `on` or `off`, a checkbox on the page. Only an explicit value moves it off its default, so a
-    /// typo leaves the default standing in either direction.
-    Flag { default_on: bool },
-}
+/// An integration declares its settings, beyond `enabled`, in the app-wide shape. Every one of them
+/// is live: the runner reads `config.txt` fresh on each pass, so the page never says "restart".
+pub use crate::setting::{Kind, Setting};
 
 /// What the rest of the app needs to know about an integration without running it.
 pub struct Info {
@@ -101,14 +81,9 @@ impl Context {
         self.settings.get(key).map(|v| v.trim()).unwrap_or("")
     }
 
-    /// A flag's current answer: its default until the file says otherwise. `false` for a text setting.
+    /// A flag's current answer: its default until the file says otherwise. `false` for anything else.
     pub fn flag(&self, setting: &Setting) -> bool {
-        let value = self.setting(setting.key);
-        match setting.kind {
-            Kind::Flag { default_on: true } => !crate::config::is_off(value),
-            Kind::Flag { default_on: false } => crate::config::is_on(value),
-            Kind::Text { .. } => false,
-        }
+        crate::setting::flag(setting.kind, self.setting(setting.key))
     }
 }
 
@@ -213,32 +188,11 @@ pub fn batches(info: &Info, snapshots: &[(PrAxis, AxisSnapshot)], is_muted: &dyn
 /// with a value that stays on one line.
 fn check_setting(integration: &dyn Integration, key: &str, value: &str) -> Result<(), String> {
     let info = integration.info();
-    if value.contains(['\n', '\r']) {
-        return Err(format!("{}: a setting must stay on one line", info.id));
+    if key == "enabled" {
+        return if matches!(value, "on" | "off") { Ok(()) } else { Err(format!("{}: enabled is on or off, not {value:?}", info.id)) };
     }
-    let is_flag = match (key, info.settings.iter().find(|s| s.key == key)) {
-        ("enabled", _) => true,
-        (_, Some(setting)) => matches!(setting.kind, Kind::Flag { .. }),
-        (_, None) => return Err(format!("{} has no setting {key:?}", info.id)),
-    };
-    if is_flag && !matches!(value, "on" | "off") {
-        return Err(format!("{}: {key} is on or off, not {value:?}", info.id));
-    }
-    Ok(())
-}
-
-/// What a submitted settings form says for each declared setting, in declaration order.
-///
-/// A checkbox posts nothing when unticked, which is how a form says off, so every flag gets an answer.
-/// A text box absent from the form is left alone; one submitted empty is a deliberate clear.
-pub fn form_values(info: &Info, form: &crate::serve::Form) -> Vec<(&'static str, String)> {
-    info.settings
-        .iter()
-        .filter_map(|s| match s.kind {
-            Kind::Flag { .. } => Some((s.key, if form.ticked(s.key) { "on" } else { "off" }.to_string())),
-            Kind::Text { .. } => form.get(s.key).map(|v| (s.key, v.trim().to_string())),
-        })
-        .collect()
+    let setting = info.settings.iter().find(|s| s.key == key).ok_or_else(|| format!("{} has no setting {key:?}", info.id))?;
+    crate::setting::check(setting, value).map_err(|e| format!("{}: {e}", info.id))
 }
 
 /// Writes one of an integration's settings, the same single-line edit every other setting gets.
@@ -500,9 +454,9 @@ mod tests {
         summary: "",
         portals: &[PortalKind::GitHub],
         settings: &[
-            Setting { key: "loud", label: "Loud", kind: Kind::Flag { default_on: true }, help: "" },
-            Setting { key: "quiet", label: "Quiet", kind: Kind::Flag { default_on: false }, help: "" },
-            Setting { key: "root", label: "Root", kind: Kind::Text { placeholder: "~" }, help: "" },
+            Setting { key: "loud", label: "Loud", kind: Kind::Flag { default_on: true }, help: "", group: "", live: true },
+            Setting { key: "quiet", label: "Quiet", kind: Kind::Flag { default_on: false }, help: "", group: "", live: true },
+            Setting { key: "root", label: "Root", kind: Kind::Text { placeholder: "~" }, help: "", group: "", live: true },
         ],
         unsupported: None,
     };
@@ -519,17 +473,6 @@ mod tests {
         assert!(flag("", "loud") && !flag("", "quiet"));
         assert!(!flag("integration.test.loud=off\n", "loud") && flag("integration.test.quiet=on\n", "quiet"));
         assert!(flag("integration.test.loud=offf\n", "loud") && !flag("integration.test.quiet=onn\n", "quiet"));
-    }
-
-    /// A checkbox posts nothing when unticked, which is how a form says off. Reading absence as
-    /// "leave it" would make a flag impossible to switch off from the page. A text box absent from
-    /// the form is left alone; one submitted empty is a deliberate clear.
-    #[test]
-    fn a_settings_form_turns_unticked_boxes_into_off() {
-        let form = crate::serve::parse_form("loud=on&root=%2Fsrc");
-        assert_eq!(form_values(&FLAGGED, &form), [("loud", "on".to_string()), ("quiet", "off".to_string()), ("root", "/src".to_string())]);
-        let form = crate::serve::parse_form("quiet=on");
-        assert_eq!(form_values(&FLAGGED, &form), [("loud", "off".to_string()), ("quiet", "on".to_string())]);
     }
 
     #[test]

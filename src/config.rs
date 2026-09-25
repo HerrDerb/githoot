@@ -257,85 +257,140 @@ pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
     set_flag(&config_path(app_asset_path), KEY_SOUND, on)
 }
 
-/// Every key a user can change, paired with whether it takes effect without a restart.
-///
-/// Public because the settings page renders from it: one list, so a key cannot appear in the form
-/// without the page knowing whether to warn about it, and cannot be added to the file without
-/// appearing in the form.
-pub const WRITABLE_KEYS: [(&str, bool); 9] = [
-    (KEY_REVIEW_REQUESTED, false),
-    (KEY_READY_TO_MERGE, false),
-    (KEY_CHANGES_REQUESTED, false),
-    (KEY_COPILOT_REVIEWS, true),
-    (KEY_SOUND, true),
-    (KEY_UPDATE_CHECK, false),
-    (KEY_LOG_LEVEL, false),
-    (KEY_STATUS_COMPONENTS, false),
-    // Not live: the listener binds once, at startup.
-    (KEY_LOCAL_API, false),
+// ── What the settings pages can change ───────────────────────────────────────
+//
+// Every key the core owns, declared once, on the page it belongs to. The pages render from these
+// lists and a section's Save is checked against them, so a key cannot appear on a page without its
+// kind, and cannot be written from one without being declared. See `crate::setting`.
+
+use crate::setting::{Kind, Setting};
+
+const fn flag_setting(key: &'static str, label: &'static str, default_on: bool, help: &'static str, group: &'static str, live: bool) -> Setting {
+    Setting { key, label, kind: Kind::Flag { default_on }, help, group, live }
+}
+
+/// General: what the tray shows and does. The bars bind at startup, because the menu is built then;
+/// the hoot is live, because the tray checkbox already is.
+pub const GENERAL: &[Setting] = &[
+    flag_setting(KEY_REVIEW_REQUESTED, "Somebody wants your review", true, "The red bar, its menu entry and its search.", "Bars", false),
+    flag_setting(KEY_READY_TO_MERGE, "Your pull request was approved", true, "The green bar, its menu entry and its search.", "Bars", false),
+    flag_setting(KEY_CHANGES_REQUESTED, "Your pull request needs work", true, "The amber bar, its menu entry and its search.", "Bars", false),
+    flag_setting(KEY_SOUND, "Hoot when a pull request needs you", true, "The same switch as the tray menu's Hoot.", "Hoot", true),
 ];
 
-/// Every component GitHub publishes, for the settings page's checkboxes.
+/// The GitHub portal's own settings. Their keys stay flat, as every existing `config.txt` has them;
+/// only where they are shown moved, to the portal they are about.
+pub const GITHUB: &[Setting] = &[
+    flag_setting(
+        KEY_COPILOT_REVIEWS,
+        "Count Copilot's unresolved comments as work",
+        true,
+        "Copilot reviews by commenting, never by a verdict, so without this its feedback never reaches the amber bar.",
+        "Pull requests",
+        true,
+    ),
+    Setting {
+        key: KEY_STATUS_COMPONENTS,
+        label: "Parts of GitHub that count as an outage",
+        kind: Kind::Multi { options: &KNOWN_STATUS_COMPONENTS },
+        help: "GitHub's page-wide verdict says degraded whenever any one part is, including ones a pull-request tray never touches. Tick nothing to watch the whole page.",
+        group: "Outages",
+        live: false,
+    },
+];
+
+/// Updates: the automatic check. Checking by hand is a button on the page, not a setting.
+pub const UPDATES: &[Setting] = &[flag_setting(
+    KEY_UPDATE_CHECK,
+    "Check for a newer release at startup and once a day",
+    true,
+    "Off stops the automatic check only. Check now on this page still works.",
+    "Automatic check",
+    false,
+)];
+
+/// Advanced: the two that open something or change what is written, rather than what is shown.
+pub const ADVANCED: &[Setting] = &[
+    // The label says what it opens, not just what it offers. An EDR or firewall prompt at the next
+    // launch has to be traceable to a box somebody deliberately ticked.
+    flag_setting(
+        KEY_LOCAL_API,
+        "Serve the lists as JSON to local scripts (opens the local port at startup)",
+        false,
+        "For your own tooling. See docs/local-api.md.",
+        "Local API",
+        false,
+    ),
+    Setting {
+        key: KEY_LOG_LEVEL,
+        label: "What log.txt records",
+        kind: Kind::Choice { options: &[("error", "Failures only"), ("info", "Add lifecycle detail, for diagnosing")] },
+        help: "",
+        group: "Log",
+        live: false,
+    },
+];
+
+/// Every core setting, on whichever page it sits.
+pub fn declared() -> impl Iterator<Item = &'static Setting> {
+    GENERAL.iter().chain(GITHUB).chain(UPDATES).chain(ADVANCED)
+}
+
+/// Every component GitHub publishes, for tests that check the page offers each one.
+#[cfg(test)]
 pub fn all_components() -> &'static [&'static str] {
     &KNOWN_STATUS_COMPONENTS
 }
 
-/// The value each key currently holds in `wanted`, as it would be written.
-fn value_of(wanted: &Config, key: &str) -> String {
+/// The value each key currently holds in `cfg`, as it would be written, for a page to show.
+pub fn value_of(cfg: &Config, key: &str) -> String {
     let flag = |on: bool| if on { "on".to_string() } else { "off".to_string() };
     match key {
-        KEY_REVIEW_REQUESTED => flag(wanted.pr_enabled[0]),
-        KEY_READY_TO_MERGE => flag(wanted.pr_enabled[1]),
-        KEY_CHANGES_REQUESTED => flag(wanted.pr_enabled[2]),
-        KEY_COPILOT_REVIEWS => flag(wanted.copilot_reviews),
-        KEY_LOCAL_API => flag(wanted.local_api),
-        KEY_SOUND => flag(wanted.sound),
-        KEY_UPDATE_CHECK => flag(wanted.update_check),
-        KEY_LOG_LEVEL => match wanted.log_level {
+        KEY_REVIEW_REQUESTED => flag(cfg.pr_enabled[0]),
+        KEY_READY_TO_MERGE => flag(cfg.pr_enabled[1]),
+        KEY_CHANGES_REQUESTED => flag(cfg.pr_enabled[2]),
+        KEY_COPILOT_REVIEWS => flag(cfg.copilot_reviews),
+        KEY_LOCAL_API => flag(cfg.local_api),
+        KEY_SOUND => flag(cfg.sound),
+        KEY_UPDATE_CHECK => flag(cfg.update_check),
+        KEY_LOG_LEVEL => match cfg.log_level {
             Level::Info => "info".to_string(),
             Level::Error => "error".to_string(),
         },
-        KEY_STATUS_COMPONENTS => wanted.status_components.join(", "),
-        other => unreachable!("{other} is not a writable key"),
+        KEY_STATUS_COMPONENTS => cfg.status_components.join(", "),
+        other => unreachable!("{other} is not a core setting"),
     }
 }
 
-/// Writes `wanted` to `config.txt`, touching only the keys whose value actually changes.
+/// Writes one section's values, touching only the lines whose value changes, and returns their keys.
 ///
-/// Returns the keys it wrote. The settings page uses that to say which of them need a restart, and
-/// to keep quiet when a save changed nothing.
-///
-/// **Only keys in `WRITABLE_KEYS` can be written**, and the value for each is produced here from a
-/// typed `Config` rather than passed through from the request. A settings form that could name its
-/// own keys would be a way to write arbitrary lines into the file.
+/// **All or nothing, and only what is declared.** Every pair is checked against its declaration
+/// before a byte is written, so a hand-made post naming another key, or a value its kind would not
+/// hold, writes nothing at all. A settings form that could name its own keys would be a way to write
+/// arbitrary lines into the file.
 ///
 /// Each key goes through the same single-line edit `set_sound` makes, so comments, blank lines,
-/// spacing and keys this version has never heard of survive byte for byte. A key the file does not
-/// have yet is appended rather than the file regenerated.
-pub fn save(app_asset_path: &Path, wanted: &Config) -> Result<Vec<&'static str>, String> {
-    let path = config_path(app_asset_path);
+/// spacing and keys this version has never heard of survive byte for byte.
+pub fn save_values(app_asset_path: &Path, pairs: &[(&str, String)]) -> Result<Vec<&'static str>, String> {
+    let mut checked = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        let setting = declared().find(|s| s.key == *key).ok_or_else(|| format!("{key:?} is not a setting"))?;
+        crate::setting::check(setting, value)?;
+        checked.push((setting.key, value.trim()));
+    }
     let (current, _) = Config::load(app_asset_path);
-    let changed: Vec<&'static str> = WRITABLE_KEYS
-        .iter()
-        .map(|(key, _)| *key)
-        .filter(|key| value_of(wanted, key) != value_of(&current, key))
-        .collect();
-
+    let changed: Vec<(&'static str, &str)> =
+        checked.into_iter().filter(|(key, value)| value_of(&current, key) != *value).collect();
     if changed.is_empty() {
-        return Ok(changed);
+        return Ok(Vec::new());
     }
+    let path = config_path(app_asset_path);
     let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-    for key in &changed {
-        content = with_value_set(&content, key, &value_of(wanted, key));
+    for (key, value) in &changed {
+        content = with_value_set(&content, key, value);
     }
-    std::fs::write(&path, content)
-        .map_err(|e| format!("could not write {} ({e})", path.display()))?;
-    Ok(changed)
-}
-
-/// Whether `key` takes effect without a restart.
-pub fn is_live(key: &str) -> bool {
-    WRITABLE_KEYS.iter().any(|(k, live)| *k == key && *live)
+    std::fs::write(&path, content).map_err(|e| format!("could not write {} ({e})", path.display()))?;
+    Ok(changed.into_iter().map(|(key, _)| key).collect())
 }
 
 /// Writes the `copilotReviews` value, the same surgical single-line edit `set_sound` makes.
@@ -462,37 +517,6 @@ impl Config {
     /// Split out purely so it can be tested: the whole risk in this file is a key being wired to the
     /// wrong setting, and `load` cannot be exercised without a filesystem. `parse` plus this is the
     /// entire behaviour of `load` bar reading the file.
-    /// Reads a submitted settings form, falling back to `current` for anything it does not mention.
-    ///
-    /// Takes `crate::serve::Form` rather than a map because a group of checkboxes posts its name once
-    /// per ticked box, and an **unticked** box posts nothing at all — which is how a form says "off",
-    /// and why absence is read as `false` here rather than as "leave it alone".
-    ///
-    /// `current` covers the one field a form cannot express: a `logLevel` the page did not offer.
-    pub fn from_form(form: &crate::serve::Form, current: &Self) -> Self {
-        Config {
-            update_check: form.ticked(KEY_UPDATE_CHECK),
-            pr_enabled: PrAxis::ALL.map(|axis| form.ticked(pr_key(axis))),
-            sound: form.ticked(KEY_SOUND),
-            copilot_reviews: form.ticked(KEY_COPILOT_REVIEWS),
-            local_api: form.ticked(KEY_LOCAL_API),
-            // Not on this form: each integration's page writes its own, through `integration::set`.
-            integrations: current.integrations.clone(),
-            log_level: form
-                .get(KEY_LOG_LEVEL)
-                .and_then(|v| Level::parse(v))
-                .unwrap_or(current.log_level),
-            // Only names GitHub actually publishes, so a hand-crafted post cannot write a component
-            // that would never match and would only ever show up as one line in the log.
-            status_components: form
-                .all(KEY_STATUS_COMPONENTS)
-                .into_iter()
-                .filter(|name| KNOWN_STATUS_COMPONENTS.contains(name))
-                .map(str::to_string)
-                .collect(),
-        }
-    }
-
     fn from_values(values: &std::collections::HashMap<&str, &str>) -> Self {
         Config {
             // Default **on**: an auto-update mechanism that is off until you find out it exists does
@@ -681,7 +705,7 @@ fn integrations_section() -> String {
             let value = match setting.kind {
                 crate::integration::Kind::Flag { default_on: true } => "on",
                 crate::integration::Kind::Flag { default_on: false } => "off",
-                crate::integration::Kind::Text { .. } => "",
+                _ => "",
             };
             out.push_str(&format!("# {}\n{INTEGRATION_PREFIX}{}.{}={value}\n", setting.help, info.id, setting.key));
         }
@@ -816,14 +840,15 @@ mod tests {
     #[test]
     fn saving_writes_only_what_changed() {
         let dir = temp_dir("only-changed");
-        let (mut cfg, _) = Config::load(&dir);
-        assert_eq!(save(&dir, &cfg).expect("save"), Vec::<&str>::new(), "nothing touched");
+        let (cfg, _) = Config::load(&dir);
+        let same = value_of(&cfg, KEY_SOUND);
+        assert_eq!(save_values(&dir, &[(KEY_SOUND, same)]).expect("save"), Vec::<&str>::new(), "nothing touched");
 
-        cfg.sound = !cfg.sound;
-        assert_eq!(save(&dir, &cfg).expect("save"), vec![KEY_SOUND]);
+        let flipped = if cfg.sound { "off" } else { "on" };
+        assert_eq!(save_values(&dir, &[(KEY_SOUND, flipped.into())]).expect("save"), vec![KEY_SOUND]);
 
         let (after, _) = Config::load(&dir);
-        assert_eq!(after.sound, cfg.sound);
+        assert_eq!(after.sound, !cfg.sound);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -834,9 +859,7 @@ mod tests {
         let path = config_path(&dir);
         std::fs::write(&path, "# my note\nsound=on\nsomeFutureKey=42\n").expect("seed");
 
-        let (mut cfg, _) = Config::load(&dir);
-        cfg.sound = false;
-        save(&dir, &cfg).expect("save");
+        save_values(&dir, &[(KEY_SOUND, "off".into())]).expect("save");
 
         let after = std::fs::read_to_string(&path).expect("read");
         assert!(after.contains("# my note"), "got {after:?}");
@@ -849,9 +872,8 @@ mod tests {
     #[test]
     fn saving_round_trips_the_component_list() {
         let dir = temp_dir("components");
-        let (mut cfg, _) = Config::load(&dir);
-        cfg.status_components = vec!["Issues".to_string(), "Actions".to_string()];
-        save(&dir, &cfg).expect("save");
+        let _ = Config::load(&dir);
+        save_values(&dir, &[(KEY_STATUS_COMPONENTS, "Issues, Actions".into())]).expect("save");
 
         let (after, _) = Config::load(&dir);
         assert_eq!(after.status_components, ["Issues", "Actions"]);
@@ -861,9 +883,8 @@ mod tests {
     #[test]
     fn the_log_level_round_trips() {
         let dir = temp_dir("loglevel");
-        let (mut cfg, _) = Config::load(&dir);
-        cfg.log_level = Level::Info;
-        save(&dir, &cfg).expect("save");
+        let _ = Config::load(&dir);
+        save_values(&dir, &[(KEY_LOG_LEVEL, "info".into())]).expect("save");
         let (after, _) = Config::load(&dir);
         assert!(matches!(after.log_level, Level::Info));
         let _ = std::fs::remove_dir_all(&dir);
@@ -873,7 +894,7 @@ mod tests {
     /// the page can write — or a setting exists that the page silently cannot reach.
     #[test]
     fn the_writable_keys_are_exactly_the_keys_that_are_read() {
-        let mut writable: Vec<&str> = WRITABLE_KEYS.iter().map(|(k, _)| *k).collect();
+        let mut writable: Vec<&str> = declared().map(|s| s.key).collect();
         let text = default_config();
         let mut generated: Vec<&str> =
             parse(&text).keys().copied().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).collect();
@@ -889,10 +910,11 @@ mod tests {
     #[test]
     fn exactly_the_settings_that_need_no_restart_are_live() {
         let live: Vec<&str> =
-            WRITABLE_KEYS.iter().filter(|(_, live)| *live).map(|(k, _)| *k).collect();
-        assert_eq!(live, [KEY_COPILOT_REVIEWS, KEY_SOUND]);
-        assert!(is_live(KEY_SOUND) && !is_live(KEY_LOG_LEVEL));
-        assert!(!is_live(KEY_LOCAL_API), "the listener binds once, at startup");
+            declared().filter(|s| s.live).map(|s| s.key).collect();
+        assert_eq!(live, [KEY_SOUND, KEY_COPILOT_REVIEWS]);
+        let live = |key: &str| declared().any(|s| s.key == key && s.live);
+        assert!(live(KEY_SOUND) && !live(KEY_LOG_LEVEL));
+        assert!(!live(KEY_LOCAL_API), "the listener binds once, at startup");
     }
 
     // ── The live switch ───────────────────────────────────────────────────────
@@ -1093,17 +1115,16 @@ mod tests {
         assert!(values("localApi=true").local_api);
     }
 
-    /// The nine-site wiring, end to end through the file: a `value_of` arm pointed at the wrong
-    /// field, or a missing `WRITABLE_KEYS` entry, both show up here as a value that will not stick.
+    /// The wiring, end to end through the file: a `value_of` arm pointed at the wrong field, or a
+    /// missing declaration, both show up here as a value that will not stick.
     #[test]
     fn the_local_api_setting_round_trips_through_a_save() {
         let dir = temp_dir("local-api-round-trip");
         let _ = std::fs::create_dir_all(&dir);
-        let (mut cfg, _) = Config::load(&dir);
+        let (cfg, _) = Config::load(&dir);
         assert!(!cfg.local_api, "a fresh config.txt must ship it off");
 
-        cfg.local_api = true;
-        let written = save(&dir, &cfg).expect("save should succeed");
+        let written = save_values(&dir, &[(KEY_LOCAL_API, "on".into())]).expect("save should succeed");
         assert!(written.contains(&KEY_LOCAL_API), "the key must actually be written");
         assert!(Config::load(&dir).0.local_api, "and must survive a reload");
 
@@ -1162,6 +1183,64 @@ mod tests {
         assert!(text.starts_with('#'), "should open with an explanatory header");
         assert!(text.ends_with('\n'), "should end with a newline");
         assert!(text.lines().filter(|l| l.starts_with('#')).count() >= 8, "should explain itself");
+    }
+
+    // ── Declared settings ───────────────────────────────────────────────────
+
+    /// Every key the core owns sits on exactly one page, and the pages together are exactly the keys
+    /// the template writes. A key missing from the pages cannot be changed; one on two pages would be
+    /// two answers to one question.
+    #[test]
+    fn every_core_key_is_declared_on_exactly_one_page() {
+        let mut declared: Vec<&str> = declared().map(|s| s.key).collect();
+        let before = declared.len();
+        declared.sort_unstable();
+        declared.dedup();
+        assert_eq!(declared.len(), before, "a key declared twice");
+        let text = default_config();
+        let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).collect();
+        written.sort_unstable();
+        assert_eq!(declared, written);
+    }
+
+    /// The GitHub-only settings are declared on the GitHub page, not on General, keeping their keys.
+    #[test]
+    fn the_github_only_settings_sit_with_github() {
+        let github: Vec<&str> = GITHUB.iter().map(|s| s.key).collect();
+        assert_eq!(github, [KEY_COPILOT_REVIEWS, KEY_STATUS_COMPONENTS]);
+        assert!(!GENERAL.iter().any(|s| github.contains(&s.key)));
+    }
+
+    fn section_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("githoot-config-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A section's Save writes the lines that changed and nothing else, and says which they were.
+    #[test]
+    fn saving_a_section_writes_only_what_changed() {
+        let dir = section_dir("save-section");
+        std::fs::write(config_path(&dir), "# mine\nsound=on\nlogLevel=error\n").unwrap();
+        let changed = save_values(&dir, &[(KEY_SOUND, "off".into()), (KEY_LOG_LEVEL, "error".into())]).unwrap();
+        assert_eq!(changed, [KEY_SOUND]);
+        let text = std::fs::read_to_string(config_path(&dir)).unwrap();
+        assert!(text.starts_with("# mine\nsound=off\nlogLevel=error\n"), "{text:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing reaches the file that the declaration would not accept, and nothing undeclared at all.
+    #[test]
+    fn saving_refuses_undeclared_keys_and_bad_values_before_writing_anything() {
+        let dir = section_dir("save-refuse");
+        std::fs::write(config_path(&dir), "sound=on\n").unwrap();
+        assert!(save_values(&dir, &[(KEY_SOUND, "off".into()), ("dispatcher", "on".into())]).is_err());
+        assert!(save_values(&dir, &[(KEY_SOUND, "loud".into())]).is_err());
+        assert!(save_values(&dir, &[(KEY_STATUS_COMPONENTS, "API, Bogus".into())]).is_err());
+        assert!(save_values(&dir, &[(KEY_LOG_LEVEL, "debug".into())]).is_err());
+        assert_eq!(std::fs::read_to_string(config_path(&dir)).unwrap(), "sound=on\n", "all or nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── Integrations ────────────────────────────────────────────────────────

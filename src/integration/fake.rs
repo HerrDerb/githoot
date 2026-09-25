@@ -16,7 +16,14 @@ pub static ECHO: Info = Info {
     name: "Echo",
     summary: "Says which pull requests it was handed.",
     portals: &[PortalKind::GitHub],
-    settings: &[Setting { key: "prefix", label: "Prefix", kind: Kind::Text { placeholder: "echo" }, help: "What each line starts with." }],
+    settings: &[Setting {
+        key: "prefix",
+        label: "Prefix",
+        kind: Kind::Text { placeholder: "echo" },
+        help: "What each line starts with.",
+        group: "Output",
+        live: true,
+    }],
     unsupported: None,
 };
 

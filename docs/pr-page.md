@@ -17,7 +17,7 @@ reviewer's standing verdict.
 
 | | |
 |---|---|
-| Address | `http://githoot.localhost:<port>/<token>/<bar>`, plus `/items` and `/settings` |
+| Address | `http://githoot.localhost:<port>/<token>/<bar>`, plus `/items`, and the [settings pages](menu-and-settings.md#the-settings-pages) |
 | Bound | On the first click, never at startup, unless [`localApi`](local-api.md) is on |
 | Port and token | New on every run |
 | Contents | Title, repo, number, author, age, draft, checks, merge conflict, open comments from the portal's automatic reviewer (Copilot on GitHub), per-reviewer verdicts |
@@ -105,9 +105,9 @@ page, and each one stops something the others do not.
   there is no record for anyone to flip. Bare `localhost` is rejected with the rest — nothing GitHoot
   hands the browser uses it, and it *is* a name a resolver can be talked out of.
 - **No CORS header, ever**, so a cross-origin page cannot read the body even if it reached the path.
-- **An `Origin` check on writes.** Only the settings page accepts a `POST`, and only when the browser
+- **An `Origin` check on writes.** Only the settings pages and the mute links accept a `POST`, and only when the browser
   says this page submitted it. That is a different question from the `Host` allowlist, which a
-  cross-site form passes for free → [the settings page](menu-and-settings.md#the-settings-page).
+  cross-site form passes for free → [the settings pages](menu-and-settings.md#the-settings-pages).
 
 Two more things about what leaves the page:
 
@@ -149,7 +149,7 @@ ended in silence would be a way to lose a review.
 **Mutes are kept on disk**, in `~/.githoot/muted.txt`, one pull request per line, because a mute
 measured in days has to survive the restarts a self-update causes. Expired lines are dropped whenever
 the file is read or written. The links are forms, not links, so a mute is a `POST` behind the same
-`Origin` check as the settings page, and it accepts only the three offered durations and only a pull
+`Origin` check as the settings pages, and it accepts only the three offered durations and only a pull
 request that is on the page right now. The icon catches up within seconds, because a mute wakes the
 poll loop.
 

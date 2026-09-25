@@ -80,24 +80,10 @@ pub enum Route {
     Entries(PrAxis),
     /// A mute or unmute link on an axis page. `POST` only.
     Mute(PrAxis),
-    /// Every muted pull request, across all bars.
-    Muted,
-    /// The portals and their sign-ins.
-    Accounts,
-    /// Every integration this build knows, installed or not.
-    Integrations,
-    /// One integration's page. The id is always one `integration::find` knows.
-    IntegrationPage(&'static str),
-    /// The Unmute link on the muted page.
-    Unmute,
-    /// The settings form.
-    Settings,
-    /// Applying a submitted settings form.
-    SaveSettings,
-    /// Starting a portal's sign-in from the settings page.
-    Authenticate,
-    /// A button on an integration's page: install, remove, dry run, its settings, or its own.
-    IntegrationAction(&'static str),
+    /// A page of the settings site. See `crate::ui`.
+    Site(crate::ui::Place),
+    /// A button or a section's Save on a page of the settings site, posted back to that page.
+    SitePost(crate::ui::Place),
     Owl,
     /// The path exists but not for this method.
     MethodNotAllowed,
@@ -303,23 +289,18 @@ pub fn route_for(
         return Route::NotFound;
     }
 
-    // The three-segment routes: a page's own refresh fragment, and the settings page's sign-in
-    // button, both behind the same token and the same `Host` check as the page they belong to.
+    // The settings site first: its pages are one or two segments, and `ui::Place::parse` is the whole
+    // of what it accepts, so an item segment can only ever be a word or a registered id.
+    if let Some(place) = crate::ui::Place::parse(leaf, tail) {
+        return match method {
+            Method::Post if place.takes_posts() => Route::SitePost(place),
+            Method::Post => Route::MethodNotAllowed,
+            _ => Route::Site(place),
+        };
+    }
+
+    // The three-segment routes: a page's own refresh fragment, its mute links and the local API.
     if let Some(tail) = tail {
-        if (leaf, tail) == ("settings", "authenticate") {
-            return match method {
-                Method::Post => Route::Authenticate,
-                _ => Route::MethodNotAllowed,
-            };
-        }
-        // Only an id the registry knows resolves, so the segment can never name a file or a key.
-        if leaf == "integrations" {
-            return match (crate::integration::find(tail), method) {
-                (None, _) => Route::NotFound,
-                (Some(i), Method::Post) => Route::IntegrationAction(i.info().id),
-                (Some(i), _) => Route::IntegrationPage(i.info().id),
-            };
-        }
         return match (PrAxis::from_slug(leaf), tail, method) {
             (Some(_), "items", Method::Post) => Route::MethodNotAllowed,
             (Some(axis), "items", _) => Route::Items(axis),
@@ -337,14 +318,6 @@ pub fn route_for(
     match (leaf, method) {
         ("owl.png", Method::Post) => Route::MethodNotAllowed,
         ("owl.png", _) => Route::Owl,
-        ("muted", Method::Post) => Route::Unmute,
-        ("muted", _) => Route::Muted,
-        ("accounts", Method::Post) => Route::MethodNotAllowed,
-        ("accounts", _) => Route::Accounts,
-        ("integrations", Method::Post) => Route::MethodNotAllowed,
-        ("integrations", _) => Route::Integrations,
-        ("settings", Method::Post) => Route::SaveSettings,
-        ("settings", _) => Route::Settings,
         // Everything else is a read, so a write to it is the wrong method rather than a miss — the
         // path is right and saying otherwise would be a lie in the status line.
         (slug, method) => match (PrAxis::from_slug(slug), method) {
@@ -711,40 +684,35 @@ pub fn open_axis_page(axis: PrAxis) {
     open_url(url_for(axis).unwrap_or_else(scheduler::inbox_url));
 }
 
-/// Opens the settings page, or falls back to the settings *file* when there is no listener.
+/// Opens the settings site's General page, or falls back to the settings *file* when there is no
+/// listener.
 ///
 /// The fallback is the old behaviour rather than nothing: a browser page that cannot be served is no
 /// reason to lose the only way into the configuration.
 pub fn open_settings_page() -> bool {
-    match SERVER.get_or_init(start).as_ref() {
-        Some(server) => {
-            open_url(format!("http://{PAGE_HOST}:{}/{}/settings", server.port, server.token));
-            true
-        }
-        None => false,
-    }
+    open_site(&crate::ui::Place::General)
 }
 
-/// Opens the accounts page, where a sign-in is started. `false` when there is no listener, so the
-/// caller can fall back to the old dialog.
+/// Opens the page where a sign-in is started: the first portal that is waiting for one, else the
+/// first portal. `false` when there is no listener, so the caller can fall back to the old dialog.
 pub fn open_accounts_page() -> bool {
+    let statuses = scheduler::portal_statuses();
+    let place = statuses
+        .iter()
+        .find(|p| matches!(p.auth, crate::portal::AuthStatus::NotSignedIn))
+        .or(statuses.first())
+        .map(|p| crate::ui::Place::Portal(p.info.id.0.clone()))
+        .unwrap_or(crate::ui::Place::Portals);
+    open_site(&place)
+}
+
+fn open_site(place: &crate::ui::Place) -> bool {
     match SERVER.get_or_init(start).as_ref() {
         Some(server) => {
-            open_url(format!("http://{PAGE_HOST}:{}/{}/accounts", server.port, server.token));
+            open_url(format!("http://{PAGE_HOST}:{}/{}/{}", server.port, server.token, place.path()));
             true
         }
         None => false,
-    }
-}
-
-/// The nav line's facts, read fresh per page: how many are muted.
-///
-/// The Integrations tab is on every platform. Where an integration cannot run, its page says so
-/// rather than the tab disappearing, so the list of what exists is the same everywhere.
-fn nav_for(current: page::Tab) -> page::Nav {
-    page::Nav {
-        current,
-        muted: crate::mute::all(unix_now()).len(),
     }
 }
 
@@ -853,108 +821,9 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
     };
 
     match route_for(&request.path, request.host.as_deref(), token, port, request.method) {
-        Route::Settings => {
-            let html = match SETTINGS.get() {
-                Some(_) => {
-                    let (cfg, _) = crate::config::Config::load(&settings_path());
-                    page::settings_page(&cfg, token, &restart_names(request.query.as_deref()), &nav_for(page::Tab::Settings))
-                }
-                None => page::settings_unavailable(token),
-            };
-            // `same-origin`, so the form's `Origin` survives: see `Referrer`.
-            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
-        }
-        Route::Accounts => {
-            // A fresh nonce per response for the copy button's script, which the page emits only
-            // while a device code is on screen; failing to get one drops the script, never widens.
-            let nonce = new_token().unwrap_or_default();
-            let query = request.query.as_deref();
-            let html = page::accounts_page(
-                token,
-                &page::PortalsView {
-                    portals: &scheduler::portal_statuses(),
-                    signin_started: query_value(query, "signin").as_deref(),
-                    signed_out: query_value(query, "signout").as_deref(),
-                    now_unix: unix_now(),
-                    nonce: &nonce,
-                },
-                &nav_for(page::Tab::Accounts),
-            );
-            respond_as(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                html.as_bytes(),
-                request.body_wanted,
-                Head {
-                    referrer: Referrer::SameOrigin,
-                    script_nonce: (!nonce.is_empty()).then_some(nonce.as_str()),
-                    etag: None,
-                },
-            )
-        }
-        Route::Integrations => {
-            // Only with settings installed. `Config::load` on an empty path writes a default
-            // `config.txt` into the current directory, which a test run did to the repo once.
-            let cfg = SETTINGS.get().map(|_| crate::config::Config::load(&settings_path()).0);
-            let rows: Vec<page::IntegrationRow> = crate::integration::all()
-                .iter()
-                .map(|i| {
-                    let info = i.info();
-                    let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
-                    // Only asked while installed: spawning processes to draw a list is waste.
-                    let missing = if installed && info.unsupported.is_none() { i.missing() } else { Vec::new() };
-                    page::IntegrationRow {
-                        id: info.id,
-                        name: info.name,
-                        summary: info.summary,
-                        status: page::integration_status(installed, info.unsupported, &missing),
-                        switch: page::integration_switch(installed, info.unsupported),
-                        flash: crate::integration::take_flash(info.id),
-                    }
-                })
-                .collect();
-            let html = page::integrations_page(token, &rows, &nav_for(page::Tab::Integrations));
-            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
-        }
-        Route::IntegrationPage(id) => {
-            let Some((integration, home)) = crate::integration::find(id).zip(settings_home()) else {
-                return respond(&mut stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
-            };
-            let html = integration_page(integration, &home, token);
-            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::same_origin())
-        }
-        Route::SaveSettings => save_settings(&mut stream, &head, &request, token, port),
-        Route::Authenticate => start_sign_in(&mut stream, &head, &request, token, port),
+        Route::Site(place) => site_page(&mut stream, &request, token, &place),
+        Route::SitePost(place) => site_post(&mut stream, &head, &request, token, port, &place),
         Route::Mute(axis) => mute_action(&mut stream, &head, &request, token, port, axis),
-        Route::Unmute => unmute_action(&mut stream, &head, &request, token, port),
-        Route::Muted => {
-            let now = unix_now();
-            let mutes = crate::mute::all(now);
-            let snapshots: Vec<_> = PrAxis::ALL.map(|a| (a, scheduler::pr_snapshot(a))).into_iter().collect();
-            let rows: Vec<page::MutedRow> = mutes
-                .iter()
-                .map(|(key, until)| page::MutedRow {
-                    key,
-                    until: *until,
-                    found: snapshots.iter().find_map(|(axis, snap)| {
-                        snap.groups.iter().find_map(|(info, list)| {
-                            list.as_ref()?.iter().find(|e| e.key() == key).map(|e| (*axis, e, info.link_prefix.as_str()))
-                        })
-                    }),
-                })
-                .collect();
-            let html = page::muted_page(&rows, token, now, &nav_for(page::Tab::Muted));
-            respond_as(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                html.as_bytes(),
-                request.body_wanted,
-                Head { referrer: Referrer::SameOrigin, ..Head::default() },
-            )
-        }
-        Route::IntegrationAction(id) => integration_action(&mut stream, &head, &request, token, port, id),
         Route::MethodNotAllowed => {
             respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
         }
@@ -1111,120 +980,321 @@ fn respond_as(
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-/// The keys a just-finished save needs a restart for, read back off the redirect.
-///
-/// **Filtered against the real key list**, so the banner can only ever name settings that exist. It
-/// is text the request supplies and the page echoes, and while `esc` already makes it inert, a page
-/// that will print whatever it is handed is a thing to fix rather than to escape.
-fn restart_names(query: Option<&str>) -> Vec<&'static str> {
-    let Some(query) = query else { return Vec::new() };
-    let Some((_, list)) = query.split('&').filter_map(|p| p.split_once('=')).find(|(k, _)| *k == "restart")
-    else {
-        return Vec::new();
-    };
-    percent_decode(list)
-        .split(',')
-        .filter_map(|name| {
-            crate::config::WRITABLE_KEYS
-                .iter()
-                .find(|(key, live)| *key == name && !*live)
-                .map(|(key, _)| *key)
-        })
-        .collect()
-}
-
 /// Where `config.txt` lives, for the settings page.
 fn settings_path() -> std::path::PathBuf {
     SETTINGS.get().map(|s| s.app_asset_path.clone()).unwrap_or_default()
 }
 
-/// Applies a submitted settings form.
+// ── The settings site ────────────────────────────────────────────────────────
+
+/// What the sidebar needs, read fresh per page.
+fn site_for(token: &str) -> crate::ui::Site<'_> {
+    crate::ui::Site {
+        token,
+        // Signed in means a credential is in use, including one that sees nothing (`Off`): that portal
+        // is set up, and its page is where the reason is read.
+        portals: scheduler::portal_statuses()
+            .into_iter()
+            .map(|p| {
+                let signed_in = matches!(p.auth, crate::portal::AuthStatus::SignedIn | crate::portal::AuthStatus::Off(_));
+                (p.info.id.0, p.info.display_name, signed_in)
+            })
+            .collect(),
+        // Read from `config.txt` only with settings installed; without them nothing is installed.
+        installed: match SETTINGS.get() {
+            Some(_) => {
+                let (cfg, _) = crate::config::Config::load(&settings_path());
+                crate::integration::all().iter().map(|i| i.info().id).filter(|id| cfg.integration_enabled(id)).collect()
+            }
+            None => Vec::new(),
+        },
+        muted: crate::mute::all(unix_now()).len(),
+        update: match scheduler::update_status().last {
+            Some((_, Ok(Some(version)))) => Some(version),
+            _ => None,
+        },
+    }
+}
+
+/// One page of the settings site.
 ///
-/// The order is the same one the tray checkboxes use and for the same reason: the live switches are
-/// set first so the next poll obeys the new answer whatever the disk does, and the file is written
-/// second because it only decides what the *next* start believes.
-fn save_settings(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+/// The pages that show `config.txt`'s values need settings installed: `Config::load` on an empty path
+/// writes a default `config.txt` into the current directory, which a test run did to the repo once.
+/// The lists and the muted page do not, and render in any run.
+fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &crate::ui::Place) {
+    use crate::ui::Place;
+    let site = site_for(token);
+    let cfg = SETTINGS.get().map(|_| crate::config::Config::load(&settings_path()).0);
+    let flash = crate::ui::take_flash(place);
+    let mut head = Head::same_origin();
+    let nonce = new_token().unwrap_or_default();
+    let unavailable = || page::settings_unavailable(token);
+    let html = match place {
+        Place::General => cfg.map(|c| crate::ui::general_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
+        Place::Advanced => cfg.map(|c| crate::ui::advanced_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
+        Place::Updates => match cfg {
+            Some(c) => {
+                let status = scheduler::update_status();
+                let value = |s: &crate::setting::Setting| crate::config::value_of(&c, s.key);
+                crate::ui::updates::updates_page(
+                    &site,
+                    &crate::ui::updates::UpdatesView {
+                        installed: crate::version::VERSION,
+                        waiting: status.asked.map(|at| at.elapsed().as_secs()),
+                        last: status.last.map(|(at, found)| (at.elapsed().as_secs(), found)),
+                        value: &value,
+                        flash: flash.as_ref(),
+                    },
+                )
+            }
+            None => unavailable(),
+        },
+        Place::Portals => crate::ui::portals::portals_page(&site, &scheduler::portal_statuses()),
+        Place::Portal(id) => {
+            let statuses = scheduler::portal_statuses();
+            let Some(status) = statuses.iter().find(|p| p.info.id.0 == *id) else {
+                return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
+            };
+            let query = request.query.as_deref();
+            let value = cfg.as_ref().map(|c| move |s: &crate::setting::Setting| crate::config::value_of(c, s.key));
+            let value_ref: Option<&dyn Fn(&crate::setting::Setting) -> String> = value.as_ref().map(|f| f as _);
+            // A fresh nonce per response for the copy button's script, which the page emits only while
+            // a device code is on screen; failing to get one drops the script, never widens.
+            head.script_nonce = (!nonce.is_empty()).then_some(nonce.as_str());
+            crate::ui::portals::portal_page(
+                &site,
+                &crate::ui::portals::PortalView {
+                    status,
+                    signin_started: query_value(query, "signin").is_some(),
+                    signed_out: query_value(query, "signout").is_some(),
+                    now_unix: unix_now(),
+                    nonce: &nonce,
+                    value: value_ref,
+                    flash: flash.as_ref(),
+                },
+            )
+        }
+        Place::Integrations => {
+            let rows: Vec<crate::ui::integrations::IntegrationRow> = crate::integration::all()
+                .iter()
+                .map(|i| {
+                    let info = i.info();
+                    let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
+                    // Only asked while installed: spawning processes to draw a list is waste.
+                    let missing = if installed && info.unsupported.is_none() { i.missing() } else { Vec::new() };
+                    crate::ui::integrations::IntegrationRow {
+                        id: info.id,
+                        name: info.name,
+                        summary: info.summary,
+                        status: crate::ui::integrations::integration_status(installed, info.unsupported, &missing),
+                        switch: crate::ui::integrations::integration_switch(installed, info.unsupported),
+                        flash: crate::integration::take_flash(info.id),
+                    }
+                })
+                .collect();
+            crate::ui::integrations::integrations_page(&site, &rows)
+        }
+        Place::Integration(id) => {
+            let (Some(integration), Some(home)) = (crate::integration::find(id), settings_home()) else {
+                return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
+            };
+            integration_page(&site, integration, &home, flash.as_ref())
+        }
+        Place::Muted => {
+            let now = unix_now();
+            let mutes = crate::mute::all(now);
+            let snapshots: Vec<_> = PrAxis::ALL.map(|a| (a, scheduler::pr_snapshot(a))).into_iter().collect();
+            let rows: Vec<crate::ui::MutedRow> = mutes
+                .iter()
+                .map(|(key, until)| crate::ui::MutedRow {
+                    key,
+                    until: *until,
+                    found: snapshots.iter().find_map(|(axis, snap)| {
+                        snap.groups.iter().find_map(|(info, list)| {
+                            list.as_ref()?.iter().find(|e| e.key() == key).map(|e| (*axis, e, info.link_prefix.as_str()))
+                        })
+                    }),
+                })
+                .collect();
+            crate::ui::muted_page(&site, &rows, now)
+        }
+    };
+    // `same-origin`, so a form's `Origin` survives: see `Referrer`.
+    respond_as(stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, head)
+}
+
+/// A button or a Save posted to a page of the settings site.
+///
+/// The same guards as every other write, in the same order: `Origin` first, then a settings directory
+/// to write into, then a body within bounds. The muted page and an integration's page keep their own
+/// handlers, which apply the same guards.
+fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16, place: &crate::ui::Place) {
+    use crate::ui::Place;
+    match place {
+        Place::Muted => return unmute_action(stream, head, request, token, port),
+        Place::Integration(id) => return integration_action(stream, head, request, token, port, id),
+        _ => {}
+    }
     if !origin_is_ours(request.origin.as_deref(), port) {
         return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
     }
     let Some(settings) = SETTINGS.get() else {
         return respond(stream, 503, "text/plain; charset=utf-8", b"Settings unavailable", true);
     };
-
     // The head read stops at the blank line, so whatever followed it is the start of the body.
     let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
     let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
         Ok(body) => body,
         Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
     };
-
-    let (current, _) = crate::config::Config::load(&settings.app_asset_path);
-    let wanted = crate::config::Config::from_form(&parse_form(&body), &current);
-
-    settings.sound.set(wanted.sound);
-    settings.copilot.set(wanted.copilot_reviews);
-
-    match crate::config::save(&settings.app_asset_path, &wanted) {
-        Ok(changed) => {
-            if !changed.is_empty() {
-                infoln!("settings page wrote: {}", changed.join(", "));
-                // A changed rule with a stale count on screen reads as the save not having worked.
-                if let Ok(wake) = settings.wake.lock() {
-                    let _ = wake.send(scheduler::Wake::Refresh);
-                }
+    let form = parse_form(&body);
+    match place {
+        Place::General => save_core_section(stream, token, settings, place, crate::config::GENERAL, &form),
+        Place::Advanced => save_core_section(stream, token, settings, place, crate::config::ADVANCED, &form),
+        Place::Updates if form.get("action").is_some_and(|a| a == "check") => {
+            infoln!("settings page asked to check for updates now");
+            if let Ok(wake) = settings.wake.lock() {
+                scheduler::request_update_check(&wake);
             }
-            let restarts: Vec<&str> =
-                changed.iter().copied().filter(|key| !crate::config::is_live(key)).collect();
-            redirect(stream, &format!("/{token}/settings?restart={}", restarts.join(",")));
+            redirect(stream, &format!("/{token}/{}", place.path()));
         }
-        Err(e) => {
-            errorln!("settings page could not save: {e}");
-            respond(stream, 500, "text/plain; charset=utf-8", b"Could not write config.txt", true)
+        Place::Updates => save_core_section(stream, token, settings, place, crate::config::UPDATES, &form),
+        Place::Portal(id) => {
+            // Only a portal the poll loop knows. Anything else is a stale or hand-made post.
+            let Some(status) = scheduler::portal_statuses().into_iter().find(|p| p.info.id.0 == *id) else {
+                return respond(stream, 404, "text/plain; charset=utf-8", b"Unknown portal", true);
+            };
+            match form.get("action").map(String::as_str) {
+                Some(action) => portal_action(stream, token, settings, &status, action),
+                None => save_core_section(stream, token, settings, place, crate::ui::portals::settings_for(status.info.kind), &form),
+            }
+        }
+        Place::Portals | Place::Integrations | Place::Muted | Place::Integration(_) => {
+            respond(stream, 405, "text/plain; charset=utf-8", b"Method not allowed", true)
         }
     }
 }
 
-/// The settings page's sign-in button. Same `Origin` guard as a save, for the same reason: a
-/// cross-site form must not be able to pop a device code dialog on someone's desktop.
+/// Which section of `settings` a form names, by its index. `None` for anything that is not one.
+fn section_of(settings: &'static [crate::setting::Setting], form: &Form) -> Option<(usize, Vec<&'static crate::setting::Setting>)> {
+    let index: usize = form.get("section")?.parse().ok()?;
+    crate::setting::groups(settings).into_iter().nth(index).map(|(_, members)| (index, members))
+}
+
+/// A section's Save for the core's own settings: that section's keys and no others, checked against
+/// their declarations, written one line each.
 ///
-/// Only *asks*: the flow runs on the poll thread, where the credential lives and where blocking for
-/// as long as the user takes costs nothing but a paused poll. The redirect back names the portal so
-/// the page can say the sign-in has started even before the poll thread has published "in progress".
-/// One integration's page, drawn from what it declares and what it adds.
-fn integration_page(integration: &'static dyn crate::integration::Integration, home: &std::path::Path, token: &str) -> String {
+/// The live switches are set from what was written, so the next poll obeys the new answer whatever
+/// else happens, and a change wakes the poll loop, because a changed rule with a stale count on screen
+/// reads as the save not having worked. The page then says what the Save did, under the section.
+fn save_core_section(
+    stream: &mut TcpStream,
+    token: &str,
+    settings: &Settings,
+    place: &crate::ui::Place,
+    declared: &'static [crate::setting::Setting],
+    form: &Form,
+) {
+    let Some((index, members)) = section_of(declared, form) else {
+        return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown section", true);
+    };
+    let pairs = crate::setting::from_form(&members, form);
+    let line = match crate::config::save_values(&settings.app_asset_path, &pairs) {
+        Ok(changed) => {
+            let (cfg, _) = crate::config::Config::load(&settings.app_asset_path);
+            settings.sound.set(cfg.sound);
+            settings.copilot.set(cfg.copilot_reviews);
+            if !changed.is_empty() {
+                infoln!("settings page wrote: {}", changed.join(", "));
+                if let Ok(wake) = settings.wake.lock() {
+                    let _ = wake.send(scheduler::Wake::Refresh);
+                }
+            }
+            let restart: Vec<&str> = members
+                .iter()
+                .filter(|s| changed.contains(&s.key) && !s.live)
+                .map(|s| s.label)
+                .collect();
+            match (changed.is_empty(), restart.is_empty()) {
+                (true, _) => "Nothing changed.".to_string(),
+                (false, true) => "Saved.".to_string(),
+                (false, false) => format!("Saved. Takes effect after a restart: {}.", restart.join("; ")),
+            }
+        }
+        Err(e) => {
+            errorln!("settings page could not save: {e}");
+            format!("Not saved: {e}")
+        }
+    };
+    crate::ui::flash(place, index, line);
+    redirect(stream, &format!("/{token}/{}#s{index}", place.path()));
+}
+
+/// Sign in, Sign out or Cancel on a portal's page.
+///
+/// Only *asks*: the flow runs on the poll thread, where the credential lives and where blocking for as
+/// long as the user takes costs nothing but a paused poll. The redirect back says what was asked, so
+/// the page can say it at once even before the poll thread has published it.
+fn portal_action(stream: &mut TcpStream, token: &str, settings: &Settings, status: &crate::portal::PortalStatus, action: &str) {
+    let path = crate::ui::Place::Portal(status.info.id.0.clone()).path();
+    let wake = |w: scheduler::Wake| {
+        if let Ok(tx) = settings.wake.lock() {
+            let _ = tx.send(w);
+        }
+    };
+    match action {
+        // Deletes the saved credential. Handed to the poll thread like everything else that touches one.
+        "signout" => {
+            infoln!("settings page asked to sign out of {}", status.info.display_name);
+            wake(scheduler::Wake::SignOut(status.info.id.clone()));
+            redirect(stream, &format!("/{token}/{path}?signout=1"));
+        }
+        // Reaches the flow through a flag rather than a wake, because the poll thread is inside the flow
+        // and reads no channel until it returns.
+        "cancel" => {
+            if scheduler::cancel_sign_in(&status.info.id) {
+                infoln!("settings page cancelled the {} sign-in", status.info.display_name);
+            }
+            redirect(stream, &format!("/{token}/{path}"));
+        }
+        "signin" => {
+            infoln!("settings page asked to sign in to {}", status.info.display_name);
+            wake(scheduler::Wake::Authenticate(Some(status.info.id.clone())));
+            redirect(stream, &format!("/{token}/{path}?signin=1"));
+        }
+        _ => respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
+    }
+}
+
+/// One integration's page: the header card, its declared settings as sections, and its own part.
+fn integration_page(
+    site: &crate::ui::Site,
+    integration: &'static dyn crate::integration::Integration,
+    home: &std::path::Path,
+    flash: Option<&(usize, String)>,
+) -> String {
     let cfg = crate::config::Config::load(home).0;
     let info = integration.info();
     let ctx = crate::integration::Context::new(home, &cfg, info.id);
     let installed = cfg.integration_enabled(info.id);
     let missing = if installed && info.unsupported.is_none() { integration.missing() } else { Vec::new() };
-    let flash = crate::integration::take_flash(info.id);
+    let header_flash = crate::integration::take_flash(info.id);
     let dry_run = crate::integration::last_dry_run(info.id);
-    let view = page::IntegrationView {
+    let place = crate::ui::Place::Integration(info.id);
+    let value = |s: &crate::setting::Setting| ctx.setting(s.key).to_string();
+    let view = crate::ui::integrations::IntegrationView {
         id: info.id,
         name: info.name,
         summary: info.summary,
         installed,
         unsupported: info.unsupported,
         missing: &missing,
-        flash: flash.as_deref(),
+        flash: header_flash.as_deref(),
         dry_run: &dry_run,
-        settings: info
-            .settings
-            .iter()
-            .map(|s| page::SettingRow {
-                key: s.key,
-                label: s.label,
-                value: ctx.setting(s.key).to_string(),
-                placeholder: match s.kind {
-                    crate::integration::Kind::Text { placeholder } => placeholder,
-                    crate::integration::Kind::Flag { .. } => "",
-                },
-                flag: matches!(s.kind, crate::integration::Kind::Flag { .. }).then(|| ctx.flag(s)),
-            })
-            .collect(),
-        body: integration.page(&ctx, token),
+        sections: crate::ui::sections(site.token, &place, info.settings, &value, flash),
+        body: integration.page(&ctx, site.token),
     };
-    page::integration_page(token, &view, &nav_for(page::Tab::Integrations))
+    crate::ui::integrations::integration_page(site, &view)
 }
 
 /// GitHoot's own directory, the one holding `config.txt`.
@@ -1251,6 +1321,24 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
     };
     let form = parse_form(&body);
+    // A section's Save: only the keys that section declared, each checked by `integration::set`. An
+    // unticked box is off; a text box submitted empty is a deliberate clear, back to its default.
+    if form.get("action").is_none() {
+        let place = crate::ui::Place::Integration(id);
+        let Some((index, members)) = section_of(integration.info().settings, &form) else {
+            return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown section", true);
+        };
+        let line = crate::setting::from_form(&members, &form)
+            .into_iter()
+            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, &value))
+            .map(|()| "Saved. The next pass uses it.".to_string())
+            .unwrap_or_else(|why| {
+                errorln!("{id}: {why}");
+                format!("Not saved: {why}")
+            });
+        crate::ui::flash(&place, index, line);
+        return redirect(stream, &format!("/{token}/{}#s{index}", place.path()));
+    }
     let action = form.get("action").map(String::as_str).unwrap_or_default();
     let outcome: Result<String, String> = match action {
         // Writes one line of `config.txt`; the runner reads it on its next pass. No restart, and no
@@ -1272,12 +1360,6 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
             crate::integration::dry_run_now(&home, integration);
             Ok("Dry run only. Nothing was done and nothing was recorded.".to_string())
         }
-        // Only the keys the integration declared are read off the form, by name. An unticked box is
-        // off; a text box submitted empty is a deliberate clear, back to that setting's default.
-        "settings" => crate::integration::form_values(integration.info(), &form)
-            .into_iter()
-            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, &value))
-            .map(|()| "Settings saved. The next pass uses them.".to_string()),
         other => {
             let cfg = crate::config::Config::load(&home).0;
             let ctx = crate::integration::Context::new(&home, &cfg, id);
@@ -1382,55 +1464,6 @@ fn unmute_action(stream: &mut TcpStream, head: &str, request: &Request, token: &
     redirect(stream, &format!("/{token}/muted"))
 }
 
-fn start_sign_in(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
-    if !origin_is_ours(request.origin.as_deref(), port) {
-        return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
-    }
-    let Some(settings) = SETTINGS.get() else {
-        return respond(stream, 503, "text/plain; charset=utf-8", b"Settings unavailable", true);
-    };
-    let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
-    let body = match read_body(stream, already, request.content_length.unwrap_or(0)) {
-        Ok(body) => body,
-        Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
-    };
-    let form = parse_form(&body);
-    // Only a portal the poll loop knows. Anything else is a stale or hand-made post, and answering
-    // 404 rather than starting a flow for "whatever is waiting" keeps the button meaning one thing.
-    let Some(status) = form
-        .get("portal")
-        .and_then(|id| {
-            let id: &str = id.as_ref();
-            scheduler::portal_statuses().into_iter().find(|p| p.info.id.0 == id)
-        })
-    else {
-        return respond(stream, 404, "text/plain; charset=utf-8", b"Unknown portal", true);
-    };
-    // The same form, with `cancel` set, is the Cancel button beside a running sign-in. It reaches
-    // the flow through a flag rather than a wake, because the poll thread is inside the flow and
-    // reads no channel until it returns.
-    // `signout` deletes the saved credential. Handed to the poll thread like everything else that
-    // touches a credential; the redirect names the portal so the page can say so at once.
-    if form.ticked("signout") {
-        infoln!("settings page asked to sign out of {}", status.info.display_name);
-        if let Ok(wake) = settings.wake.lock() {
-            let _ = wake.send(scheduler::Wake::SignOut(status.info.id.clone()));
-        }
-        return redirect(stream, &format!("/{token}/accounts?signout={}", status.info.id.0));
-    }
-    if form.ticked("cancel") {
-        if scheduler::cancel_sign_in(&status.info.id) {
-            infoln!("settings page cancelled the {} sign-in", status.info.display_name);
-        }
-        return redirect(stream, &format!("/{token}/accounts"));
-    }
-    infoln!("settings page asked to sign in to {}", status.info.display_name);
-    if let Ok(wake) = settings.wake.lock() {
-        let _ = wake.send(scheduler::Wake::Authenticate(Some(status.info.id.clone())));
-    }
-    redirect(stream, &format!("/{token}/accounts?signin={}", status.info.id.0));
-}
-
 /// One query parameter, percent-decoded. `None` when absent.
 fn query_value(query: Option<&str>, key: &str) -> Option<String> {
     query?
@@ -1510,14 +1543,14 @@ mod tests {
         assert_eq!(r.content_length, Some(7));
     }
 
-    /// The sign-in button posts to its own route under the settings page, and only a POST is a
-    /// sign-in: a GET there is the wrong method, never a flow started by following a link.
+    /// A sign-in is a POST to its portal's page, and only a POST: a GET there is the page, never a
+    /// flow started by following a link.
     #[test]
-    fn the_sign_in_button_has_a_post_only_route() {
-        assert_eq!(route_write(&format!("/{TOKEN}/settings/authenticate"), Method::Post), Route::Authenticate);
-        assert_eq!(route_write(&format!("/{TOKEN}/settings/authenticate"), Method::Get), Route::MethodNotAllowed);
-        assert_eq!(route_write(&format!("/{TOKEN}/settings/other"), Method::Post), Route::NotFound);
-        assert_eq!(route_get(&format!("/{TOKEN}/settings/authenticate"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    fn a_sign_in_is_a_post_to_its_portals_page() {
+        let path = format!("/{TOKEN}/portals/github");
+        assert_eq!(route_write(&path, Method::Post), Route::SitePost(crate::ui::Place::Portal("github".into())));
+        assert_eq!(route_write(&path, Method::Get), Route::Site(crate::ui::Place::Portal("github".into())));
+        assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
     }
 
     #[test]
@@ -1631,17 +1664,67 @@ mod tests {
         assert!(mute_post(ours, "key=PR_a&days=3").starts_with("HTTP/1.1 404 "), "no poll ran: nothing is on the page");
     }
 
-    /// Accounts and the Integrations list are pages to read; an integration's page takes its own
-    /// buttons as a POST to itself.
+    /// Every page of the settings site is a GET, and a POST to the page it was pressed on. The two
+    /// lists take no POST: their buttons post to the item they are about.
     #[test]
-    fn the_accounts_and_integration_pages_route_by_method() {
-        assert_eq!(route_write(&format!("/{TOKEN}/accounts"), Method::Get), Route::Accounts);
-        assert_eq!(route_write(&format!("/{TOKEN}/accounts"), Method::Post), Route::MethodNotAllowed);
-        assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Get), Route::Integrations);
-        assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Post), Route::MethodNotAllowed);
-        assert_eq!(route_write(&format!("/{TOKEN}/integrations/herdr"), Method::Get), Route::IntegrationPage("herdr"));
-        assert_eq!(route_write(&format!("/{TOKEN}/integrations/herdr"), Method::Post), Route::IntegrationAction("herdr"));
-        assert_eq!(route_get(&format!("/{TOKEN}/accounts"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    fn the_settings_site_routes_by_method() {
+        use crate::ui::Place;
+        for (path, place) in [
+            ("general", Place::General),
+            ("portals/github", Place::Portal("github".into())),
+            ("integrations/herdr", Place::Integration("herdr")),
+            ("muted", Place::Muted),
+            ("updates", Place::Updates),
+            ("advanced", Place::Advanced),
+        ] {
+            assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Get), Route::Site(place.clone()), "{path}");
+            assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Post), Route::SitePost(place), "{path}");
+        }
+        for list in ["portals", "integrations"] {
+            assert_eq!(route_write(&format!("/{TOKEN}/{list}"), Method::Post), Route::MethodNotAllowed, "{list}");
+        }
+        assert_eq!(route_get(&format!("/{TOKEN}/general"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+    }
+
+    /// A section's Save names its section by index, and only an index the page has is one.
+    #[test]
+    fn a_save_names_a_section_the_page_actually_has() {
+        let form = |body: &str| parse_form(body);
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=0")).map(|(i, m)| (i, m.len())), Some((0, 3)));
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=1")).map(|(i, m)| (i, m.len())), Some((1, 1)));
+        for bad in ["section=2", "section=-1", "section=x", "", "section=01e3"] {
+            assert!(section_of(crate::config::GENERAL, &form(bad)).is_none(), "{bad:?}");
+        }
+    }
+
+    /// Every write on the site is refused before it can write anything: another `Origin` is `403`,
+    /// and ours without a settings directory, which is every ordinary test, is `503`.
+    #[test]
+    fn a_site_post_is_refused_before_it_can_write_anything() {
+        for (path, body) in [("general", "section=0&sound=on"), ("advanced", "section=1&logLevel=info"), ("updates", "action=check"), ("portals/github", "action=signin")] {
+            let post = |origin: &str| round_trip(&format!(
+                "POST /{TOKEN}/{path} HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\nOrigin: {origin}\r\n\
+                 Content-Length: {}\r\n\r\n{body}", body.len()));
+            assert!(post("https://evil.com").starts_with("HTTP/1.1 403 "), "{path}");
+            assert!(post("http://githoot.localhost:{PORT}").starts_with("HTTP/1.1 503 "), "{path}");
+        }
+    }
+
+    /// The pages that show `config.txt` say so when there is no settings directory, rather than
+    /// writing a default one into whatever directory the process happens to run in.
+    #[test]
+    fn a_site_page_without_settings_says_so() {
+        let r = round_trip(&format!("GET /{TOKEN}/general HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(r.starts_with("HTTP/1.1 200 OK\r\n") && r.contains("Settings are not available in this run."), "{r}");
+    }
+
+    /// The old pages are gone, not redirected: a hard cut, and the tray opens the new ones.
+    #[test]
+    fn the_old_settings_pages_are_gone() {
+        for path in ["settings", "accounts", "settings/authenticate", "settings/dispatcher"] {
+            assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Get), Route::NotFound, "{path}");
+            assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Post), Route::NotFound, "{path}");
+        }
     }
 
     /// Only an id the registry knows resolves. Anything else is a miss, so the segment can never be
@@ -1658,10 +1741,10 @@ mod tests {
     }
 
     #[test]
-    fn a_real_request_for_the_accounts_page_renders_it_with_its_nav() {
-        let r = round_trip(&format!("GET /{TOKEN}/accounts HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+    fn a_real_request_for_the_portals_page_renders_it_with_the_sidebar() {
+        let r = round_trip(&format!("GET /{TOKEN}/portals HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
-        assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page">Accounts<"#));
+        assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page" href="/"#), "{r}");
         let i = round_trip(&format!("GET /{TOKEN}/integrations HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(i.starts_with("HTTP/1.1 200 OK\r\n") && i.contains("Herdr dispatcher"), "{i}");
         assert!(i.contains("Not installed") || i.contains("Not available here"), "{i}");
@@ -1670,8 +1753,8 @@ mod tests {
     #[test]
     fn the_muted_page_routes_get_to_the_page_and_post_to_unmute() {
         let path = format!("/{TOKEN}/muted");
-        assert_eq!(route_write(&path, Method::Get), Route::Muted);
-        assert_eq!(route_write(&path, Method::Post), Route::Unmute);
+        assert_eq!(route_write(&path, Method::Get), Route::Site(crate::ui::Place::Muted));
+        assert_eq!(route_write(&path, Method::Post), Route::SitePost(crate::ui::Place::Muted));
         assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
     }
 
@@ -1755,19 +1838,6 @@ mod tests {
     #[test]
     fn a_get_needs_no_origin() {
         assert_eq!(route_get(&format!("/{TOKEN}/approved"), Some(&ok_host()), TOKEN, PORT), Route::Page(PrAxis::ReadyToMerge));
-    }
-
-    /// The banner names settings, and only settings that exist. It is text the request hands us and
-    /// the page prints back.
-    #[test]
-    fn the_restart_banner_only_ever_names_real_settings() {
-        assert_eq!(restart_names(Some("restart=logLevel,statusComponents")), ["logLevel", "statusComponents"]);
-        assert!(restart_names(Some("restart=<script>alert(1)</script>")).is_empty());
-        assert!(restart_names(Some("restart=nonsense,logLevel")).len() == 1);
-        // The two live settings need no restart, so they are never named as needing one.
-        assert!(restart_names(Some("restart=sound,copilotReviews")).is_empty());
-        assert!(restart_names(Some("")).is_empty());
-        assert!(restart_names(None).is_empty());
     }
 
     #[test]
@@ -2009,7 +2079,7 @@ mod tests {
     /// header does.
     #[test]
     fn the_settings_document_declares_the_same_policy_as_its_response() {
-        let html = page::settings_page(&test_config(), "tok", &[], &page::Nav { current: page::Tab::Settings, muted: 0 });
+        let html = crate::ui::general_page(&crate::ui::tests::site(), &test_config(), None);
         assert!(html.contains(r#"<meta name="referrer" content="same-origin">"#), "got {html}");
         assert!(!html.contains("no-referrer"));
     }

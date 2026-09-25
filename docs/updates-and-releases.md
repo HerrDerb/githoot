@@ -5,7 +5,11 @@
 Checked daily and at startup. When a newer release exists, a green up-arrow appears top-left and an
 **Install update** entry appears in the menu. Picking it shows the release notes of **every** version
 between yours and the newest, then asks. Nothing is ever installed silently. On confirmation it downloads,
-verifies, replaces itself and restarts. Turn it off with `updateCheck=off`.
+verifies, replaces itself and restarts. Turn the automatic check off with `updateCheck=off`.
+
+**To check right now**, open **Updates** in the settings pages and press **Check now**. It asks at once,
+whether or not the automatic check is on, and the page says what it found: the newest release, a newer
+one to install from the tray menu, or why the check failed.
 
 ## What is verified, and what that proves
 

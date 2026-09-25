@@ -23,7 +23,7 @@ This hands it over instead, already judged.
 localApi=on
 ```
 
-in `~/.githoot/config.txt`, or the box in the [settings page](menu-and-settings.md#the-settings-page).
+in `~/.githoot/config.txt`, or the box under **Advanced** in the [settings pages](menu-and-settings.md#the-settings-pages).
 **Restart to apply**, because the listener binds once.
 
 Two things then differ from an ordinary run:
