@@ -176,8 +176,7 @@ each pull request's head branch).
 The dispatcher was a setting of its own then. It is an integration now, and nothing is migrated:
 
 - **The keys are gone.** `dispatcher`, `dispatcherCloneRoot` and `dispatcherWorktreeRoot` are no
-  longer read. If one of them was doing something (`dispatcher=on`, or a folder set), the log says so
-  once per start; the `off` and empty lines every fresh file carried are left alone quietly. Install it on the Integrations tab and set the
+  longer read, and nothing says so: delete the lines whenever you like. Install it on the Integrations tab and set the
   two folders on its page, or write the `integration.herdr.*` keys above.
 - **Its files moved.** `~/.githoot/dispatch/` and `~/.githoot/prompts/` are no longer read. Move
   `prompts/` into `~/.githoot/integrations/herdr/` to keep edited prompts. The old state is not

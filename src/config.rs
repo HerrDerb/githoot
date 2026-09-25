@@ -117,19 +117,9 @@ pub fn all_status_components() -> Vec<String> {
 /// now: the feature they named was removed in 2.0.0, so there is no replacement to point at and an
 /// old line is simply an unknown key, which `parse` has always ignored.
 ///
-/// The dispatcher's three keys moved under `integration.herdr.` when it became the first
-/// integration. Same clean break: `dispatcher=on` alone no longer starts anything.
-///
-/// The third field says whether an old line only matters when it is on. Every file 2.4.0 and 3.0.0
-/// wrote carries `dispatcher=off`, which did nothing then and does nothing now; warning about it
-/// would be noise in every one of those logs. `update_check=off` is the opposite case, and the one
-/// this list was made for.
-const RENAMED_KEYS: [(&str, &str, bool); 4] = [
-    ("update_check", KEY_UPDATE_CHECK, false),
-    ("dispatcher", "integration.herdr.enabled", true),
-    ("dispatcherCloneRoot", "integration.herdr.cloneRoot", false),
-    ("dispatcherWorktreeRoot", "integration.herdr.worktreeRoot", false),
-];
+/// The dispatcher's three keys, which moved under `integration.herdr.` when it became the first
+/// integration, are deliberately not here: a hard cut, documented in `docs/dispatcher.md`, and quiet.
+const RENAMED_KEYS: [(&str, &str); 1] = [("update_check", KEY_UPDATE_CHECK)];
 
 /// Whether [`Config::load`] found no `config.txt` and successfully wrote one.
 ///
@@ -759,15 +749,13 @@ fn warn_about_renamed_keys(values: &std::collections::HashMap<&str, &str>) {
     }
 }
 
-/// What `warn_about_renamed_keys` would say, with no logging. An old line with nothing in it, or an
-/// old switch that was off where only on ever did anything, is not worth a word.
+/// What `warn_about_renamed_keys` would say, with no logging. An old line with nothing in it is not
+/// worth a word.
 fn renamed_key_warnings(values: &std::collections::HashMap<&str, &str>) -> Vec<String> {
     RENAMED_KEYS
         .iter()
-        .filter(|(old, _, only_when_on)| {
-            values.get(old).is_some_and(|v| !v.trim().is_empty() && (!only_when_on || is_on(v)))
-        })
-        .map(|(old, new, _)| format!("{CONFIG_FILE} uses \"{old}\", which is no longer read. Rename it to \"{new}\"."))
+        .filter(|(old, _)| values.get(old).is_some_and(|v| !v.trim().is_empty()))
+        .map(|(old, new)| format!("{CONFIG_FILE} uses \"{old}\", which is no longer read. Rename it to \"{new}\"."))
         .collect()
 }
 
@@ -1214,13 +1202,12 @@ mod tests {
         assert!(!from("integration.herdr=on\n").integration_enabled("herdr"));
     }
 
-    /// 2.4.0 and 3.0.0 shipped `dispatcher=on`. It is warned about, and it starts nothing.
+    /// 2.4.0 and 3.0.0 shipped `dispatcher=on`. It starts nothing.
     #[test]
     fn the_old_dispatcher_keys_install_nothing() {
         let cfg = from("dispatcher=on\ndispatcherCloneRoot=/src\n");
         assert!(!cfg.integration_enabled("herdr"));
         assert!(cfg.integration_settings("herdr").is_empty());
-        assert!(RENAMED_KEYS.iter().any(|(old, new, _)| *old == "dispatcher" && *new == "integration.herdr.enabled"));
     }
 
     #[test]
@@ -1241,34 +1228,30 @@ mod tests {
 
     // ── Renamed keys ────────────────────────────────────────────────────────
 
-    /// Every `config.txt` written by 2.4.0 or 3.0.0 carries the dispatcher's three lines at their
-    /// defaults. Those did nothing then and do nothing now, so they must not put an error in the log;
-    /// the runner loads the file every pass, and a warning per pass would bury everything else.
+    /// The dispatcher's old keys are a hard cut, and a quiet one: not read, and not warned about.
     #[test]
-    fn old_lines_that_did_nothing_are_not_warned_about() {
-        let text = "dispatcher=off\ndispatcherCloneRoot=\ndispatcherWorktreeRoot=\n";
+    fn the_old_dispatcher_keys_are_not_warned_about() {
+        let text = "dispatcher=on\ndispatcherCloneRoot=/src\ndispatcherWorktreeRoot=/wt\n";
         assert!(renamed_key_warnings(&parse(text)).is_empty());
     }
 
-    /// An old line that did something is exactly the case the warning exists for.
+    /// `update_check=off` is the case the list exists for: a switched-off updater switching back on.
     #[test]
-    fn old_lines_that_did_something_are_warned_about() {
-        let warned = renamed_key_warnings(&parse("dispatcher=on\ndispatcherCloneRoot=/src\nupdate_check=off\n"));
-        assert_eq!(warned.len(), 3, "{warned:?}");
-        assert!(warned.iter().any(|w| w.contains("\"dispatcher\"") && w.contains("integration.herdr.enabled")));
-        // update_check=off is the case the list was made for: a switched-off updater switching back on.
-        assert!(warned.iter().any(|w| w.contains("update_check")));
+    fn a_renamed_key_that_did_something_is_warned_about() {
+        let warned = renamed_key_warnings(&parse("update_check=off\n"));
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("update_check") && warned[0].contains(KEY_UPDATE_CHECK));
     }
 
     /// The old names must not be read. This is the clean break, asserted rather than assumed: an
     /// accidentally reinstated alias would make the rename a no-op and the warning a lie.
     #[test]
     fn the_old_key_names_are_not_read() {
-        let text: String = RENAMED_KEYS.iter().map(|(old, _, _)| format!("{old}=off\n")).collect();
+        let text: String = RENAMED_KEYS.iter().map(|(old, _)| format!("{old}=off\n")).collect();
         let values = parse(&text);
         assert_eq!(values.get(KEY_UPDATE_CHECK), None);
         // …but they are recognised well enough to be warned about.
-        for (old, _, _) in RENAMED_KEYS {
+        for (old, _) in RENAMED_KEYS {
             assert!(values.contains_key(old), "{old:?} should be seen, just not obeyed");
         }
     }
@@ -1279,7 +1262,7 @@ mod tests {
     fn every_rename_points_at_a_real_key() {
         let text = default_config();
         let template = parse(&text);
-        for (old, new, _) in RENAMED_KEYS {
+        for (old, new) in RENAMED_KEYS {
             assert!(template.contains_key(new), "{old:?} points at {new:?}, which is not a real key");
         }
     }
