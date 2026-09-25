@@ -754,7 +754,7 @@ impl Integration for Herdr {
         missing_tools()
     }
 
-    /// Install, or install again after Remove, is "from now on" for every bar.
+    /// Install, or install again after Uninstall, is "from now on" for every bar.
     fn installed(&self, ctx: &Context, _on: bool) {
         for axis in PrAxis::ALL {
             disarm(&ctx.dir, axis);
@@ -866,7 +866,7 @@ impl Integration for Herdr {
 //
 // A bar that was just switched on, or an integration that was just installed, must not start an
 // agent for every pull request already waiting in it. Its first pass takes them all as seen instead,
-// and leaves a marker saying the bar has a baseline. Switching the bar off, Install and Remove all
+// and leaves a marker saying the bar has a baseline. Switching the bar off, Install and Uninstall all
 // remove the marker, so the next time the bar is on is a fresh "from now on" as well.
 
 fn armed_path(dir: &Path, axis: PrAxis) -> PathBuf {
@@ -1027,7 +1027,7 @@ mod tests {
         assert!(!page_body("tok", &settings(), &["gh"], &[]).contains("herdr.dev/docs/install"));
     }
 
-    /// Only its own action. Install, remove, dry run and settings are the generic page's.
+    /// Only its own action. Install, uninstall, dry run and settings are the generic page's.
     #[test]
     fn it_answers_only_the_prompts_action() {
         let cfg = crate::config::Config::from_text("");
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn install_and_remove_both_mean_a_fresh_baseline_next_time() {
+    fn install_and_uninstall_both_mean_a_fresh_baseline_next_time() {
         let ctx = temp_ctx("install", "");
         let _ = Herdr.pass(&ctx, &[batch(PrAxis::ReviewRequested, Vec::new(), true)], false);
         assert!(armed(&ctx.dir, PrAxis::ReviewRequested));

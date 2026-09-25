@@ -909,6 +909,8 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
                         name: info.name,
                         summary: info.summary,
                         status: page::integration_status(installed, info.unsupported, &missing),
+                        switch: page::integration_switch(installed, info.unsupported),
+                        flash: crate::integration::take_flash(info.id),
                     }
                 })
                 .collect();
@@ -1253,11 +1255,15 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
     let outcome: Result<String, String> = match action {
         // Writes one line of `config.txt`; the runner reads it on its next pass. No restart, and no
         // second source of truth for whether the thing is installed.
-        "install" | "remove" => {
+        "install" | "uninstall" => {
             infoln!("settings page asked to {action} {id}");
             crate::integration::install(&home, integration, action == "install").map(|()| {
-                if action == "install" { "Installed. The next pass acts for real." } else { "Removed. Nothing further will be done." }
-                    .to_string()
+                if action == "install" {
+                    "Installed. What is waiting now is taken as seen; the next pass starts from there."
+                } else {
+                    "Uninstalled. Nothing further will be done."
+                }
+                .to_string()
             })
         }
         // Runs a real pass with every effect suppressed, against the lists GitHoot already holds.
@@ -1286,7 +1292,16 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         format!("Failed: {why}")
     });
     crate::integration::flash(integration, line);
-    redirect(stream, &format!("/{token}/integrations/{id}"));
+    redirect(stream, &after_integration_action(token, id, form.get("from").map(String::as_str)));
+}
+
+/// Where a press sends the browser: back to the page it was pressed on, so that page reloads showing
+/// what the press did. Only the list is a recognised origin, so the field cannot point anywhere else.
+fn after_integration_action(token: &str, id: &str, from: Option<&str>) -> String {
+    match from {
+        Some("list") => format!("/{token}/integrations"),
+        _ => format!("/{token}/integrations/{id}"),
+    }
 }
 
 /// A mute or unmute link.
@@ -1685,6 +1700,16 @@ mod tests {
     }
 
     // ── Integration buttons ───────────────────────────────────────────────────
+
+    /// A press reloads the page it was pressed on, so the button you just used is replaced by the
+    /// state it produced. Only the list is a recognised origin; anything else goes to the
+    /// integration's own page, so the field cannot send the browser anywhere else.
+    #[test]
+    fn an_integration_button_reloads_the_page_it_was_pressed_on() {
+        assert_eq!(after_integration_action("tok", "herdr", Some("list")), "/tok/integrations");
+        assert_eq!(after_integration_action("tok", "herdr", None), "/tok/integrations/herdr");
+        assert_eq!(after_integration_action("tok", "herdr", Some("https://evil.com")), "/tok/integrations/herdr");
+    }
 
     /// The guard order over a real socket. `Origin` is checked before anything else, so a
     /// cross-site form gets `403` and nothing is written; with our own `Origin` but no settings

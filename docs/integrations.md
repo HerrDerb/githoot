@@ -7,12 +7,12 @@ across the app.
 
 ## Installed means switched on
 
-Every integration ships inside GitHoot. **Integrations** in the settings page lists them, and each
-has a page with:
+Every integration ships inside GitHoot. **Integrations** in the settings page lists them, each with
+an **Install** button, or **Uninstall** once it is installed, and each has a page with:
 
-- **Install** and **Remove.** They write `integration.<id>.enabled=on` or `off` to `config.txt`, the
-  same one-line edit every other setting gets. Removing keeps the integration's settings and files,
-  so installing it again picks up where it left off.
+- **Install** and **Uninstall.** They write `integration.<id>.enabled=on` or `off` to `config.txt`, the
+  same one-line edit every other setting gets, and reload the page they were pressed on. Uninstalling
+  keeps the integration's settings and files, so installing it again picks up where it left off.
 - **Dry run.** A real pass with every effect suppressed and nothing recorded, so it cannot change
   what the next real pass does. Offered installed or not: asking first is the only safe way to learn
   what installing would do.

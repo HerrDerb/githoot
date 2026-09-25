@@ -10,7 +10,7 @@
 //! ## Installed means switched on
 //!
 //! Every integration ships inside the binary. Installing one writes `integration.<id>.enabled=on`
-//! to `config.txt`, and removing it writes `off`; its prompts, state and settings stay on disk, so
+//! to `config.txt`, and uninstalling it writes `off`; its prompts, state and settings stay on disk, so
 //! installing it again picks up where it left off. There is no plugin loading, deliberately: the
 //! dispatcher moved *into* the process in 2.4.0 because an external program was the problem (a
 //! console window on Windows, a script host antivirus flags, bash and PowerShell drifting apart).
@@ -140,7 +140,7 @@ pub trait Integration: Send + Sync {
     /// Once at startup, installed or not: bring shipped files such as default prompts up to date.
     fn prepare(&self, _ctx: &Context) {}
 
-    /// Install or Remove was pressed. Called after `config.txt` says so.
+    /// Install or Uninstall was pressed. Called after `config.txt` says so.
     fn installed(&self, _ctx: &Context, _on: bool) {}
 
     /// One of its settings was written from the page, with the value it now has. Saving the form
@@ -252,7 +252,7 @@ pub fn set(app_asset_path: &Path, integration: &dyn Integration, key: &str, valu
     Ok(())
 }
 
-/// Install or remove. Refused where the build cannot run it, so the page cannot switch on something
+/// Install or uninstall. Refused where the build cannot run it, so the page cannot switch on something
 /// that would sit there doing nothing.
 pub fn install(app_asset_path: &Path, integration: &dyn Integration, on: bool) -> Result<(), String> {
     if let (true, Some(why)) = (on, integration.info().unsupported) {
@@ -482,9 +482,9 @@ mod tests {
         assert!(!batches(&NO_PORTALS, &snaps, &|_| false)[0].confirmed, "a portal it cannot see confirms nothing");
     }
 
-    /// Install and Remove tell the integration, so it can treat the next pass as a fresh start.
+    /// Install and Uninstall tell the integration, so it can treat the next pass as a fresh start.
     #[test]
-    fn install_and_remove_tell_the_integration() {
+    fn install_and_uninstall_tell_the_integration() {
         let dir = std::env::temp_dir().join(format!("githoot-integration-install-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let before = fake::INSTALLS.load(std::sync::atomic::Ordering::SeqCst);

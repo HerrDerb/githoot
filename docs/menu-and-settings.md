@@ -199,7 +199,7 @@ existed — the key is appended rather than the file regenerated.
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
 | `localApi` | `off` | Serve the judged lists as JSON to local scripts, and bind the local port at startup — see [The local API](local-api.md). Off by default, and a typo leaves it shut rather than open |
-| `integration.<id>.enabled` | `off` | Whether that integration is installed. What its Install and Remove buttons write, and like `localApi` a typo leaves it off → [integrations](integrations.md) |
+| `integration.<id>.enabled` | `off` | Whether that integration is installed. What its Install and Uninstall buttons write, and like `localApi` a typo leaves it off → [integrations](integrations.md) |
 | `integration.<id>.<key>` | per integration | That integration's own settings, listed on its page and in its doc. The Herdr dispatcher has `cloneRoot` and `worktreeRoot` → [the dispatcher](dispatcher.md#settings) |
 
 Keys starting with `portal.` are **reserved** for naming portals other than GitHub, and are not read

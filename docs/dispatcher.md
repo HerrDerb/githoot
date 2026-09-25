@@ -51,7 +51,7 @@ it will look right now:
 
 > Right now it would look for clones in `D:\projects` and put worktrees in `D:\worktrees`.
 
-There is no restart: the runner reads `config.txt` on every pass. **Remove** switches it off again and
+There is no restart: the runner reads `config.txt` on every pass. **Uninstall** switches it off again and
 keeps its prompts, state and settings, so installing it later picks up where it left off. Not on
 macOS, where the page says so and offers no Install.
 
@@ -63,7 +63,7 @@ a real pass does not bother to say, which is the whole point of pressing it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `integration.herdr.enabled` | `off` | Installed or not. What Install and Remove write. An unrecognised value leaves it off |
+| `integration.herdr.enabled` | `off` | Installed or not. What Install and Uninstall write. An unrecognised value leaves it off |
 | `integration.herdr.workRequired` | `on` | Start agents for the amber bar: your pull requests that need work |
 | `integration.herdr.requestedReviews` | `on` | Start agents for the red bar: reviews requested of you |
 | `integration.herdr.approved` | `off` | Start agents for the green bar: your approved pull requests |
@@ -84,7 +84,7 @@ read, and says so in the log:
 
 From then on the normal rules apply: a pull request that enters the bar is new, and a comment from
 someone else on one that was already there wakes an agent like any other. Switching a bar off, and
-Remove, forget that baseline, so switching back on is "from now on" again. A bar GitHoot has no
+Uninstall, forget that baseline, so switching back on is "from now on" again. A bar GitHoot has no
 confirmed answer for yet, such as before the first poll, waits: a baseline of nothing would make the
 backlog look new a moment later. Dry run says what the first pass would take as seen.
 

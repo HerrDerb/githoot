@@ -75,6 +75,36 @@ pub struct IntegrationRow<'a> {
     pub name: &'a str,
     pub summary: &'a str,
     pub status: String,
+    /// The button the row carries.
+    pub switch: Switch,
+    /// The line the last Install or Uninstall pressed here left, shown once.
+    pub flash: Option<String>,
+}
+
+/// Which way a row's button goes, or that it has none: where the build cannot run an integration
+/// that is not installed, there is nothing to offer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Switch {
+    Install,
+    Uninstall,
+    None,
+}
+
+/// Install is the one thing a visitor to a page for something not installed came to do, so it is
+/// the full-size button; Uninstall and everything else stay in the small secondary style. `from`
+/// names the page to reload afterwards.
+fn switch_form(token: &str, id: &str, switch: Switch, from: Option<&str>) -> String {
+    let (action, button) = match switch {
+        Switch::Install => ("install", "<button type=\"submit\">Install</button>"),
+        Switch::Uninstall => ("uninstall", "<button class=\"small\" type=\"submit\">Uninstall</button>"),
+        Switch::None => return String::new(),
+    };
+    let from = from.map(|f| format!("<input type=\"hidden\" name=\"from\" value=\"{}\">", esc(f))).unwrap_or_default();
+    format!(
+        "<form method=\"post\" action=\"/{}/integrations/{}\"><input type=\"hidden\" name=\"action\" value=\"{action}\">{from}{button}</form>",
+        esc(token),
+        esc(id)
+    )
 }
 
 /// Everything the generic part of an integration's page shows, as plain data.
@@ -108,6 +138,16 @@ pub struct SettingRow<'a> {
     pub placeholder: &'a str,
     /// `Some(on)` for a flag, drawn as a checkbox; `None` for text.
     pub flag: Option<bool>,
+}
+
+/// The button an integration gets: Uninstall whenever it is installed, even where it cannot run, so
+/// a hand-edited `config.txt` can always be undone from the page; Install only where it can run.
+pub fn integration_switch(installed: bool, unsupported: Option<&str>) -> Switch {
+    match (installed, unsupported) {
+        (true, _) => Switch::Uninstall,
+        (false, None) => Switch::Install,
+        (false, Some(_)) => Switch::None,
+    }
 }
 
 /// "Installed", "Not installed", and the two states that must not read as either.
@@ -782,12 +822,15 @@ pub fn integrations_page(token: &str, rows: &[IntegrationRow], tabs: &Nav) -> St
     h.push_str(&nav(token, tabs));
     h.push_str(
         "<p class=\"sub\">What GitHoot may do with the pull requests it finds, beyond showing them. \
-         Each is off until you install it, and removing one keeps its settings and files.</p>\n",
+         Each is off until you install it, and uninstalling one keeps its settings and files.</p>\n",
     );
     for row in rows {
+        let flash = row.flash.as_deref().map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
+        let switch = switch_form(token, row.id, row.switch, Some("list"));
+        let actions = if switch.is_empty() { String::new() } else { format!("<div class=\"actions\">{switch}</div>") };
         h.push_str(&format!(
             "<div class=\"card\"><div class=\"row\"><strong><a href=\"/{}/integrations/{}\">{}</a></strong> · \
-             <span class=\"portal-status\">{}</span></div><p class=\"sub\">{}</p></div>\n",
+             <span class=\"portal-status\">{}</span></div><p class=\"sub\">{}</p>{flash}{actions}</div>\n",
             esc(token),
             esc(row.id),
             esc(row.name),
@@ -1000,12 +1043,7 @@ fn integration_card(token: &str, v: &IntegrationView) -> String {
         ));
     }
     let flash = v.flash.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
-    let switch = match (v.unsupported, v.installed) {
-        (Some(_), true) => button("remove", "Remove"),
-        (Some(_), false) => String::new(),
-        (None, true) => button("remove", "Remove"),
-        (None, false) => button("install", "Install"),
-    };
+    let switch = switch_form(token, v.id, integration_switch(v.installed, v.unsupported), None);
     let dry = if v.unsupported.is_some() { String::new() } else { button("dryrun", "Dry run") };
     let said = if v.dry_run.is_empty() {
         String::new()
@@ -1665,7 +1703,7 @@ mod tests {
         let html = integration_page("tok", &integration(false, &[]), &NAV);
         assert!(html.contains("portal-status\">Not installed<"), "{html}");
         assert!(html.contains(r#"value="install""#) && html.contains(">Install<"));
-        assert!(!html.contains(r#"value="remove""#), "nothing to remove while it is not installed");
+        assert!(!html.contains(r#"value="uninstall""#), "nothing to uninstall while it is not installed");
         assert!(html.contains(">Dry run<"), "and a way to rehearse before committing to it");
         assert!(html.contains(r#"action="/tok/integrations/herdr""#));
     }
@@ -1674,7 +1712,8 @@ mod tests {
     fn an_installed_integration_offers_the_way_back_out() {
         let html = integration_page("tok", &integration(true, &[]), &NAV);
         assert!(html.contains("portal-status\">Installed<"), "{html}");
-        assert!(html.contains(r#"value="remove""#) && !html.contains(r#"value="install""#), "one switch, not two");
+        assert!(html.contains(r#"value="uninstall""#) && html.contains(">Uninstall<"));
+        assert!(!html.contains(r#"value="install""#) && !html.contains("Remove"), "one switch, not two");
     }
 
     /// Installed with a tool gone must not read as healthy: it is switched on and doing nothing.
@@ -1730,12 +1769,40 @@ mod tests {
         assert!(html.contains("<p>its own part</p>") && html.contains("<strong>Installed.</strong>"));
     }
 
+    fn row(status: &str, switch: Switch) -> IntegrationRow<'static> {
+        IntegrationRow { id: "herdr", name: "Herdr dispatcher", summary: "Starts agents.", status: status.into(), switch, flash: None }
+    }
+
     #[test]
     fn the_integrations_tab_lists_each_with_its_state_and_page() {
-        let rows = [IntegrationRow { id: "herdr", name: "Herdr dispatcher", summary: "Starts agents.", status: "Not installed".into() }];
-        let html = integrations_page("tok", &rows, &Nav { current: Tab::Integrations, muted: 0 });
+        let html = integrations_page("tok", &[row("Not installed", Switch::Install)], &Nav { current: Tab::Integrations, muted: 0 });
         assert!(html.contains(r#"href="/tok/integrations/herdr""#) && html.contains("Not installed"));
         assert!(html.contains(r#"aria-current="page">Integrations<"#));
+    }
+
+    /// Not installed means a button you cannot miss, right in the list, full size rather than the
+    /// small secondary style. It says it came from the list, so the list is what reloads after.
+    #[test]
+    fn an_integration_not_installed_has_a_full_size_install_button_in_the_list() {
+        let html = integrations_page("tok", &[row("Not installed", Switch::Install)], &NAV);
+        assert!(html.contains(r#"<form method="post" action="/tok/integrations/herdr"><input type="hidden" name="action" value="install"><input type="hidden" name="from" value="list"><button type="submit">Install</button></form>"#), "{html}");
+        assert!(!integrations_page("tok", &[row("Not available here", Switch::None)], &NAV).contains("<form"));
+    }
+
+    /// Installed rows offer the way back out, from the same list, and the line the press left.
+    #[test]
+    fn an_installed_integration_can_be_uninstalled_from_the_list() {
+        let r = IntegrationRow { flash: Some("Uninstalled.".into()), ..row("Installed", Switch::Uninstall) };
+        let html = integrations_page("tok", &[r], &NAV);
+        assert!(html.contains(r#"value="uninstall"><input type="hidden" name="from" value="list"><button class="small" type="submit">Uninstall</button>"#), "{html}");
+        assert!(!html.contains(r#"value="install""#) && html.contains("<strong>Uninstalled.</strong>"));
+    }
+
+    #[test]
+    fn install_on_its_own_page_is_full_size_too() {
+        let html = integration_page("tok", &integration(false, &[]), &NAV);
+        assert!(html.contains(r#"value="install"><button type="submit">Install</button>"#), "{html}");
+        assert!(html.contains(r#"<button class="small" type="submit">Dry run</button>"#), "the rehearsal stays secondary");
     }
 
     // ── Mutes on the PR page ──────────────────────────────────────────────────
