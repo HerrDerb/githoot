@@ -35,7 +35,7 @@ be one. That is a mistake you can correct, and the very next pass can then succe
 recorded. It is said once rather than every pass, or a wrong path would write a line per pull
 request every thirty seconds forever.
 
-**The agent works on a branch of its own**, `ght/pr-<number>-<repo>`, cut from the pull request's
+**The agent works on a branch of its own**, `githoot/pr-<number>-<repo>`, cut from the pull request's
 head. Never the pull request's branch itself: that is usually checked out in your own clone, because
 it is usually *your* pull request, and git refuses one branch in two worktrees. The agent is
 assisting you, not replacing you, so it has to be able to start while you are mid-edit. The branch
@@ -62,11 +62,11 @@ a real pass does not bother to say, which is the whole point of pressing it.
 | `dispatcherCloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
 | `dispatcherWorktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
 
-`GHT_CLONE_ROOT` and `GHT_WORKTREE_ROOT` still work, but only as a one-off override for a run
+`GITHOOT_CLONE_ROOT` and `GITHOOT_WORKTREE_ROOT` still work, but only as a one-off override for a run
 started from a shell. The settings come first, deliberately: GitHoot is started from a tray icon, a
 shortcut or autostart, none of which carry a shell's environment.
 
-`GHT_AGENT_KIND` picks the agent (`claude` by default; any kind `herdr agent start --kind` accepts).
+`GITHOOT_AGENT_KIND` picks the agent (`claude` by default; any kind `herdr agent start --kind` accepts).
 
 ### What it needs
 

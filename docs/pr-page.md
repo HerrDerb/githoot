@@ -81,7 +81,7 @@ name to `::1` first. If the IPv6 bind fails the IPv4 one carries on alone and br
 
 ## Why a server and not a file
 
-An HTML file in `~/.githoot-tray/` would be the looser option, not the tighter one. It persists after
+An HTML file in `~/.githoot/` would be the looser option, not the tighter one. It persists after
 the app exits, it is readable by anything running as you and by every browser profile on the machine,
 and it is stale the moment the next poll lands. A render per request cannot go stale, and a token that
 dies with the process bounds what a leaked URL is worth.
@@ -146,7 +146,7 @@ unmuted; their mute ends by itself otherwise.
 arrives as if never seen: the bar lights and the owl hoots. A mute is a snooze, and a snooze that
 ended in silence would be a way to lose a review.
 
-**Mutes are kept on disk**, in `~/.githoot-tray/muted.txt`, one pull request per line, because a mute
+**Mutes are kept on disk**, in `~/.githoot/muted.txt`, one pull request per line, because a mute
 measured in days has to survive the restarts a self-update causes. Expired lines are dropped whenever
 the file is read or written. The links are forms, not links, so a mute is a `POST` behind the same
 `Origin` check as the settings page, and it accepts only the three offered durations and only a pull
@@ -167,5 +167,5 @@ The listener stops when GitHoot does. There is nothing to clean up, and nothing 
 
 **One setting changes both halves of that sentence.** With [`localApi`](local-api.md) on, the
 listener binds at startup rather than on a click, and the port and token are written to
-`~/.githoot-tray/endpoint.json` so a script can find them. It ships off, and off it changes nothing
+`~/.githoot/endpoint.json` so a script can find them. It ships off, and off it changes nothing
 here.

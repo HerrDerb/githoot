@@ -164,7 +164,7 @@ into the file, and a component name GitHub does not publish is dropped rather th
 
 ## Settings
 
-`~/.githoot-tray/config.txt` is created on first run with every setting at its default. An existing
+`~/.githoot/config.txt` is created on first run with every setting at its default. An existing
 file is **never** rewritten wholesale, so your edits are safe — which also means a later version's new keys
 will not appear in it, and the table below is the complete list.
 
@@ -173,12 +173,20 @@ changes exactly one value line: comments, blank lines, spacing and keys this ver
 all survive it byte for byte. If the file has no such line at all — every file written before that key
 existed — the key is appended rather than the file regenerated.
 
-> **Upgrading from `git-system-tray`?** The app was renamed, and with it the asset names, the binary
-> and this directory — settings and log used to live in `~/.github-trayicon/`. Nothing is migrated
-> automatically, so copy your old `config.txt` across if you want to keep it. Install the new release by
-> hand as well: a pre-rename copy still *sees* the new version and offers it, then fails the integrity
-> check with "the signed sums file has no entry for git-system-tray", because the asset it wants is no
-> longer published.
+> **Upgrading from `githoot-tray`?** The app is now plain `githoot`: binary, release assets,
+> repository, this directory and the startup entry. Nothing is migrated, on purpose:
+>
+> - **Install the new release by hand.** A `githoot-tray` copy still sees the new version and offers it,
+>   then fails with "the signed sums file has no entry for githoot-tray", because that asset is no
+>   longer published.
+> - **Rename `~/.githoot-tray/` to `~/.githoot/` before the first start.** That keeps your settings,
+>   mutes, sign-in and dispatcher prompts. Started without it, the new version treats it as a first
+>   run: defaults, a fresh sign-in, and the startup question again.
+> - **Remove the old startup entry**, or the old binary starts next to the new one: the `GitHootTray`
+>   value in Windows startup apps, `~/.config/autostart/githoot-tray.desktop`, or
+>   `~/Library/LaunchAgents/com.githoot.GitHootTray.plist`.
+>
+> From the even older `git-system-tray`, the same applies, with settings in `~/.github-trayicon/`.
 
 | Key | Default | Does |
 |---|---|---|
@@ -276,4 +284,4 @@ app logs a line naming the replacement, but cannot honour the old key — which 
 **Removed in 2.0.0:** the blue "unread notifications" tint, along with `notificationIndication`, the
 separate OAuth credential it needed and the **Open GitHub Notifications** entry. An old
 `notificationIndication` line in your `config.txt` is now simply an unknown key, which has always been
-ignored. `~/.githoot-tray/access_token.txt` and `client_id.txt` are no longer read by anything.
+ignored. `~/.githoot/access_token.txt` and `client_id.txt` are no longer read by anything.

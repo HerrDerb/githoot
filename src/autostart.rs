@@ -29,7 +29,7 @@ use std::path::Path;
 /// One constant for all three platforms: it is the registry value name on Windows, the desktop entry's
 /// `Name` on Linux and the plist `Label`'s tail on macOS. A user looking at any of the three sees the
 /// same word, which is what makes the entry findable when they want it gone.
-const ENTRY_NAME: &str = "GitHootTray";
+const ENTRY_NAME: &str = "GitHoot";
 
 /// Where the entry ends up, named in the prompt so removing it later is not a research task.
 #[cfg(target_os = "windows")]
@@ -74,7 +74,7 @@ pub fn offer_on_first_run(first_run: FirstRun) {
             exe.display()
         );
 
-        if !crate::dialog::confirm_autostart("githoot-tray: start at sign-in", &body) {
+        if !crate::dialog::confirm_autostart("githoot: start at sign-in", &body) {
             infoln!("not starting at sign-in (declined, or no dialog could be shown) — nothing was registered");
             return;
         }
@@ -475,8 +475,8 @@ fn disable_in(run_key: &str) -> Result<(), String> {
 /// The command line the `Run` value holds.
 ///
 /// Always quoted. Windows parses an unquoted `Run` value by trying each space as a possible break, so
-/// `C:\Program Files\GitHoot\githoot-tray.exe` would first be tried as `C:\Program` with
-/// `Files\GitHoot\githoot-tray.exe` as an argument — the classic unquoted-path trap. A path can never
+/// `C:\Program Files\GitHoot\githoot.exe` would first be tried as `C:\Program` with
+/// `Files\GitHoot\githoot.exe` as an argument — the classic unquoted-path trap. A path can never
 /// itself contain a quote on Windows, so wrapping is the whole of the escaping needed.
 #[cfg(target_os = "windows")]
 fn run_command(exe: &Path) -> String {
@@ -846,7 +846,7 @@ fn disable_in(dir: &Path) -> Result<(), String> {
 /// one place the convention is a file name in a shared directory and every other entry in it is named
 /// after its program.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const DESKTOP_FILE: &str = "githoot-tray.desktop";
+const DESKTOP_FILE: &str = "githoot.desktop";
 
 /// `$XDG_CONFIG_HOME/autostart`, falling back to `~/.config/autostart`.
 ///
@@ -900,7 +900,7 @@ fn desktop_entry(exe: &Path) -> String {
 /// Escapes a path for use inside a quoted `Exec` argument.
 ///
 /// The `Exec` value is quoted for the reason the Windows `Run` value is: an unquoted space starts a
-/// new argument, so `/opt/git hoot/githoot-tray` would be launched as `/opt/git` with `hoot/...` as its
+/// new argument, so `/opt/git hoot/githoot` would be launched as `/opt/git` with `hoot/...` as its
 /// first argument. Inside those quotes the desktop entry spec reserves `"`, `` ` ``, `$` and `\`, each
 /// escaped with a backslash — and the backslash goes first, or the escapes the others add would then be
 /// escaped in turn.
@@ -969,8 +969,8 @@ mod windows_tests {
 
     #[test]
     fn the_run_command_is_quoted_so_a_path_with_spaces_survives() {
-        let command = run_command(Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe"));
-        assert_eq!(command, "\"C:\\Program Files\\GitHoot\\githoot-tray.exe\"");
+        let command = run_command(Path::new(r"C:\Program Files\GitHoot\githoot.exe"));
+        assert_eq!(command, "\"C:\\Program Files\\GitHoot\\githoot.exe\"");
     }
 
     /// The `Run` key is **not** guaranteed to exist: on a GitHub `windows-latest` runner it is absent,
@@ -991,7 +991,7 @@ mod windows_tests {
     fn a_string_value_round_trips_through_the_registry() {
         let (key, _cleanup) = fresh_test_key("round-trip", &[]);
 
-        let command = run_command(Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe"));
+        let command = run_command(Path::new(r"C:\Program Files\GitHoot\githoot.exe"));
         key.set_string(ENTRY_NAME, &command).expect("the test key must be writable");
 
         let read_back = key.string(ENTRY_NAME).expect("the value just written must read back");
@@ -1009,7 +1009,7 @@ mod windows_tests {
     fn a_long_non_ascii_path_survives_the_utf16_round_trip() {
         let (key, _cleanup) = fresh_test_key("utf16", &[]);
 
-        let exe = Path::new(r"C:\Users\Jörg Müller\AppData\Local\Programs\GitHoot Tray\githoot-tray.exe");
+        let exe = Path::new(r"C:\Users\Jörg Müller\AppData\Local\Programs\GitHoot\githoot.exe");
         let command = run_command(exe);
         key.set_string(ENTRY_NAME, &command).expect("the test key must be writable");
 
@@ -1062,29 +1062,29 @@ mod windows_tests {
 
     #[test]
     fn a_literal_executable_path_matches_whatever_its_case() {
-        let exe = Path::new(r"C:\Users\me\AppData\Local\Programs\GitHoot Tray\githoot-tray.exe");
-        assert!(refers_to(r"C:\Users\me\AppData\Local\Programs\GitHoot Tray\githoot-tray.exe", exe));
-        assert!(refers_to(r"c:\users\me\appdata\local\programs\githoot tray\GITHOOT-TRAY.EXE", exe));
+        let exe = Path::new(r"C:\Users\me\AppData\Local\Programs\GitHoot\githoot.exe");
+        assert!(refers_to(r"C:\Users\me\AppData\Local\Programs\GitHoot\githoot.exe", exe));
+        assert!(refers_to(r"c:\users\me\appdata\local\programs\githoot\GITHOOT.EXE", exe));
     }
 
     /// The form Windows uses for anything under a shell folder: `{FOLDERID_ProgramFilesX64}\…`.
     #[test]
     fn a_known_folder_token_matches_by_its_tail() {
-        let exe = Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe");
-        assert!(refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\GitHoot\githoot-tray.exe", exe));
+        let exe = Path::new(r"C:\Program Files\GitHoot\githoot.exe");
+        assert!(refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\GitHoot\githoot.exe", exe));
     }
 
-    /// The tail has to match on a separator, or `…\tray.exe` would be satisfied by `…\githoot-tray.exe`
+    /// The tail has to match on a separator, or `…\tray.exe` would be satisfied by `…\githoot.exe`
     /// and this app would promote a different program's icon.
     #[test]
     fn a_tail_that_is_not_on_a_separator_boundary_does_not_match() {
-        let exe = Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe");
+        let exe = Path::new(r"C:\Program Files\GitHoot\githoot.exe");
         assert!(!refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\GitHoot\tray.exe", exe));
     }
 
     #[test]
     fn another_program_does_not_match() {
-        let exe = Path::new(r"C:\Program Files\GitHoot\githoot-tray.exe");
+        let exe = Path::new(r"C:\Program Files\GitHoot\githoot.exe");
         assert!(!refers_to(r"C:\Program Files\Docker\Docker Desktop.exe", exe));
         assert!(!refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\Docker\Docker Desktop.exe", exe));
         // A token with nothing after it names no program at all and must never match everything.
@@ -1171,11 +1171,11 @@ mod macos_tests {
 
     #[test]
     fn the_launch_agent_runs_the_binary_at_load() {
-        let plist = launch_agent(Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot-tray"));
+        let plist = launch_agent(Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot"));
         assert!(plist.starts_with("<?xml"), "must be a plist, got {plist:?}");
         assert!(plist.contains("<key>RunAtLoad</key>\n\t<true/>"), "got {plist:?}");
         assert!(
-            plist.contains("/Applications/GitHoot.app/Contents/MacOS/githoot-tray"),
+            plist.contains("/Applications/GitHoot.app/Contents/MacOS/githoot"),
             "must name the binary, got {plist:?}"
         );
         assert!(plist.contains(ENTRY_NAME), "must carry the shared entry name, got {plist:?}");
@@ -1185,7 +1185,7 @@ mod macos_tests {
     /// `launchd` refuses to load — silently, since nothing in this app reads it back.
     #[test]
     fn a_path_with_xml_significant_characters_is_escaped() {
-        let plist = launch_agent(Path::new("/Users/me/R&D/<app>/githoot-tray"));
+        let plist = launch_agent(Path::new("/Users/me/R&D/<app>/githoot"));
         assert!(plist.contains("R&amp;D/&lt;app&gt;"), "got {plist:?}");
         assert!(!plist.contains("R&D"), "the raw ampersand must not survive, got {plist:?}");
     }
@@ -1195,7 +1195,7 @@ mod macos_tests {
         let dir = std::env::temp_dir().join(format!("githoot-launchagent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot-tray");
+        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot");
         write_launch_agent(&dir, exe).expect("must create the directory and the plist");
 
         let written = std::fs::read_to_string(dir.join(format!("com.githoot.{ENTRY_NAME}.plist")))
@@ -1212,7 +1212,7 @@ mod macos_tests {
     fn a_launch_agent_can_be_written_read_back_and_removed() {
         let dir = std::env::temp_dir().join(format!("githoot-agent-toggle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot-tray");
+        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot");
 
         assert!(!is_enabled_in(&dir), "an empty directory holds no agent");
 
@@ -1234,10 +1234,10 @@ mod unix_tests {
 
     #[test]
     fn the_desktop_entry_is_an_autostart_application_that_runs_the_binary() {
-        let entry = desktop_entry(Path::new("/usr/local/bin/githoot-tray"));
+        let entry = desktop_entry(Path::new("/usr/local/bin/githoot"));
         assert!(entry.starts_with("[Desktop Entry]"), "got {entry:?}");
         assert!(entry.contains("Type=Application"), "got {entry:?}");
-        assert!(entry.contains("Exec=\"/usr/local/bin/githoot-tray\""), "got {entry:?}");
+        assert!(entry.contains("Exec=\"/usr/local/bin/githoot\""), "got {entry:?}");
         assert!(entry.contains(&format!("Name={ENTRY_NAME}")), "got {entry:?}");
         // Without this a GNOME session shows a window-less tray app in its startup list as a broken
         // entry, and some sessions refuse to run it at all.
@@ -1249,11 +1249,11 @@ mod unix_tests {
     /// desktop entry spec, which is otherwise a silently malformed file.
     #[test]
     fn the_exec_key_quotes_and_escapes_the_path() {
-        let entry = desktop_entry(Path::new("/opt/git hoot/githoot-tray"));
-        assert!(entry.contains("Exec=\"/opt/git hoot/githoot-tray\""), "got {entry:?}");
+        let entry = desktop_entry(Path::new("/opt/git hoot/githoot"));
+        assert!(entry.contains("Exec=\"/opt/git hoot/githoot\""), "got {entry:?}");
 
-        let odd = desktop_entry(Path::new(r#"/opt/we"ird\path/githoot-tray"#));
-        assert!(odd.contains(r#"Exec="/opt/we\"ird\\path/githoot-tray""#), "got {odd:?}");
+        let odd = desktop_entry(Path::new(r#"/opt/we"ird\path/githoot"#));
+        assert!(odd.contains(r#"Exec="/opt/we\"ird\\path/githoot""#), "got {odd:?}");
     }
 
     #[test]
@@ -1261,10 +1261,10 @@ mod unix_tests {
         let dir = std::env::temp_dir().join(format!("githoot-autostart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let exe = Path::new("/usr/local/bin/githoot-tray");
+        let exe = Path::new("/usr/local/bin/githoot");
         write_desktop_entry(&dir, exe).expect("must create the directory and the entry");
 
-        let written = std::fs::read_to_string(dir.join("githoot-tray.desktop"))
+        let written = std::fs::read_to_string(dir.join("githoot.desktop"))
             .expect("the entry must be where the session looks for it");
         assert_eq!(written, desktop_entry(exe));
 
@@ -1278,7 +1278,7 @@ mod unix_tests {
     fn a_desktop_entry_can_be_written_read_back_and_removed() {
         let dir = std::env::temp_dir().join(format!("githoot-desktop-toggle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let exe = Path::new("/usr/local/bin/githoot-tray");
+        let exe = Path::new("/usr/local/bin/githoot");
 
         assert!(!is_enabled_in(&dir), "an empty directory holds no entry");
 

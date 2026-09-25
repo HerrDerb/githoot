@@ -1,4 +1,4 @@
-Third-party assets bundled with GitHoot Tray
+Third-party assets bundled with GitHoot
 ============================================
 
 The source code of this project is dedicated to the public domain under The
@@ -18,12 +18,12 @@ Sound effect by elevenlabs.io, obtained from the ElevenLabs free sound-effects
 library <https://elevenlabs.io/sound-effects/free>.
 
 ElevenLabs' free plan requires attribution to elevenlabs.io, which this file
-provides, and permits non-commercial use only. GitHoot Tray is a non-commercial
+provides, and permits non-commercial use only. GitHoot is a non-commercial
 personal project, which is the basis on which the clip is used here.
 
 What that means for you, if you are not the author of this project:
 
-  * Using or modifying GitHoot Tray for non-commercial purposes: fine, keep
+  * Using or modifying GitHoot for non-commercial purposes: fine, keep
     this attribution with it.
 
   * Any commercial use — selling the app, bundling it in a paid product,

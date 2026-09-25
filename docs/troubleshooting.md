@@ -1,7 +1,7 @@
 # Troubleshooting
 
 The tooltip always states what the app currently believes, including *why* it is unsure. Full history is
-appended to `~/.githoot-tray/log.txt` — the only way to see errors on Windows and macOS, where there is
+appended to `~/.githoot/log.txt` — the only way to see errors on Windows and macOS, where there is
 no console. The log never contains a token.
 
 That directory holds the four files worth opening — `config.txt`, `log.txt` and the two credentials — plus
@@ -53,8 +53,8 @@ same check the updater runs before installing anything:
 
 ```bash
 # Compare your download against the signed digest list for its tag.
-curl -LO https://github.com/HerrDerb/githoot-tray/releases/download/vX.Y.Z/sha256sums.txt
-curl -LO https://github.com/HerrDerb/githoot-tray/releases/download/vX.Y.Z/sha256sums.txt.minisig
+curl -LO https://github.com/HerrDerb/githoot/releases/download/vX.Y.Z/sha256sums.txt
+curl -LO https://github.com/HerrDerb/githoot/releases/download/vX.Y.Z/sha256sums.txt.minisig
 minisign -Vm sha256sums.txt \
   -P 'RWSYrhd3sxiQUDZtxm8c+p0iRdj+z+fGQKdLq62ojrmfii2OjCG8PX8D'  # authenticity
 sha256sum -c sha256sums.txt --ignore-missing                    # integrity

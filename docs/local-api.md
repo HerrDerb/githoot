@@ -23,7 +23,7 @@ This hands it over instead, already judged.
 localApi=on
 ```
 
-in `~/.githoot-tray/config.txt`, or the box in the [settings page](menu-and-settings.md#the-settings-page).
+in `~/.githoot/config.txt`, or the box in the [settings page](menu-and-settings.md#the-settings-page).
 **Restart to apply**, because the listener binds once.
 
 Two things then differ from an ordinary run:
@@ -31,7 +31,7 @@ Two things then differ from an ordinary run:
 | | |
 |---|---|
 | The loopback listener | binds at startup, rather than on your first menu click |
-| `~/.githoot-tray/endpoint.json` | written, owner-only, naming the port and this run's token |
+| `~/.githoot/endpoint.json` | written, owner-only, naming the port and this run's token |
 
 Off, neither happens and the route answers `404`.
 
@@ -73,8 +73,8 @@ is a moment with none.
 ## Reading a bar
 
 ```bash
-PORT=$(jq -r .port  ~/.githoot-tray/endpoint.json)
-TOK=$(jq  -r .token ~/.githoot-tray/endpoint.json)
+PORT=$(jq -r .port  ~/.githoot/endpoint.json)
+TOK=$(jq  -r .token ~/.githoot/endpoint.json)
 curl -sS --fail-with-body "http://127.0.0.1:${PORT}/${TOK}/approved/entries"
 ```
 

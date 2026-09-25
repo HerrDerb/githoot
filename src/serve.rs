@@ -5,7 +5,7 @@
 //! on the UI thread — and is simply a third reader of it. The poll thread still owns `PollState`
 //! exclusively, the `mpsc` pipeline is unchanged, and there is still no `Arc<Mutex<AppState>>`.
 //!
-//! Why a server rather than an HTML file written to `~/.githoot-tray/`: a file persists after the
+//! Why a server rather than an HTML file written to `~/.githoot/`: a file persists after the
 //! app exits, is readable by anything running as the user and by every browser profile on the
 //! machine, and goes stale the moment the next poll lands. A render per request cannot go stale, and
 //! a token that dies with the process bounds what a leaked URL is worth.
@@ -2324,7 +2324,7 @@ mod tests {
     /// test says so when it fires.
     ///
     /// Run it with:
-    /// `cargo test --bin githoot-tray the_local_api_answers_over_a_real_loopback_connection -- --ignored --exact`
+    /// `cargo test --bin githoot the_local_api_answers_over_a_real_loopback_connection -- --ignored --exact`
     #[test]
     #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
     fn the_local_api_answers_over_a_real_loopback_connection() {

@@ -1,6 +1,6 @@
 # Starting with your session, and where the icon sits
 
-Two things GitHoot Tray does on the way in, both about being *there* rather than about pull requests.
+Two things GitHoot does on the way in, both about being *there* rather than about pull requests.
 Neither is a `config.txt` key, for the same reason: the operating system already stores the answer, and
 a second copy in a settings file would be one more thing that can disagree with reality.
 
@@ -16,7 +16,7 @@ On a genuinely first run, GitHoot asks:
 > This adds an entry for your account only, under *…*, pointing at *…*
 > You will only be asked this once. Remove the entry there at any time to undo it.
 
-**"First run" means `~/.githoot-tray/config.txt` did not exist and has just been written.** That file is
+**"First run" means `~/.githoot/config.txt` did not exist and has just been written.** That file is
 the app's only record of having met you, so its absence is the one moment GitHoot can be sure it has
 never asked. Every later start finds the file and says nothing.
 
@@ -36,9 +36,9 @@ Nothing is registered for other users of the machine, and nothing needs elevatio
 
 | Platform | What is created | Remove it with |
 |---|---|---|
-| 🪟 Windows | A `GitHootTray` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, holding the quoted path to the `.exe` | **Task Manager › Startup apps**, or **Settings › Apps › Startup** |
-| 🐧 Linux | `$XDG_CONFIG_HOME/autostart/githoot-tray.desktop` (`~/.config/autostart/…` when that is unset) | Delete the file, or use your desktop's own startup-applications tool |
-| 🍎 macOS | `~/Library/LaunchAgents/com.githoot.GitHootTray.plist`, with `RunAtLoad` and no `KeepAlive` | Delete the plist, or **System Settings › General › Login Items** |
+| 🪟 Windows | A `GitHoot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, holding the quoted path to the `.exe` | **Task Manager › Startup apps**, or **Settings › Apps › Startup** |
+| 🐧 Linux | `$XDG_CONFIG_HOME/autostart/githoot.desktop` (`~/.config/autostart/…` when that is unset) | Delete the file, or use your desktop's own startup-applications tool |
+| 🍎 macOS | `~/Library/LaunchAgents/com.githoot.GitHoot.plist`, with `RunAtLoad` and no `KeepAlive` | Delete the plist, or **System Settings › General › Login Items** |
 
 The path written is wherever the running binary is, which is also where the self-updater installs, so
 an update does not invalidate the entry. A build inside `target/` is registered too if you say yes to
@@ -88,7 +88,7 @@ Set `logLevel=info` in `config.txt` to see any of this. All of it is best effort
 fail in a way that stops the app.
 
 ```
-registered to start at sign-in: C:\Users\you\AppData\Local\Programs\GitHoot Tray\githoot-tray.exe
+registered to start at sign-in: C:\Users\you\AppData\Local\Programs\GitHoot\githoot.exe
 not starting at sign-in (declined, or no dialog could be shown) — nothing was registered
 tray icon set to always show (1 matching entry under Control Panel\NotifyIconSettings); Windows may only apply it from the next sign-in
 leaving the tray icon's visibility alone — it has already been decided

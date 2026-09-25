@@ -16,7 +16,7 @@ pub use crate::portal::types::{
     BotReview, CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict,
 };
 
-const AGENT: &str = "githoot-tray";
+const AGENT: &str = "githoot";
 
 /// How many search hits the changes-requested GraphQL poll inspects.
 ///

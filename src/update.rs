@@ -33,17 +33,17 @@ use serde::Deserialize;
 
 /// The repository the updater talks to. Hard-coded rather than configurable: this is the app updating
 /// *itself*, and a settable update source would be a way to talk someone into installing anything.
-const REPO: &str = "HerrDerb/githoot-tray";
+const REPO: &str = "HerrDerb/githoot";
 
 /// The same repository as a page a browser can open, for the tray's Settings entry.
 ///
 /// Here rather than next to the menu wording in `state`, because this module already owns *which*
 /// repository this app is: one literal, and a test pinning this URL to `REPO`, so the menu cannot end
 /// up offering a fork or an old name the updater never installs from.
-pub const REPOSITORY_URL: &str = "https://github.com/HerrDerb/githoot-tray";
+pub const REPOSITORY_URL: &str = "https://github.com/HerrDerb/githoot";
 
 /// Matches the User-Agent the other GitHub-facing modules send.
-const AGENT: &str = "githoot-tray";
+const AGENT: &str = "githoot";
 
 /// How many releases to ask for. The changelog spans every release between the installed version and
 /// the newest, so this also bounds how far back that can reach — someone thirty releases behind gets a
@@ -60,11 +60,11 @@ const RELEASES_PER_PAGE: u32 = 30;
 /// Silicon under Rosetta reports `x86_64`, so it correctly declines instead of installing an
 /// aarch64 bundle over itself.
 const ASSET: Option<&str> = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-    Some("githoot-tray")
+    Some("githoot")
 } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-    Some("githoot-tray.exe")
+    Some("githoot.exe")
 } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-    Some("githoot-tray-macos-aarch64.zip")
+    Some("githoot-macos-aarch64.zip")
 } else {
     None
 };
@@ -376,7 +376,7 @@ impl ScratchDir {
         let parent = target
             .parent()
             .ok_or_else(|| UpdateError::Local("the install target has no parent directory".into()))?;
-        let dir = parent.join(format!(".githoot-tray-update-{}", std::process::id()));
+        let dir = parent.join(format!(".githoot-update-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)
             .map_err(|e| UpdateError::Local(format!("could not create a staging directory: {e}")))?;
@@ -650,7 +650,7 @@ fn probe_writable(target: &Path) -> Result<(), UpdateError> {
     let parent = target
         .parent()
         .ok_or_else(|| UpdateError::Local("the install target has no parent directory".into()))?;
-    let probe = parent.join(format!(".githoot-tray-probe-{}", std::process::id()));
+    let probe = parent.join(format!(".githoot-probe-{}", std::process::id()));
     let result = std::fs::write(&probe, b"x");
     let _ = std::fs::remove_file(&probe);
     result.map_err(|e| {
@@ -664,7 +664,7 @@ fn probe_writable(target: &Path) -> Result<(), UpdateError> {
 
 /// Where this binary lives, and a refusal if that looks like a build tree.
 ///
-/// Clobbering `target/release/githoot-tray` would mean an update silently overwriting a developer's
+/// Clobbering `target/release/githoot` would mean an update silently overwriting a developer's
 /// own build, which is both surprising and pointless since the next `cargo build` undoes it.
 fn resolve_current_exe() -> Result<PathBuf, UpdateError> {
     let exe = std::env::current_exe()
@@ -701,7 +701,7 @@ pub fn install(available: &Available) -> Result<RestartPlan, UpdateError> {
          from GitHub, replaces this app, and restarts it.",
         available.version, VERSION, available.notes
     );
-    if !crate::dialog::confirm_install("githoot-tray: update available", &prompt) {
+    if !crate::dialog::confirm_install("githoot: update available", &prompt) {
         return Err(UpdateError::Declined);
     }
 
@@ -755,7 +755,7 @@ pub fn restart_target() -> Result<RestartPlan, String> {
 fn install_target(exe: &Path) -> Result<PathBuf, UpdateError> {
     #[cfg(target_os = "macos")]
     {
-        // `…/Foo.app/Contents/MacOS/githoot-tray` → `…/Foo.app`. The whole bundle is replaced rather
+        // `…/Foo.app/Contents/MacOS/githoot` → `…/Foo.app`. The whole bundle is replaced rather
         // than the inner binary, because CI's ad-hoc signature covers `Info.plist`, which carries a
         // per-release version string — dropping a new binary into an old bundle invalidates it.
         let bundle = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent());
@@ -879,7 +879,7 @@ fn install_verified(
         Err(e) => errorln!("could not run codesign ({e}) — continuing on the signature check alone"),
     }
 
-    let inner = extracted.join("Contents/MacOS/githoot-tray");
+    let inner = extracted.join("Contents/MacOS/githoot");
     smoke_test(&inner, &available.version)?;
 
     let backup = with_suffix(target, ".old");
@@ -935,7 +935,7 @@ fn extract_bundle(payload: &Path, into: &Path) -> Result<PathBuf, UpdateError> {
         ));
     }
 
-    // The archive holds `githoot-tray.app` and `README.txt` side by side at the top level, so this
+    // The archive holds `githoot.app` and `README.txt` side by side at the top level, so this
     // looks for the bundle rather than assuming a single entry.
     let entries = std::fs::read_dir(into).map_err(|e| UpdateError::Local(e.to_string()))?;
     for entry in entries.flatten() {
@@ -983,7 +983,7 @@ pub fn clean_up_after_update() {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(".githoot-tray-update-") {
+            if name.starts_with(".githoot-update-") {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
@@ -1119,11 +1119,8 @@ mod tests {
 
     #[test]
     fn asset_urls_point_at_the_tag_not_at_latest() {
-        let url = asset_url("v1.4.0", "githoot-tray");
-        assert_eq!(
-            url,
-            "https://github.com/HerrDerb/githoot-tray/releases/download/v1.4.0/githoot-tray"
-        );
+        let url = asset_url("v1.4.0", "githoot");
+        assert_eq!(url, "https://github.com/HerrDerb/githoot/releases/download/v1.4.0/githoot");
         assert!(url.starts_with("https://"), "the scheme must never be interpolated");
     }
 
@@ -1313,9 +1310,9 @@ mod tests {
     #[test]
     fn asset_selection_matches_the_published_matrix() {
         let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("linux", "x86_64") => Some("githoot-tray"),
-            ("windows", "x86_64") => Some("githoot-tray.exe"),
-            ("macos", "aarch64") => Some("githoot-tray-macos-aarch64.zip"),
+            ("linux", "x86_64") => Some("githoot"),
+            ("windows", "x86_64") => Some("githoot.exe"),
+            ("macos", "aarch64") => Some("githoot-macos-aarch64.zip"),
             _ => None,
         };
         assert_eq!(ASSET, expected);

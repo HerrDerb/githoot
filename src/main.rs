@@ -1,7 +1,7 @@
 // On Windows, use the "windows" subsystem so no console window is created.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-//! Main entry point for the GitHoot Tray application.
+//! Main entry point for the GitHoot application.
 //! Handles cross-platform initialization and tray icon setup.
 
 mod api;
@@ -196,9 +196,9 @@ fn load_credential(portal: &mut dyn Portal) -> CredentialState {
 /// anything, so its stdin fallback would block the app before the tray appears.
 fn report_setup_failure(msg: &str) {
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    dialog::message("githoot-tray: PR status", msg);
+    dialog::message("githoot: PR status", msg);
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    eprintln!("\ngithoot-tray: PR status disabled\n\n{msg}\n");
+    eprintln!("\ngithoot: PR status disabled\n\n{msg}\n");
 }
 
 /// Reports a failure without blocking the thread the menu runs on.
@@ -220,7 +220,7 @@ fn report_in_background(title: &'static str, message: String) {
 /// Creates the directory if it does not exist.
 fn get_app_asset_path() -> Result<std::path::PathBuf, String> {
     let user_home = dirs::home_dir().ok_or("could not find home directory")?;
-    let assets_path = user_home.join(".githoot-tray");
+    let assets_path = user_home.join(".githoot");
     std::fs::create_dir_all(&assets_path)
         .map_err(|e| format!("failed to create {}: {e}", assets_path.display()))?;
     Ok(assets_path)
@@ -280,7 +280,7 @@ fn main() {
     let copilot = config::Switch::new(config.copilot_reviews);
     let portals = build_portals(&config, &app_asset_path, &copilot);
 
-    let mut indicator = AppIndicator::new("githoot_tray", "");
+    let mut indicator = AppIndicator::new("githoot", "");
     indicator.set_status(AppIndicatorStatus::Active);
     indicator.set_icon(icons.get(false, false, false, false, false).as_str());
 
@@ -378,7 +378,7 @@ fn main() {
         if let Err(e) = config::set_sound(&hoot_config_path, on) {
             errorln!("could not save the hoot setting ({e})");
             report_in_background(
-                "githoot-tray: could not save the setting",
+                "githoot: could not save the setting",
                 format!(
                     "The hoot is {} for now, but the setting could not be written, so the next start \
                      will not remember it.\n\n{e}",
@@ -422,7 +422,7 @@ fn main() {
         if let Err(e) = config::set_copilot_reviews(&copilot_config_path, on) {
             errorln!("could not save the Copilot setting ({e})");
             report_in_background(
-                "githoot-tray: could not save the setting",
+                "githoot: could not save the setting",
                 format!(
                     "Copilot comments {} counted for now, but the setting could not be written, so \
                      the next start will not remember it.\n\n{e}",
@@ -454,7 +454,7 @@ fn main() {
                 // app not being there after a sign-in weeks later, which nobody connects back to this.
                 errorln!("could not change the startup entry ({e})");
                 report_in_background(
-                    "githoot-tray: could not change startup",
+                    "githoot: could not change startup",
                     format!("The startup entry was not changed.\n\n{e}"),
                 );
                 autostart_reverting.set(true);
@@ -671,7 +671,7 @@ fn exec_into(plan: &update::RestartPlan) -> ! {
         errorln!("the previous version would not start either ({error})");
     }
     dialog::report(
-        "githoot-tray: restart failed",
+        "githoot: restart failed",
         "The update was installed but the app could not restart. Start it again by hand.",
     );
     std::process::exit(1);
@@ -690,7 +690,7 @@ fn exec_into(plan: &update::RestartPlan) -> ! {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn fatal(message: &str) -> ! {
     errorln!("fatal: {message}");
-    dialog::message("githoot-tray", message);
+    dialog::message("githoot", message);
     std::process::exit(1);
 }
 
@@ -727,7 +727,7 @@ fn main() {
         use winapi::um::errhandlingapi::{GetLastError, SetLastError};
         use winapi::um::synchapi::CreateMutexW;
 
-        let name: Vec<u16> = "Local\\GitHootTray\0".encode_utf16().collect();
+        let name: Vec<u16> = "Local\\GitHoot\0".encode_utf16().collect();
         SetLastError(0);
         let handle = CreateMutexW(null_mut(), 0, name.as_ptr());
 
@@ -735,7 +735,7 @@ fn main() {
             eprintln!("Warning: could not create single-instance mutex (err {})", GetLastError());
         } else if GetLastError() == 0xB7 {
             // ERROR_ALREADY_EXISTS — another instance owns the mutex
-            dialog::message("Already Running", "githoot-tray is already running.");
+            dialog::message("Already Running", "githoot is already running.");
             return;
         }
         // On a fresh mutex (first instance) GetLastError() is 0 — fall through.
@@ -745,7 +745,7 @@ fn main() {
         Ok(path) => path,
         Err(e) => {
             // Not `fatal`: the log has no home yet, since finding that home is what just failed.
-            dialog::message("githoot-tray", &format!("Fatal: {e}"));
+            dialog::message("githoot", &format!("Fatal: {e}"));
             std::process::exit(1);
         }
     };
@@ -1213,7 +1213,7 @@ fn main() {
                 // but it would be one about the next start, which is what the user just asked for.
                 errorln!("could not save the hoot setting ({e})");
                 report_in_background(
-                    "githoot-tray: could not save the setting",
+                    "githoot: could not save the setting",
                     format!(
                         "The hoot is {} for now, but the setting could not be written, so the next \
                          start will not remember it.\n\n{e}",
@@ -1241,7 +1241,7 @@ fn main() {
             if let Err(e) = config::set_copilot_reviews(&self.app_asset_path, on) {
                 errorln!("could not save the Copilot setting ({e})");
                 report_in_background(
-                    "githoot-tray: could not save the setting",
+                    "githoot: could not save the setting",
                     format!(
                         "Copilot comments {} counted for now, but the setting could not be written, \
                          so the next start will not remember it.\n\n{e}",
@@ -1267,7 +1267,7 @@ fn main() {
                 Err(e) => {
                     errorln!("could not change the startup entry ({e})");
                     report_in_background(
-                        "githoot-tray: could not change startup",
+                        "githoot: could not change startup",
                         format!("The startup entry was not changed.\n\n{e}"),
                     );
                     // Back to what the OS actually says, which after a failure is what it said before.
@@ -1305,7 +1305,7 @@ fn main() {
                         let _ = std::fs::rename(backup, &plan.target);
                     }
                     dialog::report(
-                        "githoot-tray: update failed",
+                        "githoot: update failed",
                         &format!(
                             "The update was installed but would not start, so the previous version \
                              has been put back.\n\n{e}"

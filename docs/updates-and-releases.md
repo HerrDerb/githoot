@@ -30,7 +30,7 @@ bytes.
 ## If a restart is interrupted
 
 On Linux the swap is one atomic `rename`, so the binary is never missing. On Windows and macOS it is
-necessarily two renames, and a crash between them leaves `githoot-tray.exe.old` (or `.app.old`) with
+necessarily two renames, and a crash between them leaves `githoot.exe.old` (or `.app.old`) with
 nothing at the original name. The app cannot repair that — the repairer is the missing file. Rename the
 `.old` back. The recovery line is logged *before* the swap starts, so it is there to find.
 
@@ -46,7 +46,7 @@ renamed without breaking updates from every release already published.
 
 ## Version numbers
 
-The binary reports the git tag it was built from, passed in by CI as `GHT_VERSION`, not `Cargo.toml`'s
+The binary reports the git tag it was built from, passed in by CI as `GITHOOT_VERSION`, not `Cargo.toml`'s
 version. A local build has no tag and falls back to `Cargo.toml`, so local and release builds of the same
 commit can report different versions. Deliberate: a local build is not a release.
 
@@ -55,13 +55,13 @@ commit can report different versions. Deliberate: a local build is not a release
 
 ## Releases
 
-Download from the [Releases](https://github.com/HerrDerb/githoot-tray/releases) page.
+Download from the [Releases](https://github.com/HerrDerb/githoot/releases) page.
 
 | Platform | Asset |
 |---|---|
-| Windows x86-64 | `githoot-tray.exe` |
-| Linux x86-64 | `githoot-tray` |
-| macOS Apple Silicon | `githoot-tray-macos-aarch64.zip` |
+| Windows x86-64 | `githoot.exe` |
+| Linux x86-64 | `githoot` |
+| macOS Apple Silicon | `githoot-macos-aarch64.zip` |
 | All | `sha256sums.txt`, `sha256sums.txt.minisig` |
 
 Only those three are built. On anything else — Arm Linux, an Intel Mac — the updater reports that there is
@@ -74,17 +74,17 @@ On macOS the bare binary takes a Dock icon and an app menu, because `LSUIElement
 release workflow runs the same script you can run locally, so local and released bundles are identical:
 
 ```bash
-scripts/bundle-macos.sh target/release/githoot-tray dist 1.6.0
-open dist/githoot-tray.app
+scripts/bundle-macos.sh target/release/githoot dist 1.6.0
+open dist/githoot.app
 ```
 
 The bundle is ad-hoc signed, not notarized (that needs a paid Apple account), so Gatekeeper quarantines a
 download. Clear it once:
 
 ```bash
-unzip githoot-tray-macos-aarch64.zip
-xattr -dr com.apple.quarantine githoot-tray.app
-open githoot-tray.app
+unzip githoot-macos-aarch64.zip
+xattr -dr com.apple.quarantine githoot.app
+open githoot.app
 ```
 
 The icon then appears in the menu bar with no Dock icon. It keeps its colour rather than using a macOS
@@ -97,7 +97,7 @@ on all three platforms. Two checks are worth running before the push that trigge
 catch things a plain `cargo test` on Linux cannot:
 
 ```
-cargo build --target x86_64-pc-windows-msvc --bin githoot-tray
+cargo build --target x86_64-pc-windows-msvc --bin githoot
 ```
 
 **`cargo build`, not `cargo check`.** Roughly a third of this app is behind `#[cfg(windows)]` or

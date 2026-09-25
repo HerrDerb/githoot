@@ -1,10 +1,10 @@
 [package]
-name = "githoot-tray"
+name = "githoot"
 version = "2.4.0"
 edition = "2024"
 
 [[bin]]
-name = "githoot-tray"
+name = "githoot"
 path = "src/main.rs"
 
 [dependencies]

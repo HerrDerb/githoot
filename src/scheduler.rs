@@ -771,7 +771,7 @@ fn run_poll_loop(
                                             infoln!("update declined by the user");
                                         }
                                         Err(e) => crate::dialog::report(
-                                            "githoot-tray: update failed",
+                                            "githoot: update failed",
                                             &format!(
                                                 "The update was not installed and the current \
                                                  version is untouched.\n\n{e}"

@@ -19,7 +19,7 @@ Commit only when I ask. Push only when I ask.
 
 ## Releasing
 
-The tag is the source of truth for a release, not `Cargo.toml` — CI injects it as `GHT_VERSION`. The
+The tag is the source of truth for a release, not `Cargo.toml` — CI injects it as `GITHOOT_VERSION`. The
 ritual, as the history shows it:
 
 1. Land the change.

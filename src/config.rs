@@ -1,4 +1,4 @@
-//! User-editable settings: `~/.githoot-tray/config.txt`.
+//! User-editable settings: `~/.githoot/config.txt`.
 //!
 //! One `key=value` per line, `#` comments and blank lines ignored — the same tolerant shape
 //! `access_token.rs` already uses for `client_id.txt`, so there is nothing new to explain to
@@ -601,7 +601,7 @@ fn default_config() -> String {
         .collect();
     let others = others.join(", ");
     format!(
-        "# githoot-tray settings\n\
+        "# githoot settings\n\
          #\n\
          # One key=value per line. Lines starting with # are ignored. Anything not recognised as an\n\
          # off value (off, false, 0, no) leaves the setting at its default, so a typo cannot silently\n\
@@ -670,7 +670,7 @@ fn default_config() -> String {
          {KEY_CLONE_ROOT}=\n\
          \n\
          # Where the dispatcher puts the worktree it makes for each pull request. Empty means\n\
-         # ~/worktrees. One directory per pull request, named ght/pr-<number>-<repo>.\n\
+         # ~/worktrees. One directory per pull request, named githoot/pr-<number>-<repo>.\n\
          {KEY_WORKTREE_ROOT}=\n"
     )
 }

@@ -116,7 +116,7 @@ pub fn check(client: &Client, base: &str, watched: &[String]) -> Result<HealthRe
     let response = client
         .get(&url)
         .header(reqwest::header::ACCEPT, "application/json")
-        .header(reqwest::header::USER_AGENT, "githoot-tray")
+        .header(reqwest::header::USER_AGENT, "githoot")
         .send()
         .map_err(|e| format!("could not reach the status page: {e}"))?;
 

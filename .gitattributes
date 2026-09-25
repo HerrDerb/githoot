@@ -20,8 +20,3 @@
 # at install time, so what is in the working tree is what a user's machine gets. It is also the one
 # file here whose comment syntax forbids a stray character; keeping it LF keeps its diffs honest.
 *.xml text eol=lf
-
-# The two dispatcher scripts have no extension, so `*.sh` above does not reach them. They are bash,
-# they ship inside the binary, and a carriage return in the shebang is `bad interpreter: ...^M`.
-contrib/ght-dispatch text eol=lf
-contrib/ght-dispatch-loop text eol=lf

@@ -24,7 +24,7 @@
 //!     diff and the comments itself, with `gh`, under your credential.
 //!   * The prompts are files you own, and clearing one restores the shipped default.
 //!   * Each version of a pull request is looked at exactly once, recorded whatever the outcome.
-//!   * The agent works on a branch of its own, `ght/<slug>`, never the pull request's.
+//!   * The agent works on a branch of its own, `githoot/<slug>`, never the pull request's.
 //!
 //! What GitHoot knows it no longer re-fetches: the bars come from `scheduler::pr_snapshot`, the
 //! same judgement the icon and the pages use. The local API is no longer part of this path at all.
@@ -489,7 +489,7 @@ fn start(home: &Path, t: &Target, slug: &str, settings: &Settings, template: &st
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
     let worktree = settings.worktree(slug);
     let worktree_str = worktree.to_string_lossy().to_string();
-    let own = format!("ght/{slug}");
+    let own = format!("githoot/{slug}");
 
     if settings.dry_run {
         return Ok(format!(
@@ -696,7 +696,7 @@ pub fn last_dry_run() -> Vec<String> {
 /// `config.txt` first, then the environment, then a default under your home directory.
 ///
 /// The environment comes second rather than first because it is the exception: it is there for a
-/// one-off `GHT_CLONE_ROOT=... githoot-tray` while trying something, and a value somebody wrote in
+/// one-off `GITHOOT_CLONE_ROOT=... githoot` while trying something, and a value somebody wrote in
 /// `config.txt` should not be quietly overridden by a stale variable in a shell profile.
 fn settings_now(app_asset_path: &Path, dry_run: bool) -> Settings {
     let cfg = crate::config::Config::load(app_asset_path).0;
@@ -708,9 +708,9 @@ fn settings_now(app_asset_path: &Path, dry_run: bool) -> Settings {
         std::env::var_os(env).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()).unwrap_or(fallback)
     };
     Settings {
-        clone_root: pick(&cfg.clone_root, "GHT_CLONE_ROOT", home.join("projects")),
-        worktree_root: pick(&cfg.worktree_root, "GHT_WORKTREE_ROOT", home.join("worktrees")),
-        agent_kind: std::env::var("GHT_AGENT_KIND").unwrap_or_else(|_| "claude".to_string()),
+        clone_root: pick(&cfg.clone_root, "GITHOOT_CLONE_ROOT", home.join("projects")),
+        worktree_root: pick(&cfg.worktree_root, "GITHOOT_WORKTREE_ROOT", home.join("worktrees")),
+        agent_kind: std::env::var("GITHOOT_AGENT_KIND").unwrap_or_else(|_| "claude".to_string()),
         dry_run,
     }
 }

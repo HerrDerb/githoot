@@ -1,4 +1,4 @@
-//! Muted pull requests: `~/.githoot-tray/muted.txt`.
+//! Muted pull requests: `~/.githoot/muted.txt`.
 //!
 //! A mute takes one pull request out of its bar for a fixed time, 3, 7 or 30 days, chosen from a link
 //! on the PR page. While muted it does not light the bar, does not count, does not hoot, and the

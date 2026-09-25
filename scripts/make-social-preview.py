@@ -172,7 +172,7 @@ def banner() -> None:
 
     d = ImageDraw.Draw(img)
     x = 560
-    d.text((x, 201), "GitHoot Tray", font=font(SANS_BOLD, 88), fill=TITLE, anchor="ls")
+    d.text((x, 201), "GitHoot", font=font(SANS_BOLD, 88), fill=TITLE, anchor="ls")
     d.text((x, 265), "The owl that watches your pull requests", font=font(SANS, 34), fill=MUTED, anchor="ls")
     d.text((x, 313), "and hoots the moment one needs you.", font=font(SANS, 34), fill=MUTED, anchor="ls")
 

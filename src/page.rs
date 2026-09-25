@@ -661,7 +661,7 @@ pub fn settings_page(cfg: &crate::config::Config, token: &str, restarts: &[&str]
         cfg.local_api,
     ));
     // The one box that makes GitHoot act rather than show. The label says what it will *do*, not
-    // what it enables, because somebody finding an unexpected `ght/` branch tomorrow has to be
+    // what it enables, because somebody finding an unexpected `githoot/` branch tomorrow has to be
     // able to trace it back to a line they deliberately ticked.
     h.push_str(&checkbox(
         "dispatcher",
@@ -1008,7 +1008,7 @@ fn dispatcher_card(d: &DispatcherView, token: &str) -> String {
     };
     format!(
         "<h2 class=\"section\">Agent dispatcher</h2>
-         <div class=\"card\"><div class=\"row\"><strong>Dispatcher</strong> · <span class=\"portal-status\">{status}</span></div>         <p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request that needs you,          on a branch of its own, under your own <code>gh</code>. It needs <code>herdr</code>, <code>gh</code> and          <code>git</code>. This is the only thing GitHoot does that is not reading, so          <a href=\"https://github.com/HerrDerb/githoot-tray/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code>.          Set <code>dispatcherCloneRoot</code> in <code>config.txt</code> if your clones are elsewhere.</p>         {notes}{message}{dry}{said}</div>
+         <div class=\"card\"><div class=\"row\"><strong>Dispatcher</strong> · <span class=\"portal-status\">{status}</span></div>         <p class=\"sub\">Starts a <a href=\"https://herdr.dev\">Herdr</a> agent for each pull request that needs you,          on a branch of its own, under your own <code>gh</code>. It needs <code>herdr</code>, <code>gh</code> and          <code>git</code>. This is the only thing GitHoot does that is not reading, so          <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code>.          Set <code>dispatcherCloneRoot</code> in <code>config.txt</code> if your clones are elsewhere.</p>         {notes}{message}{dry}{said}</div>
 {}",
         esc(d.clone_root),
         esc(d.worktree_root),

@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="docs/social-preview.png" alt="GitHoot Tray — the owl that watches your pull requests" width="760">
+<img src="docs/social-preview.png" alt="GitHoot — the owl that watches your pull requests" width="760">
 
 ### A tray owl that watches your pull requests and hoots the moment one needs you.
 
-[![Release](https://img.shields.io/github/v/release/HerrDerb/githoot-tray?label=release&color=1ac94a)](../../releases/latest)
-[![CI](https://github.com/HerrDerb/githoot-tray/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
-[![Downloads](https://img.shields.io/github/downloads/HerrDerb/githoot-tray/total?label=downloads&color=00a0ff)](../../releases)
+[![Release](https://img.shields.io/github/v/release/HerrDerb/githoot?label=release&color=1ac94a)](../../releases/latest)
+[![CI](https://github.com/HerrDerb/githoot/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/HerrDerb/githoot/total?label=downloads&color=00a0ff)](../../releases)
 [![License](https://img.shields.io/badge/license-Unlicense-24292f)](LICENSE)
 ![Platforms](https://img.shields.io/badge/Linux%20%7C%20Windows%20%7C%20macOS-24292f)
 
@@ -46,14 +46,17 @@ device code is already on your clipboard when the dialog appears.
 
 | Platform | Asset |
 |---|---|
-| 🪟 Windows x86-64 | [`githoot-tray.exe`](../../releases/latest) |
-| 🐧 Linux x86-64 | [`githoot-tray`](../../releases/latest) |
-| 🍎 macOS Apple Silicon | [`githoot-tray-macos-aarch64.zip`](../../releases/latest) |
+| 🪟 Windows x86-64 | [`githoot.exe`](../../releases/latest) |
+| 🐧 Linux x86-64 | [`githoot`](../../releases/latest) |
+| 🍎 macOS Apple Silicon | [`githoot-macos-aarch64.zip`](../../releases/latest) |
+
+> **Coming from `githoot-tray`?** Install this one by hand, once, and rename `~/.githoot-tray/` to
+> `~/.githoot/` before its first start → [the three steps](docs/menu-and-settings.md#settings).
 
 Or build it:
 
 ```bash
-cargo build --release          # -> target/release/githoot-tray
+cargo build --release          # -> target/release/githoot
 ```
 
 <details>
@@ -64,7 +67,7 @@ yet, the owl wears a red exclamation and the menu offers **Authenticate GitHub P
 when it suits you. That works straight away for your own account and public repos. For a private
 org's repos, the GitHub App has to be [**installed** on that org](docs/pr-status.md#why-a-github-app).
 
-`~/.githoot-tray/config.txt` is written on first run with every setting at its default.
+`~/.githoot/config.txt` is written on first run with every setting at its default.
 
 **A first run also asks once whether to start GitHoot when you sign in** — Windows `Run` value, XDG
 autostart entry or macOS Launch Agent, for your account only, removable with your OS's own startup
@@ -74,7 +77,7 @@ only ever fills in a blank and never overrides a choice you have made →
 [the whole thing](docs/startup.md).
 
 **macOS:** the bundle is ad-hoc signed, not notarized, so clear the quarantine flag once —
-`xattr -dr com.apple.quarantine githoot-tray.app`. The bare binary takes a Dock icon, so use
+`xattr -dr com.apple.quarantine githoot.app`. The bare binary takes a Dock icon, so use
 `scripts/bundle-macos.sh` for a local build. **Windows:** Defender's ML models
 [sometimes flag it](docs/troubleshooting.md#windows-defender-may-flag-the-binary), and every release
 ships a signed digest list so you can check the download rather than take anyone's word for it.
@@ -102,7 +105,7 @@ are fixed, so a bar always means the same thing → [the whole design](docs/icon
 ## Configure it
 
 The hoot and starting at sign-in are checkboxes under the menu's **Settings**, and take effect the
-moment you click them. Everything else lives in `~/.githoot-tray/config.txt`, one `key=value` per line;
+moment you click them. Everything else lives in `~/.githoot/config.txt`, one `key=value` per line;
 **Settings ▸ Open settings file** opens it and offers a restart once your edits settle.
 
 ```ini
@@ -165,7 +168,7 @@ were drawn for this project.
 One exception, listed in [NOTICE](NOTICE): `assets/hoot.mp3` is a sound effect by
 [elevenlabs.io](https://elevenlabs.io/sound-effects/free), used under their free plan, which requires
 attribution and permits non-commercial use only. This project is non-commercial, so that is the basis
-it is used on here — but a commercial use of GitHoot Tray needs its own licence for that clip, or a
+it is used on here — but a commercial use of GitHoot needs its own licence for that clip, or a
 replacement file. Nothing in the code cares which clip is at that path.
 
 > **Built with AI assistance** — specifically Claude (Anthropic), driven through Claude Code, which
