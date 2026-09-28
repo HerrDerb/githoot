@@ -1,8 +1,9 @@
 # Portals
 
-GitHoot watches **portals**: the code forges that hold your pull requests. Today there is one, GitHub,
-and a GitHub-only install looks and behaves exactly as it did before this seam existed. The seam is
-there so GitLab and Bitbucket Cloud can arrive as one new directory each, not as edits across the app.
+GitHoot watches **portals**: the code forges that hold your pull requests. There are two, GitHub and
+GitLab, and a GitHub-only install looks and behaves exactly as it did before this seam existed. GitLab
+arrived as one new directory plus a config section, which was the test the seam was built to pass;
+what it taught the seam is under [What GitLab changed](#what-gitlab-changed).
 
 ## The shape
 
@@ -18,10 +19,14 @@ hoot ledger, the tray wording, the PR page, the poll loop — speaks one vocabul
   says how it is doing when it publishes a status page. `PortalInfo` is what the rest of the app needs
   to know without holding the portal: its name, which URLs may become links, where its inbox is, what
   it is capable of, and how slowly it wants to be asked.
-- `portal::github` is the first adapter: the GraphQL client, the GitHub App device flow, the three
-  Search queries and the rule that judges each axis. `portal::statuspage` reads an Atlassian
-  Statuspage, which GitHub, GitLab and Bitbucket all run, so it takes a base URL rather than knowing
-  one.
+- `portal::github` is the first adapter: the GraphQL client, the GitHub App's client id and
+  installations check, the three Search queries and the rule that judges each axis.
+- `portal::gitlab` is the second: one GraphQL document for all three axes, and GitLab's own review
+  rules (see below).
+- `portal::oauth` is the device flow (RFC 8628) both adapters sign in with: the credential file, the
+  polling loop and the refresh grant. A portal hands it its endpoints, client id, scope and file.
+- `portal::statuspage` reads an Atlassian Statuspage. GitHub runs one; **GitLab does not** (its status
+  page is on status.io), so the GitLab portal publishes no status.
 - `portal::fake` is a test double that imports nothing from `portal::github`. It compiles only if
   the trait can be implemented without a single GitHub type, which is the whole promise of the seam.
 
@@ -49,8 +54,8 @@ not a seam:
 
 ## Several portals at once
 
-The design is for several portals live in one tray, and the code is written that way; only one is
-configured today.
+Several portals live in one tray. Configure two and each gets its own state, its own group on the
+page, and its own sign-in.
 
 - **State is per portal.** Each portal has its own `PollState`, with its own three tracks and its own
   hoot ledgers. The same pull-request id on two portals is two pull requests, and neither silences the
@@ -70,29 +75,91 @@ configured today.
 ## Configuration
 
 Every existing `config.txt` describes one GitHub portal without naming it, and keeps working
-unchanged. Naming portals in the file is reserved for the release that ships a second kind:
+unchanged. On **Settings ▸ Portals**, Sign in is install and Sign out is uninstall: Sign in on GitLab
+writes the section below, builds the portal and starts its sign-in; Sign out deletes the credential,
+switches the section off and stops the portal (except the last portal, which only signs out). A hand
+edit to the file needs a restart. By hand, naming
+portals is the same thing:
 
 ```
-portal.<name>.type=github|gitlab|bitbucket
-portal.<name>.url=https://...
-portal.<name>.enabled=on
-portal.<name>.interval=120
-portal.<name>.clientId=...
+portal.<name>.type=github|gitlab
+portal.<name>.url=https://...        # GitLab self-managed only
+portal.<name>.clientId=...           # GitLab: required
+portal.<name>.enabled=off            # leave it out without deleting it
 ```
 
-The rule for that day is already fixed: the moment any `portal.` key is present, the implicit GitHub
-portal disappears, so an old file and a new file never describe two different models at once. The
-flat `key=value` parser reads dotted keys as they are.
+**The moment any `portal.` key is present, the implicit GitHub portal disappears**, so an old file and a
+new file never describe two different models at once. To watch GitHub and GitLab, name both. Portals
+appear in name order. A section that cannot be built (no type, an unknown type, a url that is not
+http(s)) is left out with a line in the log.
+
+**gitlab.com signs in with a shipped application**, the way github.com does with the shipped GitHub App:
+a non-confidential OAuth application with the `read_api` scope, whose id is public by design. Unlike the
+GitHub App it needs no installing on a group: a GitLab token acts as the user, and `read_api` reads
+everything they can read, repository contents included, since no narrower scope still lists merge
+requests. **A self-managed instance cannot use it**, because the application is registered on
+gitlab.com: register one there (User settings, Applications, non-confidential, `read_api`) and set
+`clientId`. Without one that portal shows off with a reason, never a sign-in button that can only fail.
+`GITLAB_APP_CLIENT_ID` overrides a missing key, for testing. Each GitLab portal keeps its credential in
+`~/.githoot/<name>_token.txt`.
 
 **GitHub Enterprise Server is not shipped yet, on purpose.** The adapter derives every endpoint from a
 base URL and is tested against a GHES-shaped one, but a GHES instance also needs its own GitHub App
-registered on it, so the device flow can ask it for a token. A `url` key without a `clientId` key
-would be half a feature that fails at sign-in, so both arrive together or not at all.
+registered on it. A `url` on a GitHub section is ignored, with a line in the log, until `url` and
+`clientId` can ship together for it.
 
 `copilotReviews` and `statusComponents` stay as they are: GitHub-specific settings, read into the
-GitHub adapter's options.
+GitHub adapter's options. The `portal.` keys are edited in `config.txt` only; the settings pages show
+the portals but cannot write their sections yet.
 
-## What a second adapter has to bring
+## How GitLab is judged
+
+One document answers all three axes: `currentUser.reviewRequestedMergeRequests` and
+`authoredMergeRequests`, both `state:opened, draft:false`, with `@include` dropping a list no axis in
+play needs. Measured against gitlab.com on 2026-09-28 at complexity 157 of the 250 allowed.
+
+- **Review requested: your own reviewer state, not the list.** GitLab keeps you in `reviewers` after you
+  review, where GitHub drops the request. So a merge request counts while *your* `reviewState` is
+  `UNREVIEWED`, `REVIEW_STARTED` or `UNAPPROVED` (an approval you took back and have not replaced with
+  a verdict). If you cannot be found among the reviewers returned, or your state comes back `null`,
+  GitLab's list is trusted. Merge requests authored by a bot are left out, as Dependabot and Renovate
+  are on GitHub.
+- **Needs work: a `REQUESTED_CHANGES` reviewer, or a conflict with anyone attached.** Re-requesting a
+  review resets that reviewer to `UNREVIEWED` and removes their approval (GitLab's
+  `RequestReviewService`), so a standing `REQUESTED_CHANGES` is still on you by definition; no second
+  list is needed to tell "handed back" apart.
+- **Approved: anyone in `approvedBy`**, with no objection and no conflict. A reviewer's `APPROVED`
+  state is deliberately not read for the count: it is a column GitLab updates on the way past, and
+  approvals can be reset without it moving. `approvedBy` is the approvals themselves, and it also
+  catches people who approved without being asked.
+- **Checks** come from `headPipeline.status`. Cancelled and skipped read as unknown (GitLab paints them
+  grey), a manual job as expected.
+- **Not read:** team reviewers (GitLab has none) and an automatic reviewer. GitLab Duo reviews by
+  commenting like Copilot, but its account name is not documented, and guessing would fail silently.
+
+Not verified against a signed-in session: the device flow and the secret-less refresh for a
+non-confidential application. Both need a registered application to exercise.
+
+## What GitLab changed
+
+Adding the second adapter was also a test of the seam. What it found:
+
+- **The device flow was not GitHub's.** About 80% of `github/auth.rs` was RFC 8628 with GitHub's name on
+  it. It is `portal::oauth` now, and each portal supplies only what differs.
+- **The vocabulary still named GitHub** in one place: a rejected token was logged as "token rejected by
+  GitHub" whoever rejected it.
+- **"Every forge runs Atlassian Statuspage" was wrong.** GitLab's status page is status.io. A GitLab
+  portal has none until a status.io reader exists.
+- **Still GitHub-shaped, not yet fixed:** the tray's status menu entry opens githubstatus.com directly
+  rather than the degraded portal's page (harmless while GitHub is the only portal with one); the
+  menu's "Open PR inbox" fallback opens the first portal's inbox only; the settings pages write only
+  `type` and `enabled` of a `portal.` section, so `url` and `clientId` are still by hand; per-portal
+  `interval` is not read; and only one GitHub portal may be named, because the shipped App and its
+  credential file are singular.
+
+## What the next adapter has to bring
+
+What was written here for GitLab before it existed, kept for comparison with what shipped above:
 
 For GitLab (gitlab.com and self-hosted, same API):
 

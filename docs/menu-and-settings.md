@@ -95,7 +95,7 @@ same token and `Host` checks. It is organised by what you manage, with a sidebar
 | Page | Holds |
 |---|---|
 | **General** | what the tray shows and does: the three bars, the hoot |
-| **Portals ▸ GitHub** | where pull requests come from: the sign-in, the Copilot rule, which parts of GitHub count as an outage |
+| **Portals ▸ GitHub** | where pull requests come from: the sign-in, the Copilot rule, which parts of GitHub count as an outage. The Portals list is also where GitLab is installed |
 | **Integrations ▸ Herdr dispatcher** | where pull requests go: Install, a dry run, its settings and prompts → [integrations](integrations.md) |
 | **Muted** | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
 | **Updates** | this version, the last check, **Check now**, and the automatic check |
@@ -131,15 +131,25 @@ sidebar; install it from the tray menu as usual.
 **Portals ▸ GitHub** is where a sign-in happens. Its first section says how the sign-in stands: *Signed
 in*, *Not signed in*, the running sign-in itself, or the reason nothing can be seen.
 
-*Not signed in* offers **Sign in to GitHub**; *Signed in* offers **Sign out**, which deletes the saved
-credential (`pr_token.txt`) and puts the tray where a fresh install starts: bars dark, exclamation up,
-**Authenticate** back on the menu. It does not revoke the authorization on GitHub's side; that is done at
-github.com/settings/applications. The sign-in click only asks: the device flow runs on the poll thread,
-and within a moment the page shows the code to enter, a link to where to enter it (opened in a new tab,
-the one place this app does that, so this page stays put), how long the code is good for, a **Copy**
-button beside the code, and a **Cancel** button. The code is also on your clipboard already. While the
-flow runs the page shows only the sign-in and reloads itself every few seconds, so it turns to *Signed
-in* on its own when GitHub confirms, or back to *Not signed in* if you cancel or the code expires. The
+The **Portals** list shows every kind of portal. *Not signed in* offers **Sign in** and nothing else;
+*Signed in* offers **⚙ Settings** and **Sign out**. There are no Install or Uninstall buttons: Sign in on a
+portal that is not running installs it, and Sign out deletes the saved credential (`pr_token.txt` for
+GitHub) and removes the portal, unless it is the only one, which stays listed and signed out, where a
+fresh install starts: bars dark, exclamation up, **Authenticate** back on the menu. A portal's settings
+appear only once it is signed in. It does not revoke the authorization on GitHub's side; that is done at
+github.com/settings/applications.
+
+Signing in happens in the card you pressed, on the list or on the portal's own page. **Sign in to
+GitLab** turns that card into the sign-in: "Waiting for you to authorize", the code in large type, one
+**Copy code and open GitLab** button, how long the code lasts ("Expires in 4:59", counting down) and
+**Cancel**. The code arrives in about half a second, because the sign-in runs on its own thread instead
+of waiting for the poll loop, and it lands in a box that was already there, so nothing moves. The button
+copies the code and opens the portal's page in a new tab in one click; GitHoot has also put the code on
+your clipboard. Nothing reloads while you are away: the card asks in the background, and changes once,
+to *Signed in* when the portal confirms, or back to **Sign in** with one line saying what happened if
+the code expired or the sign-in was denied. On GitLab, the page you are left on after Authorize is
+GitLab's blank code form; that is GitLab confirming, not asking again, and the card says so beforehand.
+Without JavaScript the buttons still post and the page reloads until the sign-in lands. The
 tray's **Authenticate** entry only opens this page; nothing starts a sign-in but the button. When the
 local listener cannot start at all, the entry falls back to running the flow with the old native
 dialog, since there is no page to show the code on.
@@ -198,8 +208,16 @@ existed — the key is appended rather than the file regenerated.
 | `integration.<id>.enabled` | `off` | Whether that integration is installed. What its Install and Uninstall buttons write, and like `localApi` a typo leaves it off → [integrations](integrations.md) |
 | `integration.<id>.<key>` | per integration | That integration's own settings, listed on its page and in its doc. The Herdr dispatcher has `cloneRoot` and `worktreeRoot` → [the dispatcher](dispatcher.md#settings) |
 
-Keys starting with `portal.` are **reserved** for naming portals other than GitHub, and are not read
-yet; the rule they will follow is written down in [Portals](portals.md#configuration).
+| `portal.<name>.type` | none | `github` or `gitlab`. **Naming any portal retires the implicit GitHub one**, so to watch both, name both → [Portals](portals.md#configuration) |
+| `portal.<name>.url` | the forge's own | A self-managed GitLab's origin. Ignored on a GitHub section until Enterprise Server ships |
+| `portal.<name>.clientId` | shipped, for gitlab.com | The OAuth application a GitLab portal signs in with. Only a self-managed instance needs one; without it that portal shows off, with a reason |
+| `portal.<name>.enabled` | `on` | `off` leaves that portal out without deleting its section. What Sign in and Sign out write |
+
+**Sign in is install, Sign out is uninstall.** Sign in on a portal that is not running writes its `type`
+and `enabled` (naming GitHub first if the file names no portal yet), builds the portal and starts the
+sign-in. Sign out deletes the credential, writes `enabled=off` and stops the portal, keeping the rest of
+its section. The one exception is the last portal, which Sign out only signs out of. `url` and
+`clientId` are edited in this file, and those edits take effect after a restart.
 
 Only `off`, `false`, `0` or `no` switch something off; anything else leaves the default, so a typo cannot
 silently disable a feature. The exceptions are `localApi` and `integration.<id>.enabled`, which need an

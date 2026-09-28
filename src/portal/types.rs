@@ -181,7 +181,7 @@ impl PollResult {
     pub fn problem(&self) -> Option<String> {
         match self {
             PollResult::Fresh { .. } => None,
-            PollResult::Unauthorized => Some("token rejected by GitHub (401)".to_string()),
+            PollResult::Unauthorized => Some("token rejected (401)".to_string()),
             PollResult::RateLimited { retry_after } => {
                 Some(format!("rate limited — holding for {}s", retry_after.as_secs()))
             }
@@ -195,4 +195,18 @@ pub struct PollResponse {
     pub result: PollResult,
     /// From `x-poll-interval`. GitHub raises this under load and we must obey it.
     pub poll_interval: Option<Duration>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The vocabulary names no portal. Each adapter's log line says who answered; this says what
+    /// happened, so a GitLab 401 is never logged as GitHub's.
+    #[test]
+    fn a_rejected_token_is_described_without_naming_a_portal() {
+        let said = PollResult::Unauthorized.problem().expect("a 401 is a problem");
+        assert!(!said.contains("GitHub"), "got {said}");
+        assert!(said.contains("401"), "got {said}");
+    }
 }

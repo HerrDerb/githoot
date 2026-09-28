@@ -361,10 +361,10 @@ mod tests {
         PrEntry::stub(&format!("https://example.invalid/{key}"))
     }
 
-    /// Only GitHub exists as a kind today, so "a portal it did not declare" is tested from the other
-    /// side: an integration that declares none sees nothing.
-    fn fake_info(_kind: PortalKind) -> crate::portal::PortalInfo {
-        FakePortal::named("GitHub").info
+    fn fake_info(kind: PortalKind) -> crate::portal::PortalInfo {
+        let mut info = FakePortal::named(&format!("{kind:?}")).info;
+        info.kind = kind;
+        info
     }
 
     fn snapshot(groups: Vec<(crate::portal::PortalInfo, Option<Vec<PrEntry>>)>) -> AxisSnapshot {
@@ -403,6 +403,26 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].entries.len(), 1);
         assert!(batches(&NO_PORTALS, &snaps, &|_| false).iter().all(|b| b.entries.is_empty()));
+    }
+
+    /// The dispatcher asks `gh` about every pull request it is handed, so a GitLab merge request
+    /// reaching it would be a command run against the wrong forge. Nor does a GitLab list confirm
+    /// anything for an integration that cannot see it.
+    #[test]
+    fn a_gitlab_merge_request_never_reaches_a_github_only_integration() {
+        let snaps = vec![(
+            PrAxis::ReviewRequested,
+            snapshot(vec![
+                (fake_info(PortalKind::GitLab), Some(vec![entry("mr")])),
+                (fake_info(PortalKind::GitHub), Some(vec![entry("pr")])),
+            ]),
+        )];
+        let seen = batches(&GITHUB_ONLY, &snaps, &|_| false);
+        let keys: Vec<&str> = seen[0].entries.iter().map(|e| e.key()).collect();
+        assert_eq!(keys, ["https://example.invalid/pr"]);
+
+        let gitlab_only = vec![(PrAxis::ReviewRequested, snapshot(vec![(fake_info(PortalKind::GitLab), Some(Vec::new()))]))];
+        assert!(!batches(&GITHUB_ONLY, &gitlab_only, &|_| false)[0].confirmed);
     }
 
     /// A muted pull request is one you asked to stop hearing about. Starting an agent for it would be

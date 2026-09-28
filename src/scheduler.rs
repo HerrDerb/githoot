@@ -159,6 +159,12 @@ static SIGN_IN: std::sync::Mutex<Option<SignIn>> = std::sync::Mutex::new(None);
 /// Asks the running sign-in for `portal` to stop. `false` when none is running for it, which the
 /// caller treats as already done rather than as an error.
 pub fn cancel_sign_in(portal: &PortalId) -> bool {
+    if let Some(job) = JOBS.lock().expect("sign-in jobs lock poisoned").get_mut(portal)
+        && job.running
+    {
+        job.cancel = true;
+        return true;
+    }
     let mut running = SIGN_IN.lock().expect("sign-in lock poisoned");
     match running.as_mut() {
         Some(sign_in) if sign_in.portal == *portal => {
@@ -222,7 +228,7 @@ pub fn portal_statuses() -> Vec<PortalStatus> {
     snapshot
         .portals
         .iter()
-        .map(|p| PortalStatus { info: p.info.clone(), auth: p.auth.clone() })
+        .map(|p| PortalStatus { info: p.info.clone(), auth: shown_auth(&p.info.id, p.auth.clone()) })
         .collect()
 }
 
@@ -280,6 +286,13 @@ pub enum Wake {
     Authenticate(Option<PortalId>),
     /// The settings page's Sign out button: forget the portal's credential and wait for a sign-in.
     SignOut(PortalId),
+    /// A portal's section of `config.txt` or its saved credential changed: Sign in wrote the section,
+    /// or a sign-in thread saved a token. Build it afresh from the file and its saved credential, and
+    /// put it where the old run stood, or at the end if it was not running.
+    PortalChanged(PortalId),
+    /// The settings page's Uninstall: `config.txt` already has the section switched off; drop the
+    /// run. The saved credential stays on disk for a reinstall.
+    PortalRemoved(PortalId),
     /// The user picked the Settings item, which has already opened `config.txt` in whatever handles it.
     ///
     /// Routed through here rather than started in the click handler because the watcher needs the same
@@ -287,6 +300,15 @@ pub enum Wake {
     /// a thread, so polling is not delayed by the fifteen minutes the watch may run for.
     SettingsOpened,
 }
+
+/// How `main` builds a portal from its configuration, handed to the loop so Install can do it too.
+/// `None` when no HTTP client could be built, which the caller has already logged.
+pub type PortalBuilder =
+    std::sync::Arc<dyn Fn(&crate::config::PortalConfig, &crate::config::Config) -> Option<Box<dyn Portal>> + Send + Sync>;
+
+/// The builder and GitHoot's directory, for a sign-in thread to build its own copy of a portal.
+/// Set once, when the poll loop starts.
+static BUILDER: std::sync::OnceLock<(PortalBuilder, PathBuf)> = std::sync::OnceLock::new();
 
 /// One rendering instruction for the UI thread.
 #[derive(Debug)]
@@ -313,6 +335,10 @@ pub struct PollInputs {
     /// needs to know which kind it holds; `CredentialState` travels beside rather than inside so
     /// the adapter stays ignorant of how the loop words "not signed in".
     pub portals: Vec<(Box<dyn Portal>, CredentialState)>,
+    /// Builds a portal the settings page installed while the loop is running, from its section of
+    /// `config.txt`. The same builder `main` used at startup, so a portal installed live is the one
+    /// a restart would have built.
+    pub build_portal: PortalBuilder,
     /// Held for the whole run because `Wake::SettingsOpened` needs the config path.
     pub app_asset_path: PathBuf,
     /// Whether to look for newer releases at all. See `config::Config::update_check`.
@@ -577,6 +603,222 @@ impl PortalRun {
 }
 
 /// Every portal's confirmed lists, in configuration order, for the snapshot the page reads.
+/// Runs portal `i`'s sign-in on this thread, publishing "in progress" before it blocks and the
+/// outcome after. Shared by the Authenticate wake and Install, which signs in right after building.
+fn sign_in_run(runs: &mut [PortalRun], i: usize) {
+    if runs[i].credential == CredentialState::Ready {
+        infoln!("{} signing in again over a working credential", runs[i].name());
+    }
+    // Said before the flow blocks, so a settings page opened during the minutes it can take reads
+    // "in progress" rather than offering the button again. The prompt itself lands later, from the flow.
+    let id = runs[i].portal.info().id.clone();
+    *SIGN_IN.lock().expect("sign-in lock poisoned") =
+        Some(SignIn { portal: id.clone(), cancel_requested: false });
+    runs[i].signing_in = true;
+    PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(runs);
+    let progress = PageProgress { portal: id, name: runs[i].name().to_string() };
+    runs[i].authenticate(&progress);
+    runs[i].signing_in = false;
+    *SIGN_IN.lock().expect("sign-in lock poisoned") = None;
+    // Published at once rather than after the next cycle, so a page refreshing itself sees the outcome
+    // instead of a stale prompt.
+    PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(runs);
+}
+
+/// Puts a run where the run for the same portal stood, or at the end. Never two runs for one id,
+/// which would poll the same thing twice and hoot twice for it.
+fn put_run(runs: &mut Vec<PortalRun>, run: PortalRun) {
+    match runs.iter().position(|r| r.portal.info().id == run.portal.info().id) {
+        Some(i) => runs[i] = run,
+        None => runs.push(run),
+    }
+}
+
+// ── Sign-in, off the poll thread ─────────────────────────────────────────────
+//
+// A sign-in used to run on the poll thread, which reads its messages only between polls, so the code
+// arrived only after whatever GitHub poll was under way: five seconds or more after the press. Now a
+// sign-in builds its own copy of the portal on its own thread and asks for the code at once. The
+// credential file is the hand-over: when the flow saves a token, the thread tells the loop, which
+// rebuilds its portal from that file. The loop's copy and the thread's copy never share memory.
+
+/// One portal's sign-in, as the pages read it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignInJob {
+    /// The flow is running.
+    running: bool,
+    /// The code and where to enter it, once the portal has handed them out.
+    prompt: Option<SignInPrompt>,
+    /// Cancel was pressed; the flow stops at its next check, within about a second.
+    cancel: bool,
+    /// Why the last sign-in ended without a credential, worded for the card. Kept until the next press.
+    error: Option<String>,
+    /// The token is saved and the loop has been told. Reads as signed in until the loop has rebuilt
+    /// the portal, so the card never flashes back to "Not signed in" in between.
+    done: bool,
+}
+
+static JOBS: std::sync::Mutex<std::collections::BTreeMap<PortalId, SignInJob>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// What a page shows: the loop's view, with a sign-in in flight (or just finished) laid over it.
+fn merged_auth(from_loop: AuthStatus, job: Option<&SignInJob>) -> AuthStatus {
+    match job {
+        Some(j) if j.running => AuthStatus::SigningIn(j.prompt.clone()),
+        Some(j) if j.done => AuthStatus::SignedIn,
+        _ => from_loop,
+    }
+}
+
+/// The card's line for a sign-in that ended without a credential. `None` for a cancel, which the
+/// person asked for and needs no explaining.
+fn sign_in_failure(name: &str, error: &AuthError) -> Option<String> {
+    Some(match error {
+        AuthError::Cancelled => return None,
+        AuthError::Expired => "The code expired before you authorized. Sign in again for a new one.".to_string(),
+        AuthError::Denied => format!("{name} says the sign-in was denied. Sign in again to retry."),
+        AuthError::Network(e) => format!("Could not reach {name} ({e}). Check the connection and sign in again."),
+        other => format!("Sign-in failed: {other}."),
+    })
+}
+
+/// Portals signed out from the page whose run has not caught up yet. Signing out cannot fail in any
+/// way worth waiting for (it deletes a local file), so the pages say "Not signed in" from the press,
+/// not from whenever the loop finishes the poll it is in.
+static SIGNED_OUT: std::sync::Mutex<std::collections::BTreeSet<PortalId>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// The page pressed Sign out for `id`; read it as signed out until the loop has acted.
+pub fn note_signed_out(id: &PortalId) {
+    SIGNED_OUT.lock().expect("signed-out lock poisoned").insert(id.clone());
+}
+
+fn clear_signed_out(id: &PortalId) {
+    SIGNED_OUT.lock().expect("signed-out lock poisoned").remove(id);
+}
+
+/// What the pages show for portal `id`: the loop's view, a sign-in in flight laid over it, and an
+/// optimistic sign-out laid over that unless a sign-in has started since.
+fn shown_auth(id: &PortalId, from_loop: AuthStatus) -> AuthStatus {
+    let jobs = JOBS.lock().expect("sign-in jobs lock poisoned");
+    let job = jobs.get(id);
+    if job.is_some_and(|j| j.running || j.done) {
+        return merged_auth(from_loop, job);
+    }
+    if SIGNED_OUT.lock().expect("signed-out lock poisoned").contains(id) {
+        return AuthStatus::NotSignedIn;
+    }
+    merged_auth(from_loop, job)
+}
+
+/// How the pages see portal `id`'s sign-in, for one that may not be running in the loop yet.
+pub fn sign_in_view(id: &PortalId) -> Option<(AuthStatus, Option<String>)> {
+    let jobs = JOBS.lock().expect("sign-in jobs lock poisoned");
+    jobs.get(id).map(|j| (merged_auth(AuthStatus::NotSignedIn, Some(j)), j.error.clone()))
+}
+
+/// Why the last sign-in for `id` failed, while no newer one has started.
+pub fn sign_in_error(id: &PortalId) -> Option<String> {
+    JOBS.lock().expect("sign-in jobs lock poisoned").get(id).and_then(|j| j.error.clone())
+}
+
+fn finish_job(id: &PortalId) {
+    let mut jobs = JOBS.lock().expect("sign-in jobs lock poisoned");
+    if jobs.get(id).is_some_and(|j| j.done) {
+        jobs.remove(id);
+    }
+}
+
+/// Starts portal `id`'s sign-in on its own thread, now. A press while one is already running for it
+/// changes nothing. `wake` tells the loop when a token has been saved.
+pub fn start_sign_in(id: PortalId, wake: std::sync::mpsc::Sender<Wake>) {
+    {
+        let mut jobs = JOBS.lock().expect("sign-in jobs lock poisoned");
+        if jobs.get(&id).is_some_and(|j| j.running) {
+            return;
+        }
+        jobs.insert(id.clone(), SignInJob { running: true, prompt: None, cancel: false, error: None, done: false });
+    }
+    clear_signed_out(&id);
+    std::thread::spawn(move || {
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_sign_in(&id)));
+        let mut jobs = JOBS.lock().expect("sign-in jobs lock poisoned");
+        let Some(job) = jobs.get_mut(&id) else { return };
+        job.running = false;
+        job.prompt = None;
+        match attempt {
+            Ok(Ok(())) => {
+                job.done = true;
+                drop(jobs);
+                let _ = wake.send(Wake::PortalChanged(id));
+            }
+            Ok(Err((name, e))) => match sign_in_failure(&name, &e) {
+                Some(line) => {
+                    errorln!("{name} sign-in failed: {e}");
+                    job.error = Some(line);
+                }
+                None => {
+                    infoln!("{name} sign-in cancelled");
+                    jobs.remove(&id);
+                }
+            },
+            Err(_) => job.error = Some("Sign-in failed unexpectedly. Sign in again.".to_string()),
+        }
+    });
+}
+
+/// The sign-in itself: its own copy of the portal, built from `config.txt`, runs the device flow and
+/// saves the token. The name comes back with a failure so the card can say who refused.
+fn run_sign_in(id: &PortalId) -> Result<(), (String, AuthError)> {
+    let fail = |name: &str, e: AuthError| (name.to_string(), e);
+    let (build, home) =
+        BUILDER.get().ok_or_else(|| fail("The portal", AuthError::Storage("GitHoot is still starting".into())))?;
+    let (cfg, _) = crate::config::Config::load(home);
+    let described = cfg
+        .portals()
+        .into_iter()
+        .find(|p| p.id == *id)
+        .ok_or_else(|| fail("The portal", AuthError::Storage(format!("config.txt does not describe {}", id.0))))?;
+    let name = described.kind.display_name().to_string();
+    let mut portal =
+        build(&described, &cfg).ok_or_else(|| fail(&name, AuthError::Network("could not set up a connection".into())))?;
+    let progress = JobProgress { portal: id.clone(), name: name.clone() };
+    portal.authenticate(&progress).map(|_| ()).map_err(|e| fail(&name, e))
+}
+
+/// A sign-in thread's link to the pages: the code goes into its job, and Cancel is read from it.
+struct JobProgress {
+    portal: PortalId,
+    name: String,
+}
+
+impl SignInProgress for JobProgress {
+    fn prompt(&self, prompt: SignInPrompt) {
+        infoln!(
+            "{}: sign in at {} with code {} (expires in {}s)",
+            self.name,
+            prompt.url,
+            prompt.code,
+            prompt.expires_at.saturating_sub(unix_now())
+        );
+        crate::dialog::copy_to_clipboard(&prompt.code);
+        if let Some(job) = JOBS.lock().expect("sign-in jobs lock poisoned").get_mut(&self.portal) {
+            job.prompt = Some(prompt);
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        JOBS.lock().expect("sign-in jobs lock poisoned").get(&self.portal).is_some_and(|j| j.cancel)
+    }
+}
+
+/// Drops the run for `id`. `false` when there was none.
+fn remove_run(runs: &mut Vec<PortalRun>, id: &PortalId) -> bool {
+    let before = runs.len();
+    runs.retain(|r| r.portal.info().id != *id);
+    runs.len() != before
+}
+
 fn snapshot_of(runs: &[PortalRun]) -> Vec<PortalSnapshot> {
     runs.iter()
         .map(|run| PortalSnapshot {
@@ -603,11 +845,13 @@ fn run_poll_loop(
 ) {
     let PollInputs {
         portals,
+        build_portal,
         app_asset_path,
         update_check: update_check_enabled,
         pr_enabled,
         sound: sound_enabled,
     } = inputs;
+    let _ = BUILDER.set((build_portal.clone(), app_asset_path.clone()));
     // The release check's client. Each portal owns its own; this one talks to GitHub Releases
     // unauthenticated and has nothing to do with any portal.
     let client = match build_client() {
@@ -783,109 +1027,134 @@ fn run_poll_loop(
         // named by axis.
 
         match wake_rx.recv_timeout(delay) {
-            Ok(wake) => {
-                match wake {
-                    Wake::Refresh => {
-                        infoln!("refresh requested — polling {} more times", REFRESH_BURST.len());
-                        burst = REFRESH_BURST.iter().copied().collect();
-                    }
-                    // A short even burst rather than the widening one: one sample taken within a
-                    // second of the click is thin, and anything that changes a moment later would
-                    // otherwise stay invisible for the rest of the minute.
-                    Wake::PollNow => {
-                        infoln!(
-                            "menu opened — polling now and {} more times, 5s apart",
-                            MENU_BURST.len()
-                        );
-                        burst = MENU_BURST.iter().copied().collect();
-                    }
-                    // Deliberately *not* on this thread, unlike `Authenticate`. The download is
-                    // megabytes and the timeout is minutes, and polling has to keep working
-                    // throughout — a frozen icon during an install would look like a crash.
-                    Wake::CheckUpdates => {
-                        infoln!("asked to check for updates now");
-                        check_asked = true;
-                    }
-                    Wake::UpdateNow => {
-                        if let Some(available) = pending_update.clone() {
-                            // `swap` rather than load-then-store: two menu clicks in quick succession
-                            // must not both get past this.
-                            if UPDATE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-                                infoln!("an update install is already in progress");
-                            } else {
-                                let restart = restart.clone();
-                                std::thread::spawn(move || {
-                                    match crate::update::install(&available) {
-                                        // Hands the plan to the UI thread, which is the only one that
-                                        // can take the tray down cleanly before the process ends.
-                                        Ok(plan) => restart(plan),
-                                        Err(crate::update::UpdateError::Declined) => {
-                                            infoln!("update declined by the user");
-                                        }
-                                        Err(e) => crate::dialog::report(
-                                            "githoot: update failed",
-                                            &format!(
-                                                "The update was not installed and the current \
-                                                 version is untouched.\n\n{e}"
+            // Everything queued, not just the first: the loop polls after handling wakes, and a poll
+            // can take seconds. A Sign in queued behind a menu refresh used to wait out a whole extra
+            // poll before it started.
+            Ok(first) => {
+                let queued: Vec<Wake> = std::iter::once(first).chain(wake_rx.try_iter()).collect();
+                for wake in queued {
+                    match wake {
+                        Wake::Refresh => {
+                            infoln!("refresh requested — polling {} more times", REFRESH_BURST.len());
+                            burst = REFRESH_BURST.iter().copied().collect();
+                        }
+                        // A short even burst rather than the widening one: one sample taken within a
+                        // second of the click is thin, and anything that changes a moment later would
+                        // otherwise stay invisible for the rest of the minute.
+                        Wake::PollNow => {
+                            infoln!(
+                                "menu opened — polling now and {} more times, 5s apart",
+                                MENU_BURST.len()
+                            );
+                            burst = MENU_BURST.iter().copied().collect();
+                        }
+                        // Deliberately *not* on this thread, unlike `Authenticate`. The download is
+                        // megabytes and the timeout is minutes, and polling has to keep working
+                        // throughout — a frozen icon during an install would look like a crash.
+                        Wake::CheckUpdates => {
+                            infoln!("asked to check for updates now");
+                            check_asked = true;
+                        }
+                        Wake::UpdateNow => {
+                            if let Some(available) = pending_update.clone() {
+                                // `swap` rather than load-then-store: two menu clicks in quick succession
+                                // must not both get past this.
+                                if UPDATE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+                                    infoln!("an update install is already in progress");
+                                } else {
+                                    let restart = restart.clone();
+                                    std::thread::spawn(move || {
+                                        match crate::update::install(&available) {
+                                            // Hands the plan to the UI thread, which is the only one that
+                                            // can take the tray down cleanly before the process ends.
+                                            Ok(plan) => restart(plan),
+                                            Err(crate::update::UpdateError::Declined) => {
+                                                infoln!("update declined by the user");
+                                            }
+                                            Err(e) => crate::dialog::report(
+                                                "githoot: update failed",
+                                                &format!(
+                                                    "The update was not installed and the current \
+                                                     version is untouched.\n\n{e}"
+                                                ),
                                             ),
-                                        ),
-                                    }
-                                    UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
-                                });
-                            }
-                        } else {
-                            infoln!("install requested, but no update is pending");
-                        }
-                    }
-                    // Opening settings says nothing about GitHub, so this is the one wake that does not
-                    // want a poll at all — hence `skip_etag` going back down. All it does is arm the
-                    // watcher, which then lives on its own thread.
-                    Wake::SettingsOpened => {
-                        crate::settings_watch::spawn(
-                            crate::config::config_path(&app_asset_path),
-                            restart.clone(),
-                        );
-                    }
-                    Wake::SignOut(id) => {
-                        match runs.iter_mut().find(|run| run.portal.info().id == id) {
-                            Some(run) => run.sign_out(),
-                            None => errorln!("sign-out requested for a portal that is not configured"),
-                        }
-                        // At once, so the page's one reload after the redirect sees the outcome.
-                        PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
-                    }
-                    // The named portal, or the one waiting for a sign-in, or the first: with a
-                    // single portal those are the same thing.
-                    Wake::Authenticate(which) => {
-                        let index = match which {
-                            Some(id) => runs.iter().position(|run| run.portal.info().id == id),
-                            None => Some(
-                                runs.iter().position(|run| run.state.pr_needs_auth()).unwrap_or(0),
-                            ),
-                        };
-                        match index {
-                            None => errorln!("sign-in requested for a portal that is not configured"),
-                            // Also over a working credential: the settings page offers "Sign in
-                            // again", and a successful flow simply replaces what is saved.
-                            Some(i) => {
-                                if runs[i].credential == CredentialState::Ready {
-                                    infoln!("{} signing in again over a working credential", runs[i].name());
+                                        }
+                                        UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
+                                    });
                                 }
-                                // Said before the flow blocks, so a settings page opened during the
-                                // minutes it can take reads "in progress" rather than offering the
-                                // button again. The prompt itself lands later, from the flow.
-                                let id = runs[i].portal.info().id.clone();
-                                *SIGN_IN.lock().expect("sign-in lock poisoned") =
-                                    Some(SignIn { portal: id.clone(), cancel_requested: false });
-                                runs[i].signing_in = true;
-                                PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
-                                let progress = PageProgress { portal: id, name: runs[i].name().to_string() };
-                                runs[i].authenticate(&progress);
-                                runs[i].signing_in = false;
-                                *SIGN_IN.lock().expect("sign-in lock poisoned") = None;
-                                // Published at once rather than after the next cycle, so a page
-                                // refreshing itself sees the outcome instead of a stale prompt.
-                                PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                            } else {
+                                infoln!("install requested, but no update is pending");
+                            }
+                        }
+                        // Opening settings says nothing about GitHub, so this is the one wake that does not
+                        // want a poll at all — hence `skip_etag` going back down. All it does is arm the
+                        // watcher, which then lives on its own thread.
+                        Wake::SettingsOpened => {
+                            crate::settings_watch::spawn(
+                                crate::config::config_path(&app_asset_path),
+                                restart.clone(),
+                            );
+                        }
+                        Wake::SignOut(id) => {
+                            match runs.iter_mut().find(|run| run.portal.info().id == id) {
+                                Some(run) => run.sign_out(),
+                                None => errorln!("sign-out requested for a portal that is not configured"),
+                            }
+                            // At once, so the page's one reload after the redirect sees the outcome.
+                            PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                            // The run now says so itself; the page's optimistic word can go.
+                            clear_signed_out(&id);
+                        }
+                        Wake::PortalChanged(id) => {
+                            let (cfg, _) = crate::config::Config::load(&app_asset_path);
+                            match cfg.portals().into_iter().find(|p| p.id == id) {
+                                None => errorln!("portal {} changed but config.txt does not describe it", id.0),
+                                Some(described) => {
+                                    if let Some(mut portal) = build_portal(&described, &cfg) {
+                                        // The startup path, minus its dialog: a failure here is one line
+                                        // in the log and an Off reason on the page that asked.
+                                        let credential = if pr_enabled.iter().any(|&on| on) {
+                                            match portal.load_saved_credential() {
+                                                Ok(state) => state,
+                                                Err(e) => {
+                                                    errorln!("could not set up {} access for PR status: {e}", portal.info().display_name);
+                                                    CredentialState::Off("PR status off: setup failed".to_string())
+                                                }
+                                            }
+                                        } else {
+                                            CredentialState::Off("PR status off in config.txt".to_string())
+                                        };
+                                        infoln!("{} (re)built: {:?}", id.0, credential);
+                                        put_run(&mut runs, PortalRun::new(portal, credential, pr_enabled));
+                                        // The sign-in that led here, if any, has done its job: from now on the run speaks
+                                        // for the portal.
+                                        finish_job(&id);
+                                        PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                                    }
+                                }
+                            }
+                        }
+                        Wake::PortalRemoved(id) => {
+                            if remove_run(&mut runs, &id) {
+                                infoln!("{} uninstalled and stopped", id.0);
+                            }
+                            PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
+                            clear_signed_out(&id);
+                        }
+                        // The named portal, or the one waiting for a sign-in, or the first: with a
+                        // single portal those are the same thing.
+                        Wake::Authenticate(which) => {
+                            let index = match which {
+                                Some(id) => runs.iter().position(|run| run.portal.info().id == id),
+                                None => Some(
+                                    runs.iter().position(|run| run.state.pr_needs_auth()).unwrap_or(0),
+                                ),
+                            };
+                            match index {
+                                None => errorln!("sign-in requested for a portal that is not configured"),
+                                // Also over a working credential: the settings page offers "Sign in
+                                // again", and a successful flow simply replaces what is saved.
+                                Some(i) => sign_in_run(&mut runs, i),
                             }
                         }
                     }
@@ -1317,6 +1586,87 @@ mod tests {
     use crate::portal::fake::FakePortal;
     use crate::portal::types::{PollResponse, PollResult};
     use crate::portal::{CredentialState, Health, PollOutcome};
+
+    fn job(running: bool, prompt: Option<SignInPrompt>, error: Option<&str>) -> SignInJob {
+        SignInJob { running, prompt, cancel: false, error: error.map(str::to_string), done: false }
+    }
+
+    /// Sign out is optimistic: from the press until the loop has acted, the portal reads as signed
+    /// out, and a sign-in started meanwhile wins.
+    #[test]
+    fn a_sign_out_reads_as_signed_out_at_once() {
+        let id = PortalId("optimistic-test".into());
+        note_signed_out(&id);
+        assert_eq!(shown_auth(&id, AuthStatus::SignedIn), AuthStatus::NotSignedIn);
+        clear_signed_out(&id);
+        assert_eq!(shown_auth(&id, AuthStatus::SignedIn), AuthStatus::SignedIn);
+    }
+
+    /// Between the portal confirming and the loop loading the new token, the card must already say
+    /// signed in, or it would flash back to "Not signed in" for as long as a poll takes.
+    #[test]
+    fn a_finished_sign_in_reads_as_signed_in_until_the_loop_catches_up() {
+        let done = SignInJob { done: true, ..job(false, None, None) };
+        assert_eq!(merged_auth(AuthStatus::NotSignedIn, Some(&done)), AuthStatus::SignedIn);
+    }
+
+    /// A sign-in runs on its own thread now, so what the pages see is the loop's word on the
+    /// credential with the running sign-in laid over it.
+    #[test]
+    fn a_running_sign_in_is_laid_over_the_loops_view() {
+        let prompt = SignInPrompt { code: "C".into(), url: "u".into(), expires_at: 1 };
+        assert_eq!(merged_auth(AuthStatus::NotSignedIn, Some(&job(true, None, None))), AuthStatus::SigningIn(None));
+        assert_eq!(
+            merged_auth(AuthStatus::NotSignedIn, Some(&job(true, Some(prompt.clone()), None))),
+            AuthStatus::SigningIn(Some(prompt))
+        );
+        assert_eq!(merged_auth(AuthStatus::NotSignedIn, Some(&job(false, None, Some("expired")))), AuthStatus::NotSignedIn);
+        assert_eq!(merged_auth(AuthStatus::SignedIn, None), AuthStatus::SignedIn);
+    }
+
+    /// After a sign-in the loop rebuilds the portal from its saved credential. The new run takes the
+    /// old one's place, so the list keeps its order, and a portal not yet running is added.
+    #[test]
+    fn a_rebuilt_portal_takes_its_old_place() {
+        let mut runs = vec![
+            PortalRun::new(Box::new(FakePortal::named("GitHub")), CredentialState::Ready, [true; 3]),
+            PortalRun::new(Box::new(FakePortal::named("GitLab")), CredentialState::NeedsAuth, [true; 3]),
+        ];
+        put_run(&mut runs, PortalRun::new(Box::new(FakePortal::named("GitHub")), CredentialState::NeedsAuth, [true; 3]));
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].portal.info().id.0, "github");
+        assert_eq!(runs[0].credential, CredentialState::NeedsAuth, "replaced, not duplicated");
+        put_run(&mut runs, PortalRun::new(Box::new(FakePortal::named("Work")), CredentialState::NeedsAuth, [true; 3]));
+        assert_eq!(runs.len(), 3);
+    }
+
+    /// What the card says when a sign-in ends without a credential: what happened and what to do.
+    #[test]
+    fn a_failed_sign_in_is_worded_for_the_card() {
+        assert_eq!(
+            sign_in_failure("GitLab", &AuthError::Expired).as_deref(),
+            Some("The code expired before you authorized. Sign in again for a new one.")
+        );
+        assert_eq!(
+            sign_in_failure("GitLab", &AuthError::Denied).as_deref(),
+            Some("GitLab says the sign-in was denied. Sign in again to retry.")
+        );
+        assert!(sign_in_failure("GitLab", &AuthError::Network("down".into())).unwrap().contains("Could not reach GitLab"));
+        assert_eq!(sign_in_failure("GitLab", &AuthError::Cancelled), None, "cancelling is not a failure");
+    }
+
+    /// Uninstall takes the run away at once; nothing else is touched, and an unknown id is a no-op.
+    #[test]
+    fn a_portal_removed_live_leaves_the_runs() {
+        let mut runs = vec![
+            PortalRun::new(Box::new(FakePortal::named("GitHub")), CredentialState::Ready, [true; 3]),
+            PortalRun::new(Box::new(FakePortal::named("GitLab")), CredentialState::Ready, [true; 3]),
+        ];
+        assert!(remove_run(&mut runs, &crate::portal::PortalId("gitlab".into())));
+        assert!(!remove_run(&mut runs, &crate::portal::PortalId("gitlab".into())));
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].portal.info().id.0, "github");
+    }
 
     fn response(result: PollResult) -> PollResponse {
         PollResponse { result, poll_interval: None }

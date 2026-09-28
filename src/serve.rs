@@ -1016,6 +1016,31 @@ fn site_for(token: &str) -> crate::ui::Site<'_> {
     }
 }
 
+/// Every portal as a card: each one running, then each kind that is not, with any sign-in in flight
+/// laid over it. A kind that is not running reads as not signed in, since to the person that is all
+/// it is; its id is the name its section would get, the kind's own key, unless `config.txt` already
+/// names one of that kind, switched off, under another name.
+fn portal_cards(cfg: &crate::config::Config) -> Vec<crate::ui::portals::Card> {
+    use crate::ui::portals::Card;
+    let statuses = scheduler::portal_statuses();
+    let mut cards: Vec<Card> =
+        statuses.iter().map(|s| Card::of(s, scheduler::sign_in_error(&s.info.id))).collect();
+    for kind in crate::portal::PortalKind::ALL {
+        if statuses.iter().any(|p| p.info.kind == kind) {
+            continue;
+        }
+        let described = cfg.portals().into_iter().find(|p| p.kind == kind);
+        let id = described.as_ref().map(|p| p.id.clone()).unwrap_or_else(|| crate::portal::PortalId(kind.key().to_string()));
+        let base = described.as_ref().map(|p| p.base_url.clone()).unwrap_or_else(|| match kind {
+            crate::portal::PortalKind::GitHub => crate::portal::github::DEFAULT_BASE_URL.to_string(),
+            crate::portal::PortalKind::GitLab => crate::portal::gitlab::DEFAULT_BASE_URL.to_string(),
+        });
+        let (auth, error) = scheduler::sign_in_view(&id).unwrap_or((crate::portal::AuthStatus::NotSignedIn, None));
+        cards.push(Card { id: id.0, name: kind.display_name().to_string(), kind, auth, link_prefix: format!("{base}/"), error });
+    }
+    cards
+}
+
 /// One page of the settings site.
 ///
 /// The pages that show `config.txt`'s values need settings installed: `Config::load` on an empty path
@@ -1049,29 +1074,35 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
             }
             None => unavailable(),
         },
-        Place::Portals => crate::ui::portals::portals_page(&site, &scheduler::portal_statuses()),
+        Place::Portals => {
+            // Every kind of portal, running or not. Only with settings installed: Sign in on a kind
+            // that is not running writes `config.txt`, and without one there is nothing to write to.
+            head.script_nonce = (!nonce.is_empty()).then_some(nonce.as_str());
+            let cards: Vec<crate::ui::portals::Card> = match cfg.as_ref() {
+                Some(c) => portal_cards(c),
+                None => scheduler::portal_statuses().iter().map(|s| crate::ui::portals::Card::of(s, None)).collect(),
+            };
+            crate::ui::portals::portals_page(&site, &cards, &nonce, flash.as_ref().map(|(_, line)| line.as_str()), unix_now())
+        }
         Place::Portal(id) => {
-            let statuses = scheduler::portal_statuses();
-            let Some(status) = statuses.iter().find(|p| p.info.id.0 == *id) else {
+            let Some(card) = cfg.as_ref().map(portal_cards).and_then(|cards| cards.into_iter().find(|c| c.id == *id)).or_else(|| {
+                scheduler::portal_statuses().iter().find(|p| p.info.id.0 == *id).map(|s| crate::ui::portals::Card::of(s, None))
+            }) else {
                 return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
             };
-            let query = request.query.as_deref();
+            // The card script's question: how this portal's sign-in stands, as JSON, no page.
+            if query_value(request.query.as_deref(), "state").is_some() {
+                let body = crate::ui::portals::state_json(&card.auth, &card.link_prefix, card.error.as_deref(), unix_now());
+                return respond(stream, 200, "application/json", body.as_bytes(), request.body_wanted);
+            }
             let value = cfg.as_ref().map(|c| move |s: &crate::setting::Setting| crate::config::value_of(c, s.key));
             let value_ref: Option<&dyn Fn(&crate::setting::Setting) -> String> = value.as_ref().map(|f| f as _);
-            // A fresh nonce per response for the copy button's script, which the page emits only while
-            // a device code is on screen; failing to get one drops the script, never widens.
+            // A fresh nonce per response for the card's script; failing to get one drops the script,
+            // never widens, and the page falls back to reloading while a sign-in runs.
             head.script_nonce = (!nonce.is_empty()).then_some(nonce.as_str());
             crate::ui::portals::portal_page(
                 &site,
-                &crate::ui::portals::PortalView {
-                    status,
-                    signin_started: query_value(query, "signin").is_some(),
-                    signed_out: query_value(query, "signout").is_some(),
-                    now_unix: unix_now(),
-                    nonce: &nonce,
-                    value: value_ref,
-                    flash: flash.as_ref(),
-                },
+                &crate::ui::portals::PortalView { card, now_unix: unix_now(), nonce: &nonce, value: value_ref, flash: flash.as_ref() },
             )
         }
         Place::Integrations => {
@@ -1169,7 +1200,34 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
                 None => save_core_section(stream, token, settings, place, crate::ui::portals::settings_for(status.info.kind), &form),
             }
         }
-        Place::Portals | Place::Integrations | Place::Muted | Place::Integration(_) => {
+        // Every Sign in and Cancel posts here, from the list and from a portal's page alike, so both
+        // work for a portal that is not running yet. The card's script posts in the background and
+        // ignores the redirect; without the script the redirect is where the page goes next.
+        Place::Portals => {
+            let kind = form.get("kind").and_then(|k| crate::portal::PortalKind::parse(k));
+            let portal = form.get("portal").map(|p| crate::portal::PortalId(p.clone()));
+            match (form.get("action").map(String::as_str), kind, portal) {
+                (Some("signin"), Some(kind), Some(asked)) => {
+                    infoln!("settings page asked to sign in to {}", kind.display_name());
+                    match sign_in(settings, kind, &asked) {
+                        Ok(id) => redirect(stream, &format!("/{token}/{}", crate::ui::Place::Portal(id.0).path())),
+                        Err(e) => {
+                            errorln!("could not start the {} sign-in: {e}", kind.display_name());
+                            crate::ui::flash(place, 0, format!("Could not sign in to {}: {e}", kind.display_name()));
+                            redirect(stream, &format!("/{token}/{}", place.path()));
+                        }
+                    }
+                }
+                (Some("cancel"), _, Some(id)) => {
+                    if scheduler::cancel_sign_in(&id) {
+                        infoln!("settings page cancelled the {} sign-in", id.0);
+                    }
+                    redirect(stream, &format!("/{token}/{}", crate::ui::Place::Portal(id.0).path()));
+                }
+                _ => respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
+            }
+        }
+        Place::Integrations | Place::Muted | Place::Integration(_) => {
             respond(stream, 405, "text/plain; charset=utf-8", b"Method not allowed", true)
         }
     }
@@ -1236,34 +1294,64 @@ fn save_core_section(
 /// long as the user takes costs nothing but a paused poll. The redirect back says what was asked, so
 /// the page can say it at once even before the poll thread has published it.
 fn portal_action(stream: &mut TcpStream, token: &str, settings: &Settings, status: &crate::portal::PortalStatus, action: &str) {
-    let path = crate::ui::Place::Portal(status.info.id.0.clone()).path();
     let wake = |w: scheduler::Wake| {
         if let Ok(tx) = settings.wake.lock() {
             let _ = tx.send(w);
         }
     };
     match action {
-        // Deletes the saved credential. Handed to the poll thread like everything else that touches one.
+        // Sign out is also uninstall: the credential is deleted, the section switched off and the run
+        // dropped, so the portal goes back to a Sign in card on the list. Except the last portal,
+        // which only signs out: a tray with no portal watches nothing, and `install_portal` refuses.
         "signout" => {
             infoln!("settings page asked to sign out of {}", status.info.display_name);
+            let name = &status.info.display_name;
+            // Optimistic: every page rendered from here on says signed out, whatever poll the loop
+            // is in the middle of. The card's script has already flipped; this is for a reload or a
+            // browser without the script.
+            scheduler::note_signed_out(&status.info.id);
             wake(scheduler::Wake::SignOut(status.info.id.clone()));
-            redirect(stream, &format!("/{token}/{path}?signout=1"));
-        }
-        // Reaches the flow through a flag rather than a wake, because the poll thread is inside the flow
-        // and reads no channel until it returns.
-        "cancel" => {
-            if scheduler::cancel_sign_in(&status.info.id) {
-                infoln!("settings page cancelled the {} sign-in", status.info.display_name);
-            }
-            redirect(stream, &format!("/{token}/{path}"));
-        }
-        "signin" => {
-            infoln!("settings page asked to sign in to {}", status.info.display_name);
-            wake(scheduler::Wake::Authenticate(Some(status.info.id.clone())));
-            redirect(stream, &format!("/{token}/{path}?signin=1"));
+            let line = match crate::config::install_portal(&settings.app_asset_path, status.info.kind, false) {
+                Ok(()) => {
+                    wake(scheduler::Wake::PortalRemoved(status.info.id.clone()));
+                    format!("Signed out of {name}.")
+                }
+                Err(e) => {
+                    infoln!("{name} signed out but kept: {e}");
+                    format!("Signed out of {name}. It stays listed, since it is the only portal.")
+                }
+            };
+            let list = crate::ui::Place::Portals;
+            crate::ui::flash(&list, 0, line);
+            redirect(stream, &format!("/{token}/{}", list.path()));
         }
         _ => respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
     }
+}
+
+/// Sign in, which is also install: a portal already running signs in; a kind that is not has its
+/// section written (switched on), the loop told to build it, and signs in straight away. The sign-in
+/// runs on its own thread from the first moment, so the code does not wait for the loop, which may be
+/// in the middle of a poll. Returns the portal's id, which the section may name differently.
+fn sign_in(settings: &Settings, kind: crate::portal::PortalKind, asked: &crate::portal::PortalId) -> Result<crate::portal::PortalId, String> {
+    let wake = settings.wake.lock().map_err(|_| "GitHoot is shutting down".to_string())?.clone();
+    let running = scheduler::portal_statuses().into_iter().any(|p| p.info.id == *asked);
+    let id = if running {
+        asked.clone()
+    } else {
+        crate::config::install_portal(&settings.app_asset_path, kind, true)?;
+        let id = crate::config::Config::load(&settings.app_asset_path)
+            .0
+            .portals()
+            .into_iter()
+            .find(|p| p.kind == kind)
+            .map(|p| p.id)
+            .ok_or_else(|| "config.txt was written but does not describe the portal".to_string())?;
+        let _ = wake.send(scheduler::Wake::PortalChanged(id.clone()));
+        id
+    };
+    scheduler::start_sign_in(id.clone(), wake);
+    Ok(id)
 }
 
 /// One integration's page: the header card, its declared settings as sections, and its own part.
@@ -1664,13 +1752,15 @@ mod tests {
         assert!(mute_post(ours, "key=PR_a&days=3").starts_with("HTTP/1.1 404 "), "no poll ran: nothing is on the page");
     }
 
-    /// Every page of the settings site is a GET, and a POST to the page it was pressed on. The two
-    /// lists take no POST: their buttons post to the item they are about.
+    /// Every page of the settings site is a GET, and a POST to the page it was pressed on. The
+    /// integrations list takes no POST: its buttons post to the integration they are about. The
+    /// portals list does, because Install is for a portal that has no page yet.
     #[test]
     fn the_settings_site_routes_by_method() {
         use crate::ui::Place;
         for (path, place) in [
             ("general", Place::General),
+            ("portals", Place::Portals),
             ("portals/github", Place::Portal("github".into())),
             ("integrations/herdr", Place::Integration("herdr")),
             ("muted", Place::Muted),
@@ -1680,9 +1770,7 @@ mod tests {
             assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Get), Route::Site(place.clone()), "{path}");
             assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Post), Route::SitePost(place), "{path}");
         }
-        for list in ["portals", "integrations"] {
-            assert_eq!(route_write(&format!("/{TOKEN}/{list}"), Method::Post), Route::MethodNotAllowed, "{list}");
-        }
+        assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Post), Route::MethodNotAllowed);
         assert_eq!(route_get(&format!("/{TOKEN}/general"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
     }
 

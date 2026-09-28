@@ -26,6 +26,7 @@ mod update;
 mod version;
 
 use crate::portal::github::{GitHubOptions, GitHubPortal};
+use crate::portal::gitlab::GitLabPortal;
 use crate::portal::{CredentialState, Portal, PortalKind};
 
 
@@ -132,33 +133,49 @@ fn await_process_exit(pid: Option<&str>) {
 ///
 /// One portal, GitHub, for now. The list is the shape the poll loop already takes, so a second
 /// portal is one more push here and nothing downstream.
-fn build_portals(
-    config: &config::Config,
-    app_asset_path: &std::path::Path,
-    copilot: &config::Switch,
-) -> Vec<(Box<dyn Portal>, CredentialState)> {
-    // The portal's own HTTP client. Failing to build one is a broken TLS stack, not a missing
-    // credential, and nothing a click could fix: say so and run with no portal at all.
-    let http = match portal::github::api::build_client() {
-        Ok(http) => http,
-        Err(e) => {
-            report_setup_failure(&format!("Could not set up GitHub access for PR status: {e}"));
-            return Vec::new();
-        }
-    };
-    let mut portals: Vec<(Box<dyn Portal>, CredentialState)> = Vec::new();
-    for described in config.portals() {
-        let mut portal: Box<dyn Portal> = match described.kind {
+/// How a portal is built from its section of `config.txt`: at startup for every section, and again
+/// from the poll loop when the settings page installs one. One closure, so the two paths cannot
+/// drift.
+///
+/// The portal's own HTTP client is built per call. Failing to build one is a broken TLS stack, not
+/// a missing credential, and nothing a click could fix: it is logged and the portal is not built.
+fn portal_builder(app_asset_path: std::path::PathBuf, copilot: config::Switch) -> scheduler::PortalBuilder {
+    std::sync::Arc::new(move |described, config| {
+        let http = match portal::github::api::build_client() {
+            Ok(http) => http,
+            Err(e) => {
+                errorln!("could not set up {} access for PR status: {e}", described.kind.display_name());
+                return None;
+            }
+        };
+        Some(match described.kind {
             PortalKind::GitHub => Box::new(GitHubPortal::new(
-                described.id,
+                described.id.clone(),
                 &described.base_url,
-                http.clone(),
-                app_asset_path.to_path_buf(),
+                http,
+                app_asset_path.clone(),
                 GitHubOptions {
                     copilot_reviews: copilot.clone(),
                     status_components: config.status_components.clone(),
                 },
             )),
+            PortalKind::GitLab => Box::new(GitLabPortal::new(
+                described.id.clone(),
+                &described.base_url,
+                http,
+                app_asset_path.clone(),
+                described.client_id.as_deref(),
+            )),
+        })
+    })
+}
+
+fn build_portals(config: &config::Config, build: &scheduler::PortalBuilder) -> Vec<(Box<dyn Portal>, CredentialState)> {
+    let mut portals: Vec<(Box<dyn Portal>, CredentialState)> = Vec::new();
+    for described in config.portals() {
+        let Some(mut portal) = build(&described, config) else {
+            report_setup_failure(&format!("Could not set up {} access for PR status", described.kind.display_name()));
+            continue;
         };
         let credential = if config.any_pr_enabled() {
             load_credential(portal.as_mut())
@@ -279,7 +296,8 @@ fn main() {
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
     let copilot = config::Switch::new(config.copilot_reviews);
-    let portals = build_portals(&config, &app_asset_path, &copilot);
+    let build_portal = portal_builder(app_asset_path.clone(), copilot.clone());
+    let portals = build_portals(&config, &build_portal);
 
     let mut indicator = AppIndicator::new("githoot", "");
     indicator.set_status(AppIndicatorStatus::Active);
@@ -613,6 +631,7 @@ fn main() {
         },
         scheduler::PollInputs {
             portals,
+            build_portal,
             app_asset_path: app_asset_path.clone(),
             update_check: config.update_check,
             // Mapped over the axes rather than written as a literal, so the axis name appears on both
@@ -761,7 +780,8 @@ fn main() {
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
     let copilot = config::Switch::new(config.copilot_reviews);
-    let portals = build_portals(&config, &app_asset_path, &copilot);
+    let build_portal = portal_builder(app_asset_path.clone(), copilot.clone());
+    let portals = build_portals(&config, &build_portal);
 
     // ── Tray ─────────────────────────────────────────────────────────────────
 
@@ -1081,6 +1101,7 @@ fn main() {
     scheduler::start_notification_scheduler(
         scheduler::PollInputs {
             portals,
+            build_portal,
             app_asset_path: app_asset_path.clone(),
             update_check: config.update_check,
             // Mapped over the axes rather than written as a literal, so the axis name appears on both

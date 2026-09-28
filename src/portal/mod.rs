@@ -26,6 +26,8 @@
 //!   portal asks for, and the scheduler paces to the slowest.
 
 pub mod github;
+pub mod gitlab;
+pub mod oauth;
 pub mod statuspage;
 pub mod types;
 
@@ -41,12 +43,38 @@ use types::PollResponse;
 /// The config section name: `github` for the implicit one every existing install has. Never shown to
 /// the user, who sees [`PortalInfo::display_name`]; this is for telling two portals of the same kind
 /// apart, which a display name cannot be relied on to do.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PortalId(pub String);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PortalKind {
     GitHub,
+    GitLab,
+}
+
+impl PortalKind {
+    pub const ALL: [PortalKind; 2] = [PortalKind::GitHub, PortalKind::GitLab];
+
+    /// The word `config.txt` and the Install form use: `portal.<name>.type=<key>`.
+    pub fn key(self) -> &'static str {
+        match self {
+            PortalKind::GitHub => "github",
+            PortalKind::GitLab => "gitlab",
+        }
+    }
+
+    /// The inverse of `key`, exact: the file is lowercase and a typo is not a portal.
+    pub fn parse(key: &str) -> Option<PortalKind> {
+        PortalKind::ALL.into_iter().find(|kind| kind.key() == key)
+    }
+
+    /// What the list calls a kind that is not running yet, before any portal exists to ask.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            PortalKind::GitHub => "GitHub",
+            PortalKind::GitLab => "GitLab",
+        }
+    }
 }
 
 /// How a portal's credential comes to exist. Read by the UI for wording, never by the scheduler:
@@ -301,4 +329,20 @@ pub trait Portal: Send {
     /// shown; `Some(Err)` means we could not find out, which is not an outage. How often to ask is
     /// the scheduler's decision, not the portal's.
     fn health(&mut self) -> Option<Result<HealthReport, String>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The key is what `config.txt` and a form say; it round-trips, and every kind has one.
+    #[test]
+    fn every_kind_has_a_key_that_round_trips() {
+        for kind in PortalKind::ALL {
+            assert_eq!(PortalKind::parse(kind.key()), Some(kind));
+            assert!(!kind.display_name().is_empty());
+        }
+        assert_eq!(PortalKind::parse("bitbucket"), None);
+        assert_eq!(PortalKind::parse("GitHub"), None, "keys are lowercase, as the file has them");
+    }
 }

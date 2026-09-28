@@ -186,6 +186,7 @@ const STYLESHEET: &str = "\
 @media(prefers-color-scheme:dark){:root{--bg:#14171a;--card:#1c2024;--ink:#e8eaed;--dim:#9aa4ae;\
 --line:#2b3136;--ok:#4ad07a;--warn:#e0a44a;--bad:#f07070}}\
 *{box-sizing:border-box}\
+[hidden]{display:none!important}\
 body{margin:0;background:var(--bg);color:var(--ink);\
 font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}\
 main{max-width:56rem;margin:0 auto;padding:1.5rem 1rem 3rem}\
@@ -268,10 +269,25 @@ a.ghost svg{width:1rem;height:1rem;flex:none}\
 textarea{display:block;box-sizing:border-box;width:100%;min-height:14rem;margin:.3rem 0 1rem;\
 padding:.6rem .7rem;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:inherit;\
 font:.9rem/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;resize:vertical}\
-.code-row{display:flex;gap:.6rem;align-items:stretch;margin:.6rem 0}\
-.code-row input{flex:0 0 auto;width:11ch;box-sizing:content-box;text-align:center;font:inherit;\
-font-size:1.5rem;font-weight:700;letter-spacing:.15em;padding:.55rem .6rem;border:1px solid var(--line);\
-border-radius:8px;background:var(--bg);color:inherit}\
+.portal-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25rem .75rem}\
+.portal-status{color:var(--dim);font-size:.9rem}\
+.portal-card[data-state=signing_in] .portal-status{color:var(--ink)}\
+.sign-in{display:grid;gap:.55rem;margin-top:.75rem}\
+.sign-in-text{margin:0}\
+.code-row{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}\
+.device-code{display:inline-block;min-width:10ch;text-align:center;padding:.45rem .8rem;border:1px solid var(--line);\
+border-radius:8px;background:var(--bg);font:700 1.6rem/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
+letter-spacing:.12em;font-variant-numeric:tabular-nums;user-select:all}\
+.device-code.pending{color:var(--dim);animation:breathe 1.6s ease-in-out infinite}\
+@keyframes breathe{50%{opacity:.4}}\
+@media(prefers-reduced-motion:reduce){.device-code.pending{animation:none}}\
+.sign-in-foot{display:flex;flex-wrap:wrap;gap:1rem;align-items:center;color:var(--dim);font-size:.85rem}\
+.sign-in-foot form{margin:0}\
+.expiry{font-variant-numeric:tabular-nums}\
+.expiry:empty{display:none}\
+.sign-in-error{margin:.5rem 0 0;color:var(--bad);font-size:.9rem}\
+button:disabled{opacity:.45;cursor:default}\
+button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}\
 .portal{font-size:.85rem;font-weight:600;letter-spacing:.04em;opacity:.7;margin:1.4rem 0 .5rem}";
 
 /// One axis's whole page.
@@ -1174,6 +1190,13 @@ mod tests {
         assert!(html.contains(r#"<a href="/tok/muted">all muted</a>"#), "a way to every muted PR");
         assert!(html.contains(r#"value="0"><button class="link" type="submit">Unmute</button>"#));
         assert!(html.contains("1 pull request(s)"), "the muted one is not counted");
+    }
+
+    /// `hidden` must win over any `display` a class sets, or a card shows its idle buttons and its
+    /// sign-in panel at once: `.actions{display:flex}` outranks the browser's own `[hidden]` rule.
+    #[test]
+    fn the_hidden_attribute_always_hides() {
+        assert!(STYLESHEET.contains("[hidden]{display:none!important}"));
     }
 
     /// Every link a page renders is caught by a rule that names its container: `.card a`,

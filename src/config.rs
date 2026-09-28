@@ -38,6 +38,8 @@ const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 const KEY_LOCAL_API: &str = "localApi";
 /// Every integration's settings live under `integration.<id>.`, and only there. See `crate::integration`.
 const INTEGRATION_PREFIX: &str = "integration.";
+/// Every named portal's settings live under `portal.<name>.`. See [`Config::portals`].
+const PORTAL_PREFIX: &str = "portal.";
 
 /// Every component GitHub publishes on its status page, in the order the page lists them.
 ///
@@ -149,6 +151,9 @@ pub struct PortalConfig {
     pub kind: PortalKind,
     /// Origin with no trailing slash. The adapter derives every endpoint from it.
     pub base_url: String,
+    /// The OAuth application to sign in with, from `portal.<name>.clientId`. `None` for the implicit
+    /// GitHub portal, whose App ships in the binary.
+    pub client_id: Option<String>,
 }
 
 /// The id of the portal every existing install has without a line in the file to say so.
@@ -203,6 +208,9 @@ pub struct Config {
     /// module: `config` must not grow a field every time an integration does. What may be *written* is
     /// checked against what the integration declared, in `integration::set`.
     pub integrations: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// Each named portal's settings, by name and then by key, read the way `integrations` is. A
+    /// `BTreeMap` so the portals come out in name order: `parse` keeps no line order to offer.
+    portal_sections: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 /// Where the settings file lives.
@@ -546,7 +554,8 @@ impl Config {
             // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
             // *missing* key as on and open the door on every install that never asked.
             local_api: values.get(KEY_LOCAL_API).is_some_and(|v| is_on(v)),
-            integrations: integration_values(values),
+            integrations: sections(values, INTEGRATION_PREFIX),
+            portal_sections: sections(values, PORTAL_PREFIX),
         }
     }
 
@@ -577,30 +586,128 @@ impl Config {
     ///
     /// With none of them enabled there is no reason to obtain a PR credential at all, which is what
     /// keeps a switched-off feature from making a network call or raising a sign-in dialog.
-    /// The portals to watch, in the order they should appear.
+    /// The portals to watch, in name order.
     ///
-    /// Always exactly one today: the implicit GitHub portal every existing `config.txt` describes
-    /// without naming it. That is deliberate, not a stub. Naming portals in the file
-    /// (`portal.<name>.type=github|gitlab|bitbucket`, `portal.<name>.url=`, and per-portal
-    /// `enabled`, `interval` and `clientId` after it) is reserved for the release that ships a
-    /// second kind of portal, and the rule for that day is already fixed here: the moment any
-    /// `portal.` key is present the implicit one disappears, so an old file and a new file never
-    /// describe two different models at once. The flat `key=value` parser reads dotted keys as they
-    /// are, so nothing about the file format changes when they arrive.
+    /// A file with no `portal.` key describes one GitHub portal without naming it, which is every
+    /// `config.txt` written before GitLab arrived. The moment any `portal.` key is present that
+    /// implicit portal disappears and the file describes exactly the sections it names, so an old
+    /// reading and a new one never add up to two different models at once. Keeping GitHub beside
+    /// GitLab therefore means naming it: `portal.github.type=github`.
     ///
-    /// GitHub Enterprise Server is not a URL swap either: its device flow needs a GitHub App
-    /// registered on that instance, so `url` ships together with `clientId` or not at all.
+    /// A section is `portal.<name>.type=github|gitlab`, with optional `url`, `clientId` and
+    /// `enabled=off`. One that cannot be built (no type, an unknown one, a url that is not http(s)) is
+    /// left out with a line in the log rather than guessed at.
+    ///
+    /// GitHub Enterprise Server is not a URL swap: its device flow needs a GitHub App registered on
+    /// that instance, so a `url` on a GitHub section is ignored until `url` and `clientId` can ship
+    /// together for it.
     pub fn portals(&self) -> Vec<PortalConfig> {
-        vec![PortalConfig {
-            id: PortalId(IMPLICIT_PORTAL.to_string()),
-            kind: PortalKind::GitHub,
-            base_url: crate::portal::github::DEFAULT_BASE_URL.to_string(),
-        }]
+        if self.portal_sections.is_empty() {
+            return vec![PortalConfig {
+                id: PortalId(IMPLICIT_PORTAL.to_string()),
+                kind: PortalKind::GitHub,
+                base_url: crate::portal::github::DEFAULT_BASE_URL.to_string(),
+                client_id: None,
+            }];
+        }
+        let mut github_seen = false;
+        self.portal_sections
+            .iter()
+            .filter_map(|(name, section)| portal_from(name, section))
+            .filter(|portal| {
+                // One shipped App, one saved credential: a second GitHub section would poll
+                // github.com twice under two names. The first by name stays.
+                if portal.kind != PortalKind::GitHub {
+                    return true;
+                }
+                if github_seen {
+                    errorln!("config: portal.{} left out: only one GitHub portal is supported", portal.id.0);
+                }
+                !std::mem::replace(&mut github_seen, true)
+            })
+            .collect()
     }
 
     pub fn any_pr_enabled(&self) -> bool {
         PrAxis::ALL.iter().any(|&axis| self.pr_enabled(axis))
     }
+}
+
+/// One `portal.<name>.` section as a portal to build, or `None` (logged) when it cannot be one.
+fn portal_from(name: &str, section: &std::collections::BTreeMap<String, String>) -> Option<PortalConfig> {
+    // The name becomes a token file name and a settings-page URL segment, so it is held to the shape
+    // `ui::Place` routes: lowercase letters, digits and hyphens, at most 32 of them.
+    let plain = !name.is_empty()
+        && name.len() <= 32
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !plain {
+        errorln!("config: portal.{name} left out: a portal name is lowercase letters, digits and hyphens");
+        return None;
+    }
+    if section.get("enabled").is_some_and(|v| is_off(v)) {
+        return None;
+    }
+    let Some(kind) = section.get("type").and_then(|t| PortalKind::parse(t)) else {
+        errorln!("config: portal.{name} left out: type {:?} is not github or gitlab", section.get("type"));
+        return None;
+    };
+    let default_base = match kind {
+        PortalKind::GitHub => crate::portal::github::DEFAULT_BASE_URL,
+        PortalKind::GitLab => crate::portal::gitlab::DEFAULT_BASE_URL,
+    };
+    let base_url = match (kind, section.get("url").filter(|u| !u.is_empty())) {
+        (PortalKind::GitHub, Some(_)) => {
+            errorln!("config: portal.{name}.url ignored: GitHub Enterprise Server is not supported yet");
+            default_base.to_string()
+        }
+        (_, Some(url)) if url.starts_with("https://") || url.starts_with("http://") => {
+            url.trim_end_matches('/').to_string()
+        }
+        (_, Some(url)) => {
+            errorln!("config: portal.{name} left out: url {url:?} is not http(s)");
+            return None;
+        }
+        (_, None) => default_base.to_string(),
+    };
+    Some(PortalConfig {
+        id: PortalId(name.to_string()),
+        kind,
+        base_url,
+        client_id: section.get("clientId").filter(|v| !v.is_empty()).cloned(),
+    })
+}
+
+/// Installs or uninstalls a kind of portal from the settings page, by writing its `portal.` section
+/// with the same one-line edits every other setting gets.
+///
+/// The section is named after the kind (`portal.gitlab.`) unless one of that kind already exists
+/// under another name, which is then the one switched. Installing into a file that names no portal
+/// names GitHub first, because the first `portal.` key retires the implicit GitHub portal and an
+/// Install must never take a portal away. Uninstall switches the section off and keeps its other
+/// lines, so a url or client id survives a change of mind, and it refuses to leave the tray with no
+/// portal at all: a tray that watches nothing says nothing, and no button should lead there.
+///
+/// Portals are built at startup, so either takes effect after a restart. The page says so.
+pub fn install_portal(app_asset_path: &Path, kind: PortalKind, on: bool) -> Result<(), String> {
+    let (cfg, _) = Config::load(app_asset_path);
+    if !on && !cfg.portals().iter().any(|p| p.kind != kind) {
+        return Err("the last portal cannot be uninstalled".to_string());
+    }
+    let existing = cfg
+        .portal_sections
+        .iter()
+        .find(|(_, s)| s.get("type").is_some_and(|t| t == kind.key()))
+        .map(|(name, _)| name.clone());
+
+    let path = config_path(app_asset_path);
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+    if cfg.portal_sections.is_empty() && kind != PortalKind::GitHub {
+        content = with_value_set(&content, &format!("{PORTAL_PREFIX}github.type"), PortalKind::GitHub.key());
+    }
+    let name = existing.unwrap_or_else(|| kind.key().to_string());
+    content = with_value_set(&content, &format!("{PORTAL_PREFIX}{name}.type"), kind.key());
+    content = with_value_set(&content, &format!("{PORTAL_PREFIX}{name}.enabled"), if on { "on" } else { "off" });
+    std::fs::write(&path, content).map_err(|e| format!("could not write {} ({e})", path.display()))
 }
 
 /// The config key for `axis`. The one place the mapping lives.
@@ -715,12 +822,13 @@ fn integrations_section() -> String {
 
 /// Every `integration.<id>.<key>` line, grouped by id. A line with no key after the id is ignored,
 /// as an unknown key always has been.
-fn integration_values(
+fn sections(
     values: &std::collections::HashMap<&str, &str>,
+    prefix: &str,
 ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
     let mut out: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> = Default::default();
     for (key, value) in values {
-        let Some((id, setting)) = key.strip_prefix(INTEGRATION_PREFIX).and_then(|rest| rest.split_once('.')) else {
+        let Some((id, setting)) = key.strip_prefix(prefix).and_then(|rest| rest.split_once('.')) else {
             continue;
         };
         if !id.is_empty() && !setting.is_empty() {
@@ -1629,7 +1737,162 @@ mod tests {
             assert_eq!(portals[0].id, PortalId("github".to_string()));
             assert_eq!(portals[0].kind, PortalKind::GitHub);
             assert_eq!(portals[0].base_url, "https://github.com");
+            assert_eq!(portals[0].client_id, None);
         }
     }
-}
 
+    /// Naming one portal retires the implicit one: the file describes exactly what it names, so an
+    /// old reading and a new reading never add up to two different models at once.
+    #[test]
+    fn naming_a_gitlab_portal_retires_the_implicit_github_one() {
+        let portals = values("portal.gitlab.type=gitlab\nportal.gitlab.clientId=abc").portals();
+        assert_eq!(portals.len(), 1, "got {portals:?}");
+        assert_eq!(portals[0].id, PortalId("gitlab".to_string()));
+        assert_eq!(portals[0].kind, PortalKind::GitLab);
+        assert_eq!(portals[0].base_url, "https://gitlab.com", "gitlab.com unless a url says otherwise");
+        assert_eq!(portals[0].client_id.as_deref(), Some("abc"));
+    }
+
+    /// Keeping GitHub beside GitLab means naming it, and the portals come in name order, which is the
+    /// one order a hash of lines can promise.
+    #[test]
+    fn both_portals_named_are_both_watched_in_name_order() {
+        let portals =
+            values("portal.work.type=gitlab\nportal.work.url=https://git.example.com/\nportal.github.type=github")
+                .portals();
+        let ids: Vec<&str> = portals.iter().map(|p| p.id.0.as_str()).collect();
+        assert_eq!(ids, ["github", "work"]);
+        assert_eq!(portals[0].kind, PortalKind::GitHub);
+        assert_eq!(portals[0].base_url, "https://github.com");
+        assert_eq!(portals[1].base_url, "https://git.example.com", "trailing slash trimmed");
+    }
+
+    #[test]
+    fn a_portal_switched_off_is_not_watched() {
+        let portals =
+            values("portal.github.type=github\nportal.gitlab.type=gitlab\nportal.gitlab.enabled=off").portals();
+        let ids: Vec<&str> = portals.iter().map(|p| p.id.0.as_str()).collect();
+        assert_eq!(ids, ["github"]);
+    }
+
+    /// A section that cannot be built is left out, not guessed at. Bitbucket is designed but not
+    /// shipped, and a url that is not http(s) is not a portal anyone can reach.
+    #[test]
+    fn a_portal_that_cannot_be_built_is_left_out() {
+        for text in [
+            "portal.x.url=https://gitlab.com",
+            "portal.x.type=bitbucket",
+            "portal.x.type=gitlub",
+            "portal.x.type=gitlab\nportal.x.url=ftp://git.example.com",
+        ] {
+            assert!(values(text).portals().is_empty(), "{text:?} should describe no portal");
+        }
+    }
+
+    /// The name becomes a token file name and a settings-page URL segment, so it is held to the same
+    /// shape the page router accepts: lowercase letters, digits and hyphens. Anything else is not a
+    /// portal, however well-formed the rest of its section is.
+    #[test]
+    fn a_portal_name_that_is_not_a_plain_word_is_left_out() {
+        let too_long = "x".repeat(33);
+        for name in ["Foo", "foo/bar", "foo_bar", "a b", too_long.as_str()] {
+            let text = format!("portal.{name}.type=gitlab");
+            assert!(values(&text).portals().is_empty(), "{name:?} should describe no portal");
+        }
+        assert_eq!(values("portal.my-lab2.type=gitlab").portals().len(), 1);
+    }
+
+    /// Every GitHub portal signs in with the one shipped App and the one saved credential, so a
+    /// second GitHub section would poll github.com twice under two names. The first by name stays.
+    #[test]
+    fn only_one_github_portal_is_built() {
+        let portals = values("portal.a.type=github\nportal.b.type=github\nportal.c.type=gitlab").portals();
+        let ids: Vec<&str> = portals.iter().map(|p| p.id.0.as_str()).collect();
+        assert_eq!(ids, ["a", "c"]);
+    }
+
+    /// GitHub Enterprise Server needs its own GitHub App, so a url on a GitHub section is not honoured
+    /// yet; the section still means github.com rather than silently pointing somewhere else.
+    #[test]
+    fn a_github_portal_ignores_a_url_until_enterprise_server_ships() {
+        let portals = values("portal.github.type=github\nportal.github.url=https://ghe.example.com").portals();
+        assert_eq!(portals[0].base_url, "https://github.com");
+    }
+
+    // ── Installing a portal from the page ─────────────────────────────────────
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("githoot-portal-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ids_in(dir: &Path) -> Vec<String> {
+        Config::load(dir).0.portals().into_iter().map(|p| p.id.0).collect()
+    }
+
+    /// The first named portal retires the implicit GitHub one, so the first Install names GitHub too:
+    /// pressing Install for GitLab must never take GitHub away. The rest of the file is untouched.
+    #[test]
+    fn installing_gitlab_into_an_unnamed_file_keeps_github_by_naming_it() {
+        let dir = scratch("install");
+        std::fs::write(config_path(&dir), "sound=off\n").unwrap();
+        install_portal(&dir, PortalKind::GitLab, true).unwrap();
+        let text = std::fs::read_to_string(config_path(&dir)).unwrap();
+        assert!(text.starts_with("sound=off\n"), "{text}");
+        assert!(text.contains("portal.github.type=github\n"), "{text}");
+        assert!(text.contains("portal.gitlab.type=gitlab\n"), "{text}");
+        assert_eq!(ids_in(&dir), ["github", "gitlab"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A section of that kind already there, under whatever name, is switched back on rather than
+    /// joined by a second one.
+    #[test]
+    fn installing_a_kind_that_is_named_but_off_switches_it_on() {
+        let dir = scratch("reinstall");
+        std::fs::write(config_path(&dir), "portal.github.type=github\nportal.work.type=gitlab\nportal.work.enabled=off\n").unwrap();
+        install_portal(&dir, PortalKind::GitLab, true).unwrap();
+        let text = std::fs::read_to_string(config_path(&dir)).unwrap();
+        assert!(text.contains("portal.work.enabled=on\n"), "{text}");
+        assert!(!text.contains("portal.gitlab."), "{text}");
+        assert_eq!(ids_in(&dir), ["github", "work"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Uninstall switches the section off and keeps it, so its url and client id survive a change of
+    /// mind; it never deletes a line from a file the user owns.
+    #[test]
+    fn uninstalling_switches_the_section_off_and_keeps_it() {
+        let dir = scratch("uninstall");
+        std::fs::write(config_path(&dir), "portal.github.type=github\nportal.gitlab.type=gitlab\nportal.gitlab.clientId=abc\n").unwrap();
+        install_portal(&dir, PortalKind::GitLab, false).unwrap();
+        let text = std::fs::read_to_string(config_path(&dir)).unwrap();
+        assert!(text.contains("portal.gitlab.clientId=abc\n") && text.contains("portal.gitlab.enabled=off\n"), "{text}");
+        assert_eq!(ids_in(&dir), ["github"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GitHub can be uninstalled too, which also works from a file that never named it.
+    #[test]
+    fn uninstalling_github_from_an_unnamed_file_names_it_off() {
+        let dir = scratch("uninstall-github");
+        std::fs::write(config_path(&dir), "portal.x.type=gitlab\n").unwrap();
+        install_portal(&dir, PortalKind::GitHub, false).unwrap();
+        assert_eq!(ids_in(&dir), ["x"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tray with no portal at all watches nothing and says nothing, and no button should be able to
+    /// get there. Refused, and the file is left as it was.
+    #[test]
+    fn uninstalling_the_last_portal_is_refused() {
+        let dir = scratch("last");
+        std::fs::write(config_path(&dir), "sound=off\n").unwrap();
+        assert!(install_portal(&dir, PortalKind::GitHub, false).is_err());
+        assert_eq!(std::fs::read_to_string(config_path(&dir)).unwrap(), "sound=off\n");
+        assert_eq!(ids_in(&dir), ["github"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

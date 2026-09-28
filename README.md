@@ -117,6 +117,17 @@ updateCheck=on              # check for a newer release daily
 statusComponents=Pull Requests, Actions, API Requests   # which GitHub outages may raise the mark
 ```
 
+GitLab is a portal too. **Settings ▸ Portals ▸ Sign in to GitLab** adds gitlab.com and signs in, in one step. That writes
+the lines below; a self-managed instance needs them by hand, with its own OAuth application (non-confidential,
+scope `read_api`), because the one GitHoot ships is registered on gitlab.com:
+
+```ini
+portal.github.type=github
+portal.gitlab.type=gitlab
+# portal.gitlab.url=https://git.example.com          # self-managed only
+# portal.gitlab.clientId=<your application id>       # self-managed only
+```
+
 Switching a PR signal off removes its bar **and stops it being searched for**, so it costs nothing
 against the rate limit → [every key, and what it costs](docs/menu-and-settings.md#settings).
 
@@ -151,7 +162,7 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [Startup](docs/startup.md) | The one first-run question, what it writes on each platform, and how to undo it |
 | [Menu and settings](docs/menu-and-settings.md) | All menu entries and all config keys |
 | [PR status](docs/pr-status.md) | The three queries, the GraphQL rationale, the GitHub App |
-| [Portals](docs/portals.md) | The seam GitHub sits behind, and what GitLab and Bitbucket will have to bring to it |
+| [Portals](docs/portals.md) | The seam GitHub and GitLab sit behind, and what Bitbucket will have to bring to it |
 | [The PR page](docs/pr-page.md) | What the menu entries open, why it is served locally, and what guards it |
 | [Settings pages](docs/menu-and-settings.md#the-settings-pages) | Every setting in your browser, by what it is about, with a sidebar; and the guard writing needed |
 | [The local API](docs/local-api.md) | Serving the judged lists as JSON to your own scripts, off by default |

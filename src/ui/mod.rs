@@ -92,10 +92,11 @@ impl Place {
         }
     }
 
-    /// Whether a POST here is something the page offers. The two lists carry buttons, but those post
-    /// to the item they are about, so a POST to a list is the wrong method.
+    /// Whether a POST here is something the page offers. The integrations list carries buttons that
+    /// post to the integration they are about, so a POST to it is the wrong method. The portals list
+    /// takes one: Install is for a portal that has no page of its own yet.
     pub fn takes_posts(&self) -> bool {
-        !matches!(self, Place::Portals | Place::Integrations)
+        !matches!(self, Place::Integrations)
     }
 }
 
