@@ -761,6 +761,10 @@ mod tests {
             checks: CheckRollup::Success,
             verdicts: vec![],
             pending: vec![],
+            branch: None,
+            head_ref: None,
+            labels: Vec::new(),
+            changes: None,
         }
     }
 

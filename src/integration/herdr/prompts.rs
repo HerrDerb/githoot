@@ -22,11 +22,10 @@ use std::path::{Path, PathBuf};
 /// The prompt files the dispatcher reads, and what each ships as. One per bar, plus what a
 /// nudge says. The script carries copies of these as its fallback for a hand install; a test
 /// below fails if the two ever drift.
-pub const DEFAULT_PROMPTS: [(&str, &str); 4] = [
+pub const DEFAULT_PROMPTS: [(&str, &str); 3] = [
     ("work-required", include_str!("../../../contrib/prompts/work-required.txt")),
     ("requested-reviews", include_str!("../../../contrib/prompts/requested-reviews.txt")),
     ("approved", include_str!("../../../contrib/prompts/approved.txt")),
-    ("update", include_str!("../../../contrib/prompts/update.txt")),
 ];
 
 
@@ -212,10 +211,10 @@ mod tests {
     fn install_writes_default_prompts_only_where_none_exist() {
         let home = temp_home("install-prompts");
         std::fs::create_dir_all(prompts_dir(&home)).unwrap();
-        std::fs::write(prompt_path(&home, "update"), "mine\n").unwrap();
+        std::fs::write(prompt_path(&home, "work-required"), "mine\n").unwrap();
         let kept = refresh_defaults(&home).unwrap();
-        assert_eq!(kept, vec!["update"]);
-        assert_eq!(std::fs::read_to_string(prompt_path(&home, "update")).unwrap(), "mine\n");
+        assert_eq!(kept, vec!["work-required"]);
+        assert_eq!(std::fs::read_to_string(prompt_path(&home, "work-required")).unwrap(), "mine\n");
         assert_eq!(std::fs::read_to_string(prompt_path(&home, "approved")).unwrap(), DEFAULT_PROMPTS[2].1);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -229,18 +228,18 @@ mod tests {
         // Pretend an older GitHoot wrote these two: file text and recorded hash both the old default.
         let old = "an older default {url}\n";
         let mut shipped = read_shipped(&home);
-        for name in ["approved", "update"] {
+        for name in ["approved", "work-required"] {
             std::fs::write(prompt_path(&home, name), old).unwrap();
             shipped.insert(name.to_string(), digest(old));
         }
         write_shipped(&home, &shipped).unwrap();
         // Then you edit one of them.
-        std::fs::write(prompt_path(&home, "update"), "my own words {url}\n").unwrap();
+        std::fs::write(prompt_path(&home, "work-required"), "my own words {url}\n").unwrap();
 
         let kept = refresh_defaults(&home).unwrap();
-        assert_eq!(kept, vec!["update"]);
+        assert_eq!(kept, vec!["work-required"]);
         assert_eq!(std::fs::read_to_string(prompt_path(&home, "approved")).unwrap(), DEFAULT_PROMPTS[2].1, "untouched: refreshed");
-        assert_eq!(std::fs::read_to_string(prompt_path(&home, "update")).unwrap(), "my own words {url}\n", "edited: kept");
+        assert_eq!(std::fs::read_to_string(prompt_path(&home, "work-required")).unwrap(), "my own words {url}\n", "edited: kept");
         let _ = std::fs::remove_dir_all(&home);
     }
 

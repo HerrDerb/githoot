@@ -59,8 +59,9 @@ any one of them.
 
 - **The bars as the icon and the pages see them**, one batch per bar. A bar GitHoot has no confirmed
   answer for is not handed over at all, because "nobody could ask" is not "nothing there".
-- **Only portals it declared.** The dispatcher asks `gh` about every pull request, so it declares
-  GitHub, and a GitLab pull request will never reach it.
+- **Only portals it declared.** The dispatcher declares every portal kind: it asks no forge anything,
+  and checks a pull request out from the head ref its portal names. An integration that did talk to
+  one forge would declare only that one, and nothing from another would reach it.
 - **No muted pull requests.** They are counted, so a dry run can say how many were skipped, and never
   handed over. Starting an agent for a pull request you asked to stop hearing about would be the
   loudest way to ignore that.

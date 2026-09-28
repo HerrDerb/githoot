@@ -12,9 +12,8 @@ shipped default; a file in your own `prompts/` directory is yours and GitHoot wi
 | `work-required.txt` | Your pull request needs work |
 | `requested-reviews.txt` | Somebody asked you to review |
 | `approved.txt` | Your pull request is approved |
-| `update.txt` | The nudge, when a pull request changes while an agent is on it |
 
-Placeholders: `{url}` `{repo}` `{number}` `{branch}` `{title}` `{author}`.
+Placeholders: `{url}` `{repo}` `{number}` `{branch}` `{title}` `{author}` `{labels}` `{changes}`.
 
 **`{title}` and `{author}` are written by whoever opened the pull request**, and the prompt is an
 instruction to an agent holding your `gh` credential. Each default puts them in a labelled block

@@ -67,12 +67,14 @@ query($hits:Int!,$people:Int!,$review:Boolean!,$authored:Boolean!){\
   }\
 }\
 fragment mr on MergeRequest{\
-  id iid webUrl title draft updatedAt conflicts \
+  id iid webUrl title draft updatedAt conflicts sourceBranch \
   project{fullPath}\
   author{username bot}\
   headPipeline{status}\
   reviewers(first:$people){nodes{username mergeRequestInteraction{reviewState}}}\
   approvedBy(first:$people){nodes{username}}\
+  labels(first:$people){nodes{title}}\
+  diffStatsSummary{additions deletions fileCount}\
 }";
 
 /// Asks for the axes marked `true` in one request. No axis in play costs no request at all.
@@ -237,6 +239,11 @@ struct MergeRequest {
     /// Absent is no conflict known, never a conflict.
     #[serde(default)]
     conflicts: bool,
+    /// The merge request's branch by name, for saying. A fork's lives on the fork, so an integration
+    /// fetches `head_ref` instead.
+    source_branch: Option<String>,
+    labels: Option<Connection<Label>>,
+    diff_stats_summary: Option<DiffStats>,
     project: Option<Project>,
     author: Option<Author>,
     head_pipeline: Option<Pipeline>,
@@ -278,6 +285,19 @@ struct Interaction {
 #[derive(Debug, Deserialize)]
 struct User {
     username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Label {
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffStats {
+    additions: u64,
+    deletions: u64,
+    file_count: u64,
 }
 
 /// The two lists, flattened, plus who "me" is.
@@ -437,6 +457,13 @@ fn entry_from(mr: &MergeRequest) -> Option<PrEntry> {
         checks: mr.head_pipeline.as_ref().map_or(CheckRollup::Unknown, |p| pipeline_rollup(&p.status)),
         verdicts,
         pending,
+        branch: mr.source_branch.clone(),
+        head_ref: mr.iid.as_deref().and_then(|n| n.parse::<u64>().ok()).map(|n| format!("refs/merge-requests/{n}/head")),
+        labels: mr.labels.iter().flat_map(|c| c.nodes.iter().flatten()).map(|l| l.title.clone()).collect(),
+        changes: mr
+            .diff_stats_summary
+            .as_ref()
+            .map(|d| crate::portal::types::Changes { additions: d.additions, deletions: d.deletions, files: d.file_count }),
     })
 }
 
@@ -653,7 +680,7 @@ mod tests {
     fn a_full_merge_request_is_read_into_the_entry() {
         let body = r#"{"data":{"currentUser":{"username":"me","reviewRequested":{"nodes":[{
             "id":"gid://gitlab/MergeRequest/42","iid":"7","webUrl":"https://gitlab.com/g/p/-/merge_requests/7",
-            "title":"Fix it","draft":false,"updatedAt":"2026-09-28T10:00:00Z","conflicts":true,
+            "title":"Fix it","draft":false,"updatedAt":"2026-09-28T10:00:00Z","conflicts":true,"sourceBranch":"fix-it",
             "project":{"fullPath":"g/p"},"author":{"username":"alice","bot":false},
             "headPipeline":{"status":"FAILED"},
             "reviewers":{"nodes":[
@@ -662,7 +689,9 @@ mod tests {
                 {"username":"erin","mergeRequestInteraction":{"reviewState":"APPROVED"}},
                 {"username":"stale","mergeRequestInteraction":{"reviewState":"APPROVED"}},
                 {"username":"dave","mergeRequestInteraction":{"reviewState":"UNAPPROVED"}}]},
-            "approvedBy":{"nodes":[{"username":"erin"},{"username":"carol"}]}}]}}}}"#;
+            "approvedBy":{"nodes":[{"username":"erin"},{"username":"carol"}]},
+            "labels":{"nodes":[{"title":"bug"},{"title":"backend"}]},
+            "diffStatsSummary":{"additions":120,"deletions":30,"fileCount":4}}]}}}}"#;
         let results = classify(StatusCode::OK, &headers(&[]), body, 0, [true, false, false]);
         let Some(PollResult::Fresh { prs: Some(prs), .. }) = &results[0] else { panic!("got {results:?}") };
         let e = &prs[0];
@@ -686,6 +715,11 @@ mod tests {
             "approvals come from approvedBy; a reviewer whose APPROVED state has no approval behind it is not one"
         );
         assert_eq!(e.pending, vec![Reviewer::User("me".into()), Reviewer::User("dave".into())]);
+        // GitLab publishes every merge request, forks included, at this ref on the target project.
+        assert_eq!(e.branch.as_deref(), Some("fix-it"));
+        assert_eq!(e.head_ref.as_deref(), Some("refs/merge-requests/7/head"));
+        assert_eq!(e.labels, ["bug", "backend"]);
+        assert_eq!(e.changes, Some(crate::portal::types::Changes { additions: 120, deletions: 30, files: 4 }));
     }
 
     #[test]
@@ -785,6 +819,9 @@ mod tests {
 
     #[test]
     fn the_document_declares_the_variables_it_uses() {
+        assert!(MR_DOCUMENT.contains("sourceBranch"), "the branch an integration checks out");
+        assert!(MR_DOCUMENT.contains("labels(first:$people){nodes{title}}"), "the labels");
+        assert!(MR_DOCUMENT.contains("diffStatsSummary{additions deletions fileCount}"), "the size");
         for var in ["$hits", "$people", "$review", "$authored"] {
             assert!(MR_DOCUMENT.matches(var).count() >= 2, "{var} should be both declared and used");
         }

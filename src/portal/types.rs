@@ -49,6 +49,28 @@ pub struct PrEntry {
     pub verdicts: Vec<Verdict>,
     /// Reviewers with a re-review outstanding.
     pub pending: Vec<Reviewer>,
+    /// The pull request's own branch, by name, for showing to a person or an agent. Not what to
+    /// fetch: a fork's branch is not on the base repository at all.
+    pub branch: Option<String>,
+    /// The git ref on the base repository that holds the pull request's head, for an integration to
+    /// fetch and check out: `refs/pull/<n>/head` on GitHub, `refs/merge-requests/<iid>/head` on
+    /// GitLab. Both forges publish it for every pull request, forks included, so checking one out
+    /// needs no forge tool. A portal that has no such ref leaves it `None`, and nothing checks the
+    /// pull request out.
+    pub head_ref: Option<String>,
+    /// The pull request's labels, in the portal's order. Written by whoever manages the repository,
+    /// so text from outside like the title: an integration handing them to an agent marks them data.
+    pub labels: Vec<String>,
+    /// How big the change is. `None` when the portal did not say.
+    pub changes: Option<Changes>,
+}
+
+/// The size of a pull request's change: lines added and removed, and files touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Changes {
+    pub additions: u64,
+    pub deletions: u64,
+    pub files: u64,
 }
 
 /// An automatic reviewer's outstanding comments on one pull request. See `PrEntry::bot_review`.
@@ -81,6 +103,10 @@ impl PrEntry {
             checks: CheckRollup::Unknown,
             verdicts: Vec::new(),
             pending: Vec::new(),
+            branch: None,
+            head_ref: None,
+            labels: Vec::new(),
+            changes: None,
         }
     }
 }

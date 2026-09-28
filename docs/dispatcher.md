@@ -1,7 +1,7 @@
 # The Herdr dispatcher
 
-**The one thing GitHoot does that is not reading.** Everywhere else it polls GitHub, draws an icon
-and opens a page. Here it creates git branches, creates worktrees, and starts agents. That is a
+**The one thing GitHoot does that is not reading.** Everywhere else it polls your portals (GitHub,
+GitLab), draws an icon and opens a page. Here it creates git branches, creates worktrees, and starts agents. That is a
 different kind of program, so it is off by default and a typo leaves it off.
 
 It is the first [integration](integrations.md): built into GitHoot, off until you install it on the
@@ -15,23 +15,30 @@ dispatcher is switched on for (all but **approved**, by default; see [Settings](
 1. Take the bar from GitHoot's own poll. **A bar GitHoot has no confirmed answer for is skipped
    entirely.** That is not the same as an empty bar: acting on it would mean going quiet for
    exactly as long as GitHub is broken, and looking identical to a quiet morning.
-2. Skip muted pull requests, and pull requests from any forge but GitHub: the dispatcher asks `gh`
-   about each one, so it cannot act on anything else. Muted ones drop out of the state file, so when
-   the mute ends the pull request is new to the dispatcher as well.
-3. For each of the rest, compare `updated_at` with what was recorded last time. Unchanged: nothing,
-   silently, which is almost every pull request almost always.
-4. Changed: ask GitHub once for the newest comment, review or reply **not written by you**. Only
-   that is worth waking an agent for. A push of your own fixes is exactly the case that must not
-   re-run a review and bill you for "no changes".
-5. Somebody already in the worktree: **nudge them** to re-read. Nobody home: fetch the head branch,
-   cut a branch of its own, open a worktree, start an agent, hand it the prompt.
+2. Skip muted pull requests. They drop out of the state file, so when the mute ends the pull request
+   is new to the dispatcher as well.
+3. **A pull request new to the bar gets an agent.** One already dispatched while in the bar gets
+   nothing more, whatever happens to it: a push, a comment, a label. One that leaves the bar is
+   forgotten, so coming back into it (changes requested again, say) is an arrival like any other.
+4. Somebody already in the worktree: say so and leave them alone. Nobody home: fetch the pull
+   request's head, cut a branch of its own, open a worktree, start an agent, hand it the prompt.
+
+**It works the same for every portal and asks no forge anything.** What is in a bar comes from
+GitHoot's own poll, who is already working from Herdr, and the checkout from git: each portal says
+which ref holds a pull request's head on the base repository (`refs/pull/<n>/head` on GitHub,
+`refs/merge-requests/<iid>/head` on GitLab), and both forges publish that ref for forks too. A portal
+added later gets the dispatcher by saying the same.
+
+Agents are no longer nudged when someone comments after they started. That needed a forge tool to
+read comments, which is exactly what the dispatcher no longer does; an agent you want to re-read
+something, you ask in its pane.
 
 ### Two rules that shape everything
 
-**Each version of a pull request is looked at exactly once.** Started, nudged, skipped or failed,
-its `updated_at` is recorded and it is not touched again until GitHub changes it. Retrying every
-thirty seconds would burn your API rate limit on a `gh` lookup that cannot go differently. Retrying
-when the pull request changes is the retry that can.
+**A start that fails is retried when the pull request changes, not every pass.** A fetch that failed
+or a Herdr that would not answer is recorded with the pull request's `updated_at`, and tried again
+only once that moves. Retrying every thirty seconds would repeat a failure that cannot go
+differently.
 
 The exception is a **setup** failure, such as no clone where `integration.herdr.cloneRoot` says there should
 be one. That is a mistake you can correct, and the very next pass can then succeed, so it is not
@@ -77,13 +84,12 @@ tokens on work that is done. A bar switched off is skipped before anything is as
 ### Switching on is "from now on"
 
 Installing it, or switching a bar on, **starts nothing for what is already waiting.** The first pass
-takes every pull request in the bar as seen, as of that moment, with everything said on it so far as
-read, and says so in the log:
+takes every pull request in the bar as dispatched, as of that moment, and says so in the log:
 
 > `[work-required] switched on: 7 pull request(s) taken as seen, none started`
 
-From then on the normal rules apply: a pull request that enters the bar is new, and a comment from
-someone else on one that was already there wakes an agent like any other. Switching a bar off, and
+From then on the normal rule applies: a pull request that enters the bar gets an agent, and one that
+was already there gets nothing, whatever is said on it. Switching a bar off, and
 Uninstall, forget that baseline, so switching back on is "from now on" again. A bar GitHoot has no
 confirmed answer for yet, such as before the first poll, waits: a baseline of nothing would make the
 backlog look new a moment later. Dry run says what the first pass would take as seen.
@@ -96,12 +102,14 @@ shortcut or autostart, none of which carry a shell's environment.
 
 ### What it needs
 
-`herdr`, `gh` (signed in) and `git`, on `PATH`. The page names any that will not run, and nothing is
-dispatched until they all do.
+`herdr` and `git`, on `PATH`. The page shows each as a chip and names any that will not run, and
+nothing is dispatched until they all do. No forge tool is required by the dispatcher; the agent reads
+its pull request with the one that fits (`gh` for GitHub, `glab` for GitLab), signed in as you, so
+have that installed for the portals you use.
 
 ## The prompts
 
-One file per bar, plus the nudge an agent gets when its pull request changes under it. Edit them on
+One file per bar: what the agent is told when a pull request arrives in it. Edit them on
 its page, installed or not, or in `~/.githoot/integrations/herdr/prompts/`.
 
 **Clear a box to go back to the shipped default.** Beside the prompts sits `.shipped`, holding a
@@ -110,10 +118,12 @@ hash has not been edited and is brought up to the new default; one that does not
 left alone, and the page names every prompt it kept. Clearing a box writes the default back *and
 records it as ours*, so a prompt you reset follows future defaults again.
 
-Placeholders: `{url}` `{repo}` `{number}` `{branch}` `{title}` `{author}`.
+Placeholders: `{url}` `{repo}` `{number}` `{branch}` `{title}` `{author}` `{labels}` `{changes}`.
+`{labels}` is the pull request's labels, comma-separated, or `none`. `{changes}` is its size, such as
+`+120 -30 in 4 files`, or `unknown`. Both come from GitHoot's own poll, for every portal.
 
-**`{title}` and `{author}` are written by whoever opened the pull request**, and the prompt is an
-instruction to an agent holding your `gh` credential. The shipped defaults put them in a labelled
+**`{title}`, `{author}` and `{labels}` are written by other people**, and the prompt is an
+instruction to an agent holding your forge credential. The shipped defaults put them in a labelled
 block that the next line tells the agent is data, not instructions. That is the standard mitigation
 and not a cure. Keep it if you rewrite the prompts.
 
@@ -122,11 +132,11 @@ and not a cure. Keep it if you rewrite the prompts.
 The prompts say "do not push". **That is a request, not a control.**
 
 The control is the agent's own permission prompt. Herdr starts it interactively, so a `gh pr review`,
-a `gh pr merge` or a `git push` asks you first, in that pane. That is the whole defence, and it holds
+a `glab mr merge` or a `git push` asks you first, in that pane. That is the whole defence, and it holds
 only while you never start the dispatched agent with `--dangerously-skip-permissions`.
 
 What GitHoot does **not** hand over: its own credential. GitHoot's token is read-only and never
-leaves it. The agent reads the diff and the comments itself, with `gh`, under your credential.
+leaves it. The agent reads the diff and the comments itself, with `gh` or `glab`, under your credential.
 
 ## Who is already working a pull request
 

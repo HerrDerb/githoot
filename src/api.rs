@@ -104,6 +104,10 @@ fn entry_json(e: &PrEntry, muted_until: Option<u64>) -> Value {
         checks,
         verdicts,
         pending,
+        branch,
+        head_ref,
+        labels,
+        changes,
     } = e;
     json!({
         // What the hoot ledger files this under, and the most stable handle a script can hold.
@@ -123,6 +127,12 @@ fn entry_json(e: &PrEntry, muted_until: Option<u64>) -> Value {
         "checks": checks_str(*checks),
         "verdicts": verdicts.iter().map(verdict_json).collect::<Vec<_>>(),
         "pending_reviewers": pending.iter().map(reviewer_json).collect::<Vec<_>>(),
+        // For a script that wants to check the pull request out: the branch to show, and the ref on
+        // the base repository that holds its head, for forks too. `null` when the portal gives none.
+        "branch": branch,
+        "head_ref": head_ref,
+        "labels": labels,
+        "changes": changes.map(|c| json!({ "additions": c.additions, "deletions": c.deletions, "files": c.files })),
         "muted": muted_until.is_some(),
         "muted_until_unix": muted_until,
     })
@@ -267,6 +277,10 @@ mod tests {
             checks: CheckRollup::Failure,
             verdicts: vec![Verdict { login: "bob".into(), state: ReviewState::Approved }],
             pending: vec![Reviewer::Team("platform".into())],
+            branch: None,
+            head_ref: None,
+            labels: Vec::new(),
+            changes: None,
         };
         let out = entries_json(PrAxis::ReviewRequested, &snapshot(vec![(info("github"), Some(vec![pr]))]), 1758499200);
         let e = &parse(&out)["portals"][0]["entries"][0];

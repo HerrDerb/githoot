@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::portal::types::{
-    BotReview, CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict,
+    BotReview, Changes, CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict,
 };
 
 const AGENT: &str = "githoot";
@@ -40,6 +40,10 @@ const CHANGES_REVIEWS_CAP: u32 = 20;
 /// Passed as `0` by the axes with no use for it, which is not a saving to sniff at — this connection
 /// multiplies with `SEARCH_HITS_CAP`, so it is the most expensive thing in the document.
 const REVIEW_THREADS_CAP: u32 = 20;
+
+/// How many labels a hit is read with. Past 20 the rest are not handed to an agent, which is a
+/// shorter list, never a wrong one.
+const LABELS_CAP: u32 = 20;
 
 /// The login GitHub's automatic reviewer posts under.
 ///
@@ -125,11 +129,12 @@ pub fn build_client() -> reqwest::Result<Client> {
 /// `rateLimit` is free — GitHub does not charge a query for asking what it cost — and it is the only
 /// way to turn "three of these per cycle is probably fine" into a number. See `RateLimit`.
 const PR_REVIEWS_DOCUMENT: &str = "\
-query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!){\
+query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!,$labels:Int!){\
   rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
-      id url title number isDraft updatedAt mergeable \
+      id url title number isDraft updatedAt mergeable headRefName additions deletions changedFiles \
+      labels(first:$labels){nodes{name}}\
       repository{nameWithOwner}\
       author{login}\
       statusCheckRollup{state}\
@@ -207,6 +212,7 @@ fn poll_reviewed(
             // `0` where the axis has no use for them, keeping the document's most expensive
             // connection off the queries that would only pay for it.
             "threads": if threads { REVIEW_THREADS_CAP } else { 0 },
+            "labels": LABELS_CAP,
         },
     });
     let request = client.post(graphql_url).json(&body);
@@ -355,6 +361,13 @@ struct PullRequestNode {
     /// `UNKNOWN` and the next one sees the truth. Only `CONFLICTING` is ever treated as a conflict
     /// — see `blocked_by_conflict`.
     mergeable: Option<String>,
+    /// The pull request's branch by name. On a fork it lives on the fork, which is why an
+    /// integration fetches `head_ref` instead and this is only for saying.
+    head_ref_name: Option<String>,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    changed_files: Option<u64>,
+    labels: Option<LabelConnection>,
     repository: Option<Repository>,
     author: Option<Author>,
     status_check_rollup: Option<StatusCheckRollup>,
@@ -362,6 +375,16 @@ struct PullRequestNode {
     review_requests: Option<RequestConnection>,
     /// `None` for the axes that ask for `first: 0`, which is the same as "no open threads".
     review_threads: Option<ThreadConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelConnection {
+    nodes: Vec<Option<Label>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Label {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,6 +668,14 @@ fn entry_from(node: &PullRequestNode) -> Option<PrEntry> {
             .map_or(CheckRollup::Unknown, |r| CheckRollup::from_state(&r.state)),
         verdicts,
         pending,
+        branch: node.head_ref_name.clone(),
+        head_ref: node.number.map(|n| format!("refs/pull/{n}/head")),
+        labels: node.labels.iter().flat_map(|c| c.nodes.iter().flatten()).map(|l| l.name.clone()).collect(),
+        // All three or nothing: a size missing a part would be a wrong size.
+        changes: match (node.additions, node.deletions, node.changed_files) {
+            (Some(additions), Some(deletions), Some(files)) => Some(Changes { additions, deletions, files }),
+            _ => None,
+        },
     })
 }
 
@@ -1071,7 +1102,7 @@ mod tests {
     /// The document has to name every variable it uses, or GitHub rejects the whole query.
     #[test]
     fn the_query_document_declares_the_variables_it_sends() {
-        for var in ["$q", "$hits", "$reviews"] {
+        for var in ["$q", "$hits", "$reviews", "$labels"] {
             assert!(
                 PR_REVIEWS_DOCUMENT.matches(var).count() >= 2,
                 "{var} should be both declared and used"
@@ -1630,6 +1661,9 @@ mod tests {
             r#""updatedAt":"2026-09-15T09:12:33Z""#.to_string(),
             format!(r#""repository":{{"nameWithOwner":"{repo}"}}"#),
             format!(r#""author":{{"login":"{author}"}}"#),
+            r#""headRefName":"fix-debounce""#.to_string(),
+            r#""labels":{"nodes":[{"name":"bug"},{"name":"backend"}]}"#.to_string(),
+            r#""additions":120,"deletions":30,"changedFiles":4"#.to_string(),
             format!(r#""statusCheckRollup":{rollup}"#),
             r#""latestOpinionatedReviews":{"nodes":[{"state":"APPROVED","author":{"login":"alice"}}]}"#
                 .to_string(),
@@ -1700,6 +1734,23 @@ mod tests {
         assert_eq!(e.checks, CheckRollup::Success);
         assert_eq!(e.verdicts, vec![Verdict { login: "alice".into(), state: ReviewState::Approved }]);
         assert!(e.pending.is_empty());
+        // What an integration needs to check the pull request out, without asking GitHub again:
+        // its branch by name, and the ref GitHub publishes on the base repository for every pull
+        // request, forks included.
+        assert_eq!(e.branch.as_deref(), Some("fix-debounce"));
+        assert_eq!(e.head_ref.as_deref(), Some("refs/pull/7/head"));
+        assert_eq!(e.labels, ["bug", "backend"], "labels, in GitHub's order");
+        assert_eq!(e.changes, Some(Changes { additions: 120, deletions: 30, files: 4 }));
+    }
+
+    /// No number, no ref: the ref is built from it, and a guess would fetch someone else's work.
+    #[test]
+    fn a_hit_without_a_number_has_no_head_ref() {
+        let body = payload(&[r#"{"url":"https://github.com/o/r/pull/7"}"#.to_string()]);
+        let Ok(parsed) = parse_reviewed(&body, |_| true) else { panic!("parses") };
+        let e = &parsed.prs.expect("a list")[0];
+        assert_eq!(e.head_ref, None);
+        assert_eq!(e.branch, None);
     }
 
     /// A repository with no checks configured answers `null`, and that is not a failure. Painting it
@@ -1842,6 +1893,11 @@ mod tests {
             "isResolved",
             "isOutdated",
             "rateLimit",
+            "headRefName",
+            "labels",
+            "additions",
+            "deletions",
+            "changedFiles",
         ] {
             assert!(PR_REVIEWS_DOCUMENT.contains(field), "document is missing {field}");
         }

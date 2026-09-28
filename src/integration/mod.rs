@@ -390,9 +390,9 @@ mod tests {
     }
 
     #[test]
-    fn the_herdr_dispatcher_is_registered_and_acts_on_github_only() {
+    fn the_herdr_dispatcher_is_registered_and_acts_on_every_portal() {
         let herdr = find("herdr").expect("herdr must be registered");
-        assert_eq!(herdr.info().portals, &[PortalKind::GitHub]);
+        assert_eq!(herdr.info().portals, &PortalKind::ALL);
     }
 
     #[test]

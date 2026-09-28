@@ -110,6 +110,10 @@ No `-H Host:` is needed: curl sends the literal it dialled, and that literal is 
           "checks": "failure",
           "verdicts": [ { "login": "bob", "state": "approved" } ],
           "pending_reviewers": [ { "kind": "team", "name": "platform" } ],
+          "branch": "fix-debounce",
+          "head_ref": "refs/pull/1234/head",
+          "labels": [ "bug", "backend" ],
+          "changes": { "additions": 120, "deletions": 30, "files": 4 },
           "muted": false,
           "muted_until_unix": null
         }
@@ -127,6 +131,11 @@ can disagree.
 
 `pending_reviewers` tags `user` against `team` rather than flattening both to a name, because a team
 has no login and cannot be looked up as a person.
+
+`head_ref` is the ref on the base repository that holds the pull request's head, for checking it out
+with plain git: `git fetch origin <head_ref>`. It is `refs/pull/<n>/head` on GitHub and
+`refs/merge-requests/<iid>/head` on GitLab, and it works for forks too, which `branch` does not: a
+fork's branch lives on the fork. `branch` is the name, for showing.
 
 **`muted` is `true` for a pull request you have muted from the PR page**, and `muted_until_unix` says
 until when. Muted pull requests are still listed, because hiding them would be the API deciding for
