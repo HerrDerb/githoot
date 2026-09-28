@@ -108,12 +108,19 @@ are on, and marks where you are. Everything else is on the list page, where it i
 installed. The page title says where you are too, as a trail from **Settings**, such as *Settings ›
 Integrations › Herdr dispatcher*, with every step but the last a link back.
 
-**Every page is sections, and each section saves on its own.** A Save writes that section's settings
-and no others, **one line per changed setting**, through the same surgical edit the tray checkboxes
-make: your comments, blank lines, spacing and any keys this version has never heard of survive byte for
-byte. The page comes back to the same place and says, under that section, what the Save did: nothing
-changed, saved, or saved with the settings that take effect only after a restart named. Only the hoot
-and the Copilot rule take effect at once among the core settings; an integration's settings always do.
+**Checkboxes and choices save the moment you change them.** No Save button, like the tray's own
+checkboxes: a line beside the controls says *Saved.* and fades, or names the settings that take effect
+only after a restart and stays. Sections with a text box (the Herdr folders, its prompts) keep a
+**Save** button, because half-typed text should not save itself. Either way a save writes that
+section's settings and no others, **one line per changed setting**, through the same surgical edit the
+tray checkboxes make: your comments, blank lines, spacing and any keys this version has never heard of
+survive byte for byte. Only the hoot and the Copilot rule take effect at once among the core settings;
+an integration's settings always do. Without JavaScript every section shows its Save button and posts
+as before.
+
+**Parts of GitHub that count as an outage** is a choice between *The whole status page* and *Only these
+parts*; the parts appear only under the second. It is the same `statusComponents` key: the whole page
+is the empty list.
 
 **A page that reloads itself shows only the thing that is running.** A sign-in in flight and an update
 check under way reload their page until they land, and while they do, the page shows that and nothing

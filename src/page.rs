@@ -203,7 +203,7 @@ border-radius:8px;padding:.85rem 1rem;margin-bottom:.6rem}\
 .meta{color:var(--dim);font-size:.83rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}\
 .pill{font-size:.72rem;padding:.12rem .5rem;border-radius:999px;border:1px solid var(--line);\
 white-space:nowrap}\
-.draft{background:var(--accent);color:#fff;border-color:transparent}\
+.draft{background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;border-color:transparent}\
 .checks-success{color:var(--ok)}.checks-pending{color:var(--warn)}\
 .checks-failure{color:var(--bad)}.checks-unknown{color:var(--dim)}\
 .who{margin:.45rem 0 0;padding:0;list-style:none;font-size:.83rem;color:var(--dim)}\
@@ -221,7 +221,7 @@ margin:1.5rem 0 .5rem;font-weight:600}\
 .section a:hover{color:var(--ink)}\
 .row{display:flex;align-items:center;gap:.6rem;padding:.35rem 0;cursor:pointer}\
 .row input{width:1rem;height:1rem;accent-color:var(--accent);flex:none}\
-button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
+button{background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;border:0;border-radius:8px;padding:.6rem 1.4rem;\
 font:inherit;font-weight:600;cursor:pointer}\
 code{background:var(--bg);padding:.1rem .3rem;border-radius:4px}\
 .actions{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin-top:.6rem}\
@@ -233,7 +233,7 @@ main.site-main{max-width:72rem}\
 .side a.child{padding-left:1.6rem;font-size:.88rem}\
 .side a.up{color:var(--ink);font-weight:600}\
 .side a.on{background:var(--card);color:var(--ink);font-weight:600;box-shadow:inset 3px 0 0 var(--accent)}\
-.badge{font-size:.72rem;padding:.05rem .45rem;border-radius:999px;background:var(--accent);color:#fff;margin-left:.3rem}\
+.badge{font-size:.72rem;padding:.05rem .45rem;border-radius:999px;background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;margin-left:.3rem}\
 .pane>.block:first-child .section,.pane>.lead+.block .section{margin-top:0}\
 .lead{margin:0 0 1rem}\
 h1.crumbs{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem}\
@@ -243,9 +243,11 @@ h1.crumbs .sep{color:var(--dim);font-weight:400}\
 .help{margin:.1rem 0 .5rem 1.6rem}\
 fieldset{border:0;margin:0;padding:0}\
 legend{font-weight:600;padding:0;margin:.2rem 0 .3rem}\
+.side .up-name{display:none}\
 @media(max-width:760px){.site{grid-template-columns:1fr;gap:1rem}\
 .side{position:static;flex-direction:row;flex-wrap:wrap;gap:.3rem}\
-.side a.child{padding-left:.7rem}}\
+.side a.child{padding-left:.7rem}\
+.side .up-name{display:inline;color:var(--dim);font-weight:400}}\
 .mute{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin-top:.5rem;font-size:.85rem;color:var(--dim)}\
 .mute form{display:inline;margin:0}\
 button.link{background:none;border:0;padding:0;color:var(--dim);font:inherit;font-weight:400;\
@@ -260,6 +262,21 @@ border-radius:6px;background:var(--bg);color:inherit}\
 border-radius:8px;font:.82rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\
 white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .actions form{margin:0}\
+.auto .save{display:none}\
+.chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.5rem}\
+.chip{font-size:.82rem;padding:.12rem .65rem;border-radius:999px;border:1px solid var(--line)}\
+.chip-ok::before{content:'✓ ';color:var(--ok)}\
+.chip-no{color:var(--bad);border-color:var(--bad)}\
+.chip-no::before{content:'✗ '}\
+.prompts{margin-top:.6rem}\
+details.prompt{border-top:1px solid var(--line);padding:.55rem 0}\
+details.prompt:last-child{border-bottom:1px solid var(--line)}\
+details.prompt summary{cursor:pointer;display:flex;align-items:center;gap:.5rem}\
+details.prompt textarea{margin:.6rem 0 0}\
+.boxes{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:0 1rem;margin:.2rem 0 0 1.6rem}\
+.save-line{color:var(--dim);font-size:.85rem}\
+.auto .actions{margin-top:.3rem}\
+.auto .actions:has(.save-line:empty){display:none}\
 .small{padding:.4rem 1rem;font-size:.9rem}\
 .card a.ghost,a.ghost,button.ghost{display:inline-flex;align-items:center;gap:.4rem;padding:.4rem 1rem;font-size:.9rem;\
 font-weight:600;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);\
@@ -1190,6 +1207,26 @@ mod tests {
         assert!(html.contains(r#"<a href="/tok/muted">all muted</a>"#), "a way to every muted PR");
         assert!(html.contains(r#"value="0"><button class="link" type="submit">Unmute</button>"#));
         assert!(html.contains("1 pull request(s)"), "the muted one is not counted");
+    }
+
+    /// Filled buttons carry white text, so their fill is the page's accent darkened, never the accent
+    /// itself: the bright accents are about 2:1 against white. The mix must reach WCAG AA (4.5:1) for
+    /// every accent a page can have, the three bars and the settings site.
+    #[test]
+    fn filled_buttons_are_readable_on_every_accent() {
+        assert!(STYLESHEET.contains("button{background:color-mix(in srgb,var(--accent) 60%,#000)"), "the button fill");
+        assert!(STYLESHEET.contains(".draft{background:color-mix(in srgb,var(--accent) 60%,#000)"), "the draft pill");
+        assert!(STYLESHEET.contains("background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;margin-left:.3rem}"), "the badge");
+        fn channel(c: f64) -> f64 {
+            let c = c / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        }
+        for color in [crate::icons::REVIEW_DOT_COLOR, crate::icons::MERGE_DOT_COLOR, crate::icons::CHANGES_DOT_COLOR] {
+            let [r, g, b, _] = color.map(|c| channel(f64::from(c) * 0.6));
+            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let contrast = 1.05 / (luminance + 0.05);
+            assert!(contrast >= 4.5, "{color:?} darkened gives {contrast:.2}:1 against white");
+        }
     }
 
     /// `hidden` must win over any `display` a class sets, or a card shows its idle buttons and its

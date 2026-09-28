@@ -988,8 +988,9 @@ fn settings_path() -> std::path::PathBuf {
 // ── The settings site ────────────────────────────────────────────────────────
 
 /// What the sidebar needs, read fresh per page.
-fn site_for(token: &str) -> crate::ui::Site<'_> {
+fn site_for<'a>(token: &'a str, nonce: &'a str) -> crate::ui::Site<'a> {
     crate::ui::Site {
+        nonce,
         token,
         // Signed in means a credential is in use, including one that sees nothing (`Off`): that portal
         // is set up, and its page is where the reason is read.
@@ -1048,11 +1049,14 @@ fn portal_cards(cfg: &crate::config::Config) -> Vec<crate::ui::portals::Card> {
 /// The lists and the muted page do not, and render in any run.
 fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &crate::ui::Place) {
     use crate::ui::Place;
-    let site = site_for(token);
+    // One nonce per response, for the site script every page carries and any page's own script.
+    // Failing to get one drops the scripts, never widens the policy; every control still posts.
+    let nonce = new_token().unwrap_or_default();
+    let site = site_for(token, &nonce);
     let cfg = SETTINGS.get().map(|_| crate::config::Config::load(&settings_path()).0);
     let flash = crate::ui::take_flash(place);
     let mut head = Head::same_origin();
-    let nonce = new_token().unwrap_or_default();
+    head.script_nonce = (!nonce.is_empty()).then_some(nonce.as_str());
     let unavailable = || page::settings_unavailable(token);
     let html = match place {
         Place::General => cfg.map(|c| crate::ui::general_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
@@ -1233,6 +1237,23 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
     }
 }
 
+/// What a background save hears back: whether it saved, the line to show beside the controls, and
+/// whether that line may fade. A line about a restart stays, because it asks something of the person.
+fn save_reply(line: &str, ok: bool) -> String {
+    serde_json::json!({ "ok": ok, "line": line, "fade": ok && !line.contains("restart") }).to_string()
+}
+
+/// Answers a section's save: JSON for the page script's background save, otherwise the flash and
+/// the redirect back to the section a plain form post expects.
+fn answer_save(stream: &mut TcpStream, token: &str, place: &crate::ui::Place, index: usize, line: &str, form: &Form) {
+    if form.get("reply").is_some_and(|r| r == "json") {
+        let body = save_reply(line, !line.starts_with("Not saved"));
+        return respond(stream, 200, "application/json", body.as_bytes(), true);
+    }
+    crate::ui::flash(place, index, line.to_string());
+    redirect(stream, &format!("/{token}/{}#s{index}", place.path()));
+}
+
 /// Which section of `settings` a form names, by its index. `None` for anything that is not one.
 fn section_of(settings: &'static [crate::setting::Setting], form: &Form) -> Option<(usize, Vec<&'static crate::setting::Setting>)> {
     let index: usize = form.get("section")?.parse().ok()?;
@@ -1284,8 +1305,7 @@ fn save_core_section(
             format!("Not saved: {e}")
         }
     };
-    crate::ui::flash(place, index, line);
-    redirect(stream, &format!("/{token}/{}#s{index}", place.path()));
+    answer_save(stream, token, place, index, &line, form);
 }
 
 /// Sign in, Sign out or Cancel on a portal's page.
@@ -1424,8 +1444,7 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
                 errorln!("{id}: {why}");
                 format!("Not saved: {why}")
             });
-        crate::ui::flash(&place, index, line);
-        return redirect(stream, &format!("/{token}/{}#s{index}", place.path()));
+        return answer_save(stream, token, &place, index, &line, &form);
     }
     let action = form.get("action").map(String::as_str).unwrap_or_default();
     let outcome: Result<String, String> = match action {
@@ -1587,6 +1606,18 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a background save hears back: whether it saved, the line to show, and whether the line
+    /// may fade, which it may not while it says a restart is needed.
+    #[test]
+    fn a_background_save_hears_the_line_and_whether_it_may_fade() {
+        let j: serde_json::Value = serde_json::from_str(&save_reply("Saved.", true)).unwrap();
+        assert_eq!(j, serde_json::json!({ "ok": true, "line": "Saved.", "fade": true }));
+        let j: serde_json::Value = serde_json::from_str(&save_reply("Saved. Takes effect after a restart: Log.", true)).unwrap();
+        assert_eq!(j["fade"], false);
+        let j: serde_json::Value = serde_json::from_str(&save_reply("Not saved: disk full", false)).unwrap();
+        assert_eq!((j["ok"].as_bool(), j["fade"].as_bool()), (Some(false), Some(false)));
+    }
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     const PORT: u16 = 49731;

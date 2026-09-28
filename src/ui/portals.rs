@@ -260,9 +260,11 @@ fn portal_card(token: &str, c: &Card, now_unix: u64, with_settings: bool) -> Str
     let panel = sign_in_panel(token, c, now_unix);
     format!(
         "<div class=\"card portal-card\" id=\"portal-{id}\" data-name=\"{name}\" data-state=\"{state}\" \
-         data-state-url=\"/{token}/{path}?state=1\"><div class=\"portal-head\"><strong>{name}</strong>\
+         data-state-url=\"/{token}/{path}?state=1\"><div class=\"portal-head\">{title}\
          <span class=\"portal-status\">{status}</span></div>{error}<div class=\"actions\" data-idle{hidden}>{sign_in}</div>{signed_row}{panel}</div>\n",
         id = esc(&c.id),
+        // On the list the card needs its name; on the portal's own page the title already says it.
+        title = if with_settings { format!("<strong>{name}</strong>") } else { String::new() },
         state = auth_state(&c.auth),
         token = esc(token),
         hidden = if matches!(c.auth, AuthStatus::NotSignedIn) { "" } else { " hidden" },
@@ -497,6 +499,7 @@ mod tests {
     fn the_portal_page_has_the_same_card_and_settings_only_when_signed_in() {
         let html = page(card("github", PortalKind::GitHub, AuthStatus::SignedIn));
         assert!(html.contains(r#"class="card portal-card""#) && !html.contains("GitHub settings"), "{html}");
+        assert!(!html.contains("<strong>GitHub</strong>"), "the page title already names it: {html}");
         assert!(html.contains(r#"name="copilotReviews""#) && html.contains(r#"name="statusComponents""#));
         for name in crate::config::all_components() {
             assert!(html.contains(&format!(r#"value="{name}""#)), "{name} is not offered");

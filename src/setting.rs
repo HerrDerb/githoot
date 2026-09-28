@@ -36,8 +36,10 @@ pub enum Kind {
     Flag { default_on: bool },
     /// Exactly one of `options`, as radio buttons: `(value, label)`.
     Choice { options: &'static [(&'static str, &'static str)] },
-    /// Any subset of `options`, as checkboxes, stored comma-separated.
-    Multi { options: &'static [&'static str] },
+    /// A subset of `options` where empty means "all of it", stored comma-separated, shown as a choice
+    /// between `whole` and `some` with the boxes under `some`. An unticked list that silently meant
+    /// everything was a rule you could only learn from the help text.
+    Parts { options: &'static [&'static str], whole: &'static str, some: &'static str },
 }
 
 /// Whether `value` is one `setting` may hold. The last check before a line is written into a file the
@@ -51,7 +53,7 @@ pub fn check(setting: &Setting, value: &str) -> Result<(), String> {
         Kind::Text { .. } => true,
         Kind::Flag { .. } => matches!(value, "on" | "off"),
         Kind::Choice { options } => options.iter().any(|(v, _)| *v == value),
-        Kind::Multi { options } => split(value).all(|part| options.contains(&part)),
+        Kind::Parts { options, .. } => split(value).all(|part| options.contains(&part)),
     };
     if ok { Ok(()) } else { Err(format!("{:?} is not a value {} can hold", value, setting.key)) }
 }
@@ -81,7 +83,12 @@ pub fn from_form(settings: &[&Setting], form: &crate::serve::Form) -> Vec<(&'sta
         .iter()
         .filter_map(|s| match s.kind {
             Kind::Flag { .. } => Some((s.key, if form.ticked(s.key) { "on" } else { "off" }.to_string())),
-            Kind::Multi { options } => {
+            // "The whole thing" chosen saves the empty list, whatever boxes are still ticked under
+            // the other choice. With no choice posted the boxes decide, as a plain list does.
+            Kind::Parts { options, .. } => {
+                if form.get(&format!("{}.scope", s.key)).is_some_and(|v| v == "all") {
+                    return Some((s.key, String::new()));
+                }
                 let ticked: Vec<&str> = form.all(s.key).into_iter().filter(|v| options.contains(v)).collect();
                 Some((s.key, ticked.join(", ")))
             }
@@ -115,7 +122,7 @@ mod tests {
         s("quiet", Kind::Flag { default_on: false }, "Noise"),
         s("root", Kind::Text { placeholder: "~" }, "Paths"),
         s("level", Kind::Choice { options: &[("error", "Errors"), ("info", "Everything")] }, "Log"),
-        s("parts", Kind::Multi { options: &["API", "Actions", "Pull Requests"] }, "Log"),
+        s("parts", Kind::Parts { options: &["API", "Actions", "Pull Requests"], whole: "All", some: "Some" }, "Log"),
     ];
 
     fn form(body: &str) -> crate::serve::Form {
@@ -163,5 +170,25 @@ mod tests {
         );
         let got = from_form(&all, &form("root=+%2Fsrc+"));
         assert!(got.contains(&("root", "/src".to_string())) && got.contains(&("parts", String::new())));
+    }
+
+    static SCOPED: Setting = Setting {
+        key: "parts",
+        label: "Parts",
+        kind: Kind::Parts { options: &["API", "Actions"], whole: "Everything", some: "Only these" },
+        help: "",
+        group: "G",
+        live: false,
+    };
+
+    /// "The whole thing" is an explicit choice now, not an unticked list. Choosing it saves the empty
+    /// list, whatever boxes are still ticked; "Only these" saves what is ticked.
+    #[test]
+    fn a_parts_list_saves_the_whole_or_only_what_is_ticked() {
+        let one = [&SCOPED];
+        assert_eq!(from_form(&one, &form("parts.scope=all&parts=API")), [("parts", String::new())]);
+        assert_eq!(from_form(&one, &form("parts.scope=some&parts=API&parts=Actions")), [("parts", "API, Actions".to_string())]);
+        assert_eq!(from_form(&one, &form("parts=API")), [("parts", "API".to_string())], "no scope posted: the boxes decide, as before");
+        assert!(check(&SCOPED, "API").is_ok() && check(&SCOPED, "").is_ok() && check(&SCOPED, "Bogus").is_err());
     }
 }

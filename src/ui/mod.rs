@@ -104,6 +104,9 @@ impl Place {
 /// integrations are installed, how many pull requests are muted, and whether a newer release is waiting.
 pub struct Site<'a> {
     pub token: &'a str,
+    /// This response's script nonce. Empty means no script on the page, and every control still
+    /// works by posting its form.
+    pub nonce: &'a str,
     /// `(id, display name, signed in)`, in configuration order. The sidebar lists only the portals
     /// you are signed in to; the list page is where the rest are found and signed in to.
     pub portals: Vec<(String, String, bool)>,
@@ -134,8 +137,15 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
         }
         let class = if classes.is_empty() { String::new() } else { format!(" class=\"{}\"", classes.join(" ")) };
         let aria = if here { " aria-current=\"page\"" } else { "" };
+        // An item names its collection for the narrow window, where the sidebar folds into one row of
+        // pills and "GitHub" would otherwise read as an equal of "General". Hidden when wide.
+        let up = match (&place, child) {
+            (Place::Portal(_), true) => "<span class=\"up-name\">Portals › </span>",
+            (Place::Integration(_), true) => "<span class=\"up-name\">Integrations › </span>",
+            _ => "",
+        };
         // The label is already HTML where it carries a badge; every part of it was escaped on the way in.
-        format!("<a{class}{aria} href=\"/{}/{}\">{label}</a>", esc(site.token), place.path())
+        format!("<a{class}{aria} href=\"/{}/{}\">{up}{label}</a>", esc(site.token), place.path())
     };
     let mut items = vec![link(Place::General, "General", false), link(Place::Portals, "Portals", false)];
     for (id, name, signed_in) in &site.portals {
@@ -200,11 +210,36 @@ pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, bod
         Some(&heading),
     );
     h.push_str(&format!("<div class=\"site\">{}<div class=\"pane\">\n{body}</div></div>\n", sidebar(site, place)));
+    if !site.nonce.is_empty() {
+        h.push_str(&format!("<script nonce=\"{}\">{SITE_SCRIPT}</script>\n", esc(site.nonce)));
+    }
     h.push_str("</main>\n</body>\n</html>\n");
     h
 }
 
 // ── Sections drawn from declarations ─────────────────────────────────────────
+
+/// What every settings page runs, when it has a nonce.
+///
+/// **Checkboxes and choices save as they change.** A section with no text box is marked
+/// `data-autosave`; this hides its Save button and posts the section in the background on every
+/// change, asking for a JSON reply, and writes the server's line beside the controls: "Saved." fades
+/// after two seconds, a line about a restart stays. Text is still saved on purpose with its button,
+/// since half-typed text should not save itself. Without the script every Save button is there and
+/// posts as it always did.
+///
+/// **A "whole or only these" list** (`[data-parts]`) shows its boxes only while "Only these" is chosen.
+const SITE_SCRIPT: &str = "(function(){\
+document.querySelectorAll('form[data-autosave]').forEach(function(f){f.classList.add('auto');});\
+function parts(){document.querySelectorAll('[data-parts]').forEach(function(p){var some=p.querySelector('input[value=\"some\"]');\
+var boxes=p.querySelector('.boxes');if(some&&boxes)boxes.hidden=!some.checked;});}parts();\
+document.addEventListener('change',function(ev){parts();var f=ev.target.form;if(!f||!f.hasAttribute('data-autosave'))return;\
+var line=f.querySelector('.save-line');line.textContent='Saving…';clearTimeout(f.fade);\
+var body=new URLSearchParams(new FormData(f));body.append('reply','json');\
+fetch(f.getAttribute('action'),{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){\
+line.textContent=j.line;if(j.fade){f.fade=setTimeout(function(){line.textContent='';},2000);}\
+}).catch(function(){line.textContent='Not saved: GitHoot did not answer. Is it still running?';});});\
+})();";
 
 /// Every section `settings` is cut into, each its own form posting to `place` with its index.
 ///
@@ -223,13 +258,16 @@ pub fn sections(
         .map(|(i, (title, members))| {
             let fields: String = members.iter().map(|s| field(s, &value(s))).collect();
             let line = match flash {
-                Some((at, line)) if *at == i => format!("<span class=\"sub\"><strong>{}</strong></span>", esc(line)),
+                Some((at, line)) if *at == i => esc(line),
                 _ => String::new(),
             };
+            // No text box in it: the section saves as it changes, and the script hides its button.
+            let auto = if members.iter().any(|s| matches!(s.kind, Kind::Text { .. })) { "" } else { " data-autosave" };
             format!(
                 "<section class=\"block\" id=\"s{i}\"><h2 class=\"section\">{}</h2><div class=\"card\">\
-                 <form method=\"post\" action=\"/{}/{}\"><input type=\"hidden\" name=\"section\" value=\"{i}\">{fields}\
-                 <div class=\"actions\"><button class=\"small\" type=\"submit\">Save</button>{line}</div></form></div></section>\n",
+                 <form method=\"post\" action=\"/{}/{}\"{auto}><input type=\"hidden\" name=\"section\" value=\"{i}\">{fields}\
+                 <div class=\"actions\"><button class=\"small save\" type=\"submit\">Save</button>\
+                 <span class=\"save-line\" aria-live=\"polite\">{line}</span></div></form></div></section>\n",
                 esc(title),
                 esc(token),
                 place.path(),
@@ -271,7 +309,7 @@ fn field(s: &Setting, value: &str) -> String {
                 .collect();
             format!("<fieldset><legend>{}</legend>{radios}</fieldset>{help}", esc(s.label))
         }
-        Kind::Multi { options } => {
+        Kind::Parts { options, whole, some } => {
             let ticked: Vec<&str> = crate::setting::split(value).collect();
             let boxes: String = options
                 .iter()
@@ -285,7 +323,20 @@ fn field(s: &Setting, value: &str) -> String {
                     )
                 })
                 .collect();
-            format!("<fieldset><legend>{}</legend>{help}{boxes}</fieldset>", esc(s.label))
+            let scope = |v: &str, label: &str, on: bool| {
+                format!(
+                    "<label class=\"row\"><input type=\"radio\" name=\"{}.scope\" value=\"{v}\"{}> {}</label>",
+                    esc(s.key),
+                    checked(on),
+                    esc(label)
+                )
+            };
+            format!(
+                "<fieldset data-parts><legend>{}</legend>{help}{}{}<div class=\"boxes\">{boxes}</div></fieldset>",
+                esc(s.label),
+                scope("all", whole, ticked.is_empty()),
+                scope("some", some, !ticked.is_empty()),
+            )
         }
     }
 }
@@ -312,7 +363,7 @@ pub fn take_flash(place: &Place) -> Option<(usize, String)> {
 pub fn general_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(usize, String)>) -> String {
     let value = |s: &Setting| crate::config::value_of(cfg, s.key);
     let body = format!(
-        "<p class=\"sub lead\">What the tray shows and does. Each section saves on its own.</p>\n{}",
+        "<p class=\"sub lead\">What the tray shows and does. Changes save as you make them.</p>\n{}",
         sections(site.token, &Place::General, crate::config::GENERAL, &value, flash)
     );
     layout(site, &Place::General, "General", None, &body)
@@ -414,7 +465,69 @@ pub(crate) mod tests {
     use super::*;
 
     pub fn site() -> Site<'static> {
-        Site { token: "tok", portals: vec![("github".into(), "GitHub".into(), true)], installed: vec!["herdr"], muted: 2, update: None }
+        Site { token: "tok", nonce: "", portals: vec![("github".into(), "GitHub".into(), true)], installed: vec!["herdr"], muted: 2, update: None }
+    }
+
+    /// A section of checkboxes and choices saves as it changes: the form says so, its Save button is
+    /// marked for the script to hide, and the line that reports the save is always there to fill.
+    #[test]
+    fn a_section_without_text_saves_as_it_changes() {
+        let value = |_: &Setting| "on".to_string();
+        let html = sections("tok", &Place::General, crate::config::GENERAL, &value, None);
+        assert!(html.contains(r#"<form method="post" action="/tok/general" data-autosave>"#), "{html}");
+        assert!(html.contains(r#"<button class="small save" type="submit">Save</button>"#), "{html}");
+        assert!(html.contains(r#"<span class="save-line" aria-live="polite"></span>"#), "{html}");
+    }
+
+    /// Text is saved on purpose, not on every keystroke: a section with a text box keeps its button.
+    #[test]
+    fn a_section_with_text_keeps_its_save_button() {
+        static TEXTY: [Setting; 2] = [
+            Setting { key: "a", label: "A", kind: Kind::Flag { default_on: true }, help: "", group: "G", live: true },
+            Setting { key: "b", label: "B", kind: Kind::Text { placeholder: "" }, help: "", group: "G", live: true },
+        ];
+        let value = |_: &Setting| String::new();
+        let html = sections("tok", &Place::General, &TEXTY, &value, None);
+        assert!(!html.contains("data-autosave"), "{html}");
+    }
+
+    /// The outage list says what empty means as a choice, and lays its boxes out in columns under
+    /// "Only these", which the script shows only while it is chosen.
+    #[test]
+    fn a_parts_list_offers_the_whole_or_only_these() {
+        static SCOPED: [Setting; 1] = [Setting {
+            key: "parts",
+            label: "Parts",
+            kind: Kind::Parts { options: &["API", "Pages"], whole: "Everything", some: "Only these" },
+            help: "",
+            group: "G",
+            live: false,
+        }];
+        let whole = sections("tok", &Place::General, &SCOPED, &|_| String::new(), None);
+        assert!(whole.contains("<fieldset data-parts>"), "{whole}");
+        assert!(whole.contains(r#"<input type="radio" name="parts.scope" value="all" checked> Everything"#), "{whole}");
+        assert!(whole.contains(r#"<input type="radio" name="parts.scope" value="some"> Only these"#), "{whole}");
+        assert!(whole.contains(r#"<div class="boxes">"#), "{whole}");
+        let some = sections("tok", &Place::General, &SCOPED, &|_| "Pages".to_string(), None);
+        assert!(some.contains(r#"value="some" checked> Only these"#), "{some}");
+        assert!(some.contains(r#"<input type="checkbox" name="parts" value="Pages" checked> Pages"#), "{some}");
+    }
+
+    /// On a narrow window the sidebar folds into a row of pills, where an item would read as an equal
+    /// of the pages. Each item carries its collection's name for that row, hidden on a wide one.
+    #[test]
+    fn an_item_in_the_sidebar_carries_its_collections_name_for_the_narrow_row() {
+        let html = sidebar(&site(), &Place::General);
+        assert!(html.contains(r#"href="/tok/portals/github"><span class="up-name">Portals › </span>GitHub</a>"#), "{html}");
+        assert!(html.contains(r#"<span class="up-name">Integrations › </span>Herdr dispatcher</a>"#), "{html}");
+    }
+
+    /// Every page carries the site script when it has a nonce, and nothing without one.
+    #[test]
+    fn every_page_carries_the_site_script_with_a_nonce() {
+        let html = layout(&Site { nonce: "n", ..site() }, &Place::Muted, "Muted", None, "");
+        assert!(html.contains("<script nonce=\"n\">") && html.contains("form[data-autosave]"), "{html}");
+        assert!(!layout(&site(), &Place::Muted, "Muted", None, "").contains("<script"));
     }
 
     #[test]
@@ -514,7 +627,7 @@ pub(crate) mod tests {
         Setting { key: "loud", label: "Loud", kind: Kind::Flag { default_on: true }, help: "Makes noise.", group: "Noise", live: true },
         Setting { key: "root", label: "Root", kind: Kind::Text { placeholder: "~/src" }, help: "", group: "Paths", live: true },
         Setting { key: "level", label: "Level", kind: Kind::Choice { options: &[("error", "Errors"), ("info", "All")] }, help: "", group: "Paths", live: false },
-        Setting { key: "parts", label: "Parts", kind: Kind::Multi { options: &["API", "Pages"] }, help: "", group: "Parts", live: false },
+        Setting { key: "parts", label: "Parts", kind: Kind::Parts { options: &["API", "Pages"], whole: "All", some: "Some" }, help: "", group: "Parts", live: false },
     ];
 
     fn values(s: &Setting) -> String {
@@ -535,7 +648,7 @@ pub(crate) mod tests {
             assert!(html.contains(&format!(r#"<section class="block" id="s{i}">"#)), "{html}");
             assert!(html.contains(&format!(r#"<input type="hidden" name="section" value="{i}">"#)));
         }
-        assert_eq!(html.matches(r#"<form method="post" action="/tok/general">"#).count(), 3);
+        assert_eq!(html.matches(r#"<form method="post" action="/tok/general""#).count(), 3);
         assert_eq!(html.matches(">Save</button>").count(), 3);
         assert!(html.contains("<h2 class=\"section\">Noise</h2>") && html.contains("<h2 class=\"section\">Parts</h2>"));
     }
@@ -559,7 +672,7 @@ pub(crate) mod tests {
         let html = sections("tok", &Place::General, DECLARED, &values, Some(&flash));
         let s1 = html.find("id=\"s1\"").unwrap();
         let s2 = html.find("id=\"s2\"").unwrap();
-        let line = html.find("<strong>Saved.</strong>").expect("the line is shown");
+        let line = html.find(r#"<span class="save-line" aria-live="polite">Saved.</span>"#).expect("the line is shown");
         assert!(s1 < line && line < s2, "under section 1: {html}");
         assert_eq!(html.matches("Saved.").count(), 1);
     }

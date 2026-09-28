@@ -300,8 +300,12 @@ pub const GITHUB: &[Setting] = &[
     Setting {
         key: KEY_STATUS_COMPONENTS,
         label: "Parts of GitHub that count as an outage",
-        kind: Kind::Multi { options: &KNOWN_STATUS_COMPONENTS },
-        help: "GitHub's page-wide verdict says degraded whenever any one part is, including ones a pull-request tray never touches. Tick nothing to watch the whole page.",
+        kind: Kind::Parts {
+            options: &KNOWN_STATUS_COMPONENTS,
+            whole: "The whole status page",
+            some: "Only these parts",
+        },
+        help: "GitHub's page-wide verdict says degraded whenever any one part is, including parts a pull-request tray never touches.",
         group: "Outages",
         live: false,
     },

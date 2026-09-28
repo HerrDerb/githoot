@@ -956,13 +956,25 @@ fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prom
     } else {
         ""
     };
+    // One chip per tool, so a missing one stands out at a glance instead of hiding in a sentence.
+    let chips: String = REQUIRED
+        .iter()
+        .map(|tool| {
+            if missing.contains(tool) {
+                format!("<span class=\"chip chip-no\">{tool} not found</span>")
+            } else {
+                format!("<span class=\"chip chip-ok\">{tool}</span>")
+            }
+        })
+        .collect();
     format!(
         "<section class=\"block\" id=\"needs\"><h2 class=\"section\">What it needs</h2><div class=\"card\">\
-         <p class=\"sub\"><code>herdr</code>, <code>gh</code> signed in, and <code>git</code>, on your PATH. It is the one \
-         thing GitHoot does that is not reading: it creates branches and worktrees and starts \
-         <a href=\"https://herdr.dev\">Herdr</a> agents under your own <code>gh</code>, so \
-         <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">read what it does</a> first.</p>\
-         <p class=\"sub\">Right now it would look for clones in <code>{}</code> and put worktrees in <code>{}</code>.</p>{herdr}</div></section>\n{}",
+         <div class=\"chips\">{chips}</div>\
+         <p class=\"sub\">On your PATH, with <code>gh</code> signed in. This is the one thing GitHoot does that is not \
+         reading: it creates branches and worktrees and starts <a href=\"https://herdr.dev\">Herdr</a> agents under your \
+         own <code>gh</code>. <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">Read what it does</a> \
+         before installing.</p>\
+         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code></p>{herdr}</div></section>\n{}",
         esc(&settings.clone_root.display().to_string()),
         esc(&settings.worktree_root.display().to_string()),
         prompts_card(token, prompts)
@@ -970,7 +982,8 @@ fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prom
 }
 
 /// The prompts as edit boxes, one form, one Save. Always shown, installed or not, because editing
-/// what an agent will be told before switching it on is the sane order.
+/// what an agent will be told before switching it on is the sane order. Each is one row, named and
+/// marked shipped or yours, until opened: four large boxes open at once made the page 2,700 px long.
 ///
 /// An emptied box is the reset: the default is written back and the shipped text returns. Said on
 /// the card, because a blank box that silently keeps the old text would be worse.
@@ -981,20 +994,20 @@ fn prompts_card(token: &str, prompts: &[prompts::Prompt]) -> String {
          <p class=\"sub\">What the agent is told, per bar, plus the nudge it gets when a pull request changes under it. \
          Placeholders: <code>{{url}}</code> <code>{{repo}}</code> <code>{{number}}</code> <code>{{branch}}</code> \
          <code>{{title}}</code> <code>{{author}}</code>. The last two are written by whoever opened the pull request: \
-         keep them in the labelled data block. Clear a box to go back to the shipped default.</p>",
+         keep them in the labelled data block. Clear a box to go back to the shipped default.</p><div class=\"prompts\">",
         esc(token)
     );
     for p in prompts {
         h.push_str(&format!(
-            "<label class=\"row\"><strong>{}</strong> <span class=\"sub\">{}</span></label>\
-             <textarea name=\"prompt_{}\" rows=\"14\" spellcheck=\"false\">{}</textarea>",
+            "<details class=\"prompt\"><summary><strong>{}</strong> <span class=\"pill\">{}</span></summary>\
+             <textarea name=\"prompt_{}\" rows=\"14\" spellcheck=\"false\">{}</textarea></details>",
             esc(p.name),
             if p.is_default { "shipped default" } else { "yours" },
             esc(p.name),
             esc(&p.text),
         ));
     }
-    h.push_str("<button class=\"small\" type=\"submit\">Save prompts</button></form></div></section>\n");
+    h.push_str("</div><div class=\"actions\"><button class=\"small\" type=\"submit\">Save prompts</button></div></form></div></section>\n");
     h
 }
 
@@ -1029,6 +1042,29 @@ mod tests {
         let html = page_body("tok", &settings(), &[], &rows);
         assert!(!html.contains("</textarea><script>"));
         assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
+    }
+
+    /// What it needs is a row of chips, one per tool, so a missing one stands out at a glance.
+    #[test]
+    fn the_tools_it_needs_are_chips_that_say_which_are_missing() {
+        let html = page_body("tok", &settings(), &["gh"], &[]);
+        assert!(html.contains(r#"<span class="chip chip-ok">herdr</span>"#), "{html}");
+        assert!(html.contains(r#"<span class="chip chip-no">gh not found</span>"#), "{html}");
+        assert!(html.contains(r#"<span class="chip chip-ok">git</span>"#), "{html}");
+    }
+
+    /// Each prompt is one row until opened, named and marked as the shipped text or yours, so the
+    /// page is a screen long rather than four large boxes long.
+    #[test]
+    fn each_prompt_is_one_row_until_opened() {
+        let rows = [
+            prompts::Prompt { name: "approved", text: "x".into(), is_default: true },
+            prompts::Prompt { name: "update", text: "y".into(), is_default: false },
+        ];
+        let html = page_body("tok", &settings(), &[], &rows);
+        assert!(html.contains(r#"<details class="prompt"><summary><strong>approved</strong> <span class="pill">shipped default</span></summary>"#), "{html}");
+        assert!(html.contains(r#"<details class="prompt"><summary><strong>update</strong> <span class="pill">yours</span></summary>"#), "{html}");
+        assert!(!html.contains("<details class=\"prompt\" open>"), "closed until clicked");
     }
 
     /// Herdr is the tool a user is least likely to have, so its absence comes with the way to fix it.

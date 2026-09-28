@@ -84,7 +84,13 @@ pub fn integrations_page(site: &Site, rows: &[IntegrationRow]) -> String {
             esc(row.name),
             esc(&row.status),
             esc(row.summary),
-            settings_button(token, &path, row.name),
+            // Installed, the page is its settings. Not installed, it is where the prompts are read and
+            // a dry run shows what it would do, before deciding: a preview, and labelled as one.
+            if matches!(row.switch, Switch::Uninstall) {
+                settings_button(token, &path, row.name)
+            } else {
+                format!("<a class=\"ghost\" href=\"/{}/{path}\" aria-label=\"{} details\">Details</a>", esc(token), esc(row.name))
+            },
         ));
     }
     layout(site, &Place::Integrations, "Integrations", None, &h)
@@ -236,11 +242,16 @@ mod tests {
     fn the_list_has_install_or_uninstall_and_a_settings_button_on_every_row() {
         let html = integrations_page(&site(), &[row("Not installed", Switch::Install)]);
         assert!(html.contains(r#"<form method="post" action="/tok/integrations/herdr"><input type="hidden" name="action" value="install"><input type="hidden" name="from" value="list"><button type="submit">Install</button></form>"#), "{html}");
-        for switch in [Switch::Install, Switch::Uninstall, Switch::None] {
+        // Installed, the page is its settings. Not installed, it is where you read the prompts and
+        // dry-run it before deciding, which is a preview, and the button says so.
+        let html = integrations_page(&site(), &[row("x", Switch::Uninstall)]);
+        let at = html.find(r#"<a class="ghost" href="/tok/integrations/herdr" aria-label="Herdr dispatcher settings">"#).expect("settings button");
+        let button = &html[at..at + html[at..].find("</a>").unwrap()];
+        assert!(button.contains("<svg") && button.contains("Settings"), "{button}");
+        for switch in [Switch::Install, Switch::None] {
             let html = integrations_page(&site(), &[row("x", switch)]);
-            let at = html.find(r#"<a class="ghost" href="/tok/integrations/herdr" aria-label="Herdr dispatcher settings">"#).expect("settings button");
-            let button = &html[at..at + html[at..].find("</a>").unwrap()];
-            assert!(button.contains("<svg") && button.contains("Settings"), "{button}");
+            assert!(html.contains(r#"<a class="ghost" href="/tok/integrations/herdr" aria-label="Herdr dispatcher details">Details</a>"#), "{html}");
+            assert!(!html.contains("aria-label=\"Herdr dispatcher settings\""));
         }
         let r = IntegrationRow { flash: Some("Uninstalled.".into()), ..row("Installed", Switch::Uninstall) };
         let html = integrations_page(&site(), &[r]);
