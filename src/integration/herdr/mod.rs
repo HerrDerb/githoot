@@ -379,8 +379,13 @@ pub struct Report {
     pub setup: Vec<String>,
 }
 
-/// What to fetch and what to start the agent's branch from: the portal's head ref, into a
-/// remote-tracking ref of GitHoot's own. Only git is involved, so it is the same for every portal.
+/// What to fetch and what to start the agent's branch from: the portal's head ref, into a ref of
+/// GitHoot's own under `refs/githoot-pr/`. Only git is involved, so it is the same for every portal.
+///
+/// **Not under `refs/remotes/`.** A ref there looks like a branch on the remote, git makes it the
+/// agent branch's upstream when the branch is cut from it, and with the same name on both sides a
+/// plain `git push` published the agent's work to the remote (3.2.0). Not under `refs/githoot/`
+/// either: that is ambiguous with the branch name `githoot/<slug>`.
 ///
 /// The head ref is on the base repository, forks included (`refs/pull/<n>/head` on GitHub,
 /// `refs/merge-requests/<iid>/head` on GitLab), which the pull request's branch name is not: a
@@ -391,8 +396,18 @@ pub fn fetch_plan(t: &Target, slug: &str) -> Result<(String, String), Trouble> {
         .head_ref
         .as_deref()
         .ok_or_else(|| Trouble::Passing("its portal gives no ref to check it out from".to_string()))?;
-    let tracking = format!("refs/remotes/origin/githoot/{slug}");
-    Ok((format!("+{head}:{tracking}"), format!("origin/githoot/{slug}")))
+    let fetched = format!("refs/githoot-pr/{slug}");
+    Ok((format!("+{head}:{fetched}"), fetched))
+}
+
+/// The config that makes the agent's branch push nowhere: a push remote that does not exist, so a
+/// plain `git push` (or `git push -u`) fails with "'githoot-no-push' does not appear to be a git
+/// repository" instead of publishing. Not having an upstream is not enough on its own: with
+/// `push.autoSetupRemote` on, git creates the remote branch for a branch without one. Scoped to this
+/// one branch, so the user's own branches push as always. Only an explicit `git push origin …` could
+/// still publish, which the agent's own permission prompt puts in front of the user.
+pub fn push_guard(slug: &str) -> (String, String) {
+    (format!("branch.githoot/{slug}.pushRemote"), "githoot-no-push".to_string())
 }
 
 /// Everything between "this pull request needs an agent" and "an agent is reading it".
@@ -422,7 +437,7 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<
 
     if settings.dry_run {
         return Ok(format!(
-            "would fetch {head} into {clone_str}, cut {own} from it, \
+            "would fetch {head} into {clone_str}, cut {own} from it with pushes disabled, \
              open a worktree at {worktree_str} and start a {} agent",
             settings.agent_kind
         ));
@@ -472,6 +487,14 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<
         workspace = json_string(&created, "workspace_id")
             .ok_or_else(|| Trouble::Passing("no workspace came back".to_string()))?;
     }
+
+    // Before the agent exists, and on a reused worktree too: drop any upstream a 3.2.0 worktree was
+    // given, and point pushes nowhere. No guard, no agent.
+    let _ = output("git", &["-C", &clone_str, "config", "--unset", &format!("branch.{own}.remote")]);
+    let _ = output("git", &["-C", &clone_str, "config", "--unset", &format!("branch.{own}.merge")]);
+    let (key, value) = push_guard(slug);
+    output("git", &["-C", &clone_str, "config", &key, &value])
+        .map_err(|e| Trouble::Passing(format!("could not stop {own} from pushing, so no agent was started: {e}")))?;
 
     let panes = output("herdr", &["pane", "list", "--workspace", &workspace])
         .map_err(|e| Trouble::Passing(format!("could not list panes: {e}")))?;
@@ -1193,14 +1216,28 @@ mod tests {
     /// into a tracking ref of GitHoot's own. No forge tool is asked anything.
     #[test]
     fn the_fetch_comes_from_the_portals_head_ref() {
+        // Not under `refs/remotes/`: a tracking ref there made git set it as the agent branch's
+        // upstream, and with identical names a plain `git push` published the agent's branch.
+        // Not under `refs/githoot/` either, which is ambiguous with the branch `githoot/<slug>`.
         assert_eq!(
             fetch_plan(&target(Some("refs/merge-requests/7/head"), None), "pr-7-r"),
-            Ok(("+refs/merge-requests/7/head:refs/remotes/origin/githoot/pr-7-r".to_string(), "origin/githoot/pr-7-r".to_string()))
+            Ok(("+refs/merge-requests/7/head:refs/githoot-pr/pr-7-r".to_string(), "refs/githoot-pr/pr-7-r".to_string()))
         );
         match fetch_plan(&target(None, None), "pr-7-r") {
             Err(Trouble::Passing(why)) => assert!(why.contains("no ref"), "{why}"),
             other => panic!("a portal without a head ref cannot be checked out: {other:?}"),
         }
+    }
+
+    /// The agent's branch pushes nowhere: its push remote is one that does not exist, so a plain
+    /// `git push` fails loudly whatever the user's git config says (`push.autoSetupRemote` would
+    /// otherwise publish it). Per branch, so the user's own branches are untouched.
+    #[test]
+    fn the_agents_branch_is_given_a_push_remote_that_does_not_exist() {
+        assert_eq!(
+            push_guard("pr-7-r"),
+            ("branch.githoot/pr-7-r.pushRemote".to_string(), "githoot-no-push".to_string())
+        );
     }
 
     /// `{branch}` names the pull request's branch when the portal gave it, else the agent's own.

@@ -129,11 +129,21 @@ and not a cure. Keep it if you rewrite the prompts.
 
 ## The guard rail that actually matters
 
-The prompts say "do not push". **That is a request, not a control.**
+The prompts say "do not push". **That is a request, not a control.** Two things are controls:
 
-The control is the agent's own permission prompt. Herdr starts it interactively, so a `gh pr review`,
-a `glab mr merge` or a `git push` asks you first, in that pane. That is the whole defence, and it holds
-only while you never start the dispatched agent with `--dangerously-skip-permissions`.
+**The agent's branch pushes nowhere.** Each `githoot/<slug>` branch gets a push remote that does not
+exist (`branch.githoot/<slug>.pushRemote = githoot-no-push`) and no upstream, so a plain `git push`,
+or `git push -u`, fails with "'githoot-no-push' does not appear to be a git repository", whatever your
+git config says. That matters: with `push.autoSetupRemote` on, a branch without an upstream would
+otherwise be created on the remote by a plain push, which is how 3.2.0 let agents publish their
+`githoot/…` branches. It is set per branch, so your own branches push as always. The pull request's
+head is fetched into `refs/githoot-pr/<slug>`, never under `refs/remotes/`, so git never mistakes it
+for a branch on the remote.
+
+The other control is the agent's own permission prompt, for anything explicit such as
+`git push origin …`. Herdr starts it interactively, so a `gh pr review`, a `glab mr merge` or an
+explicit push asks you first, in that pane. That holds only while you never start the dispatched agent
+with `--dangerously-skip-permissions`.
 
 What GitHoot does **not** hand over: its own credential. GitHoot's token is read-only and never
 leaves it. The agent reads the diff and the comments itself, with `gh` or `glab`, under your credential.
