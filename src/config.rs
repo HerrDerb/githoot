@@ -405,11 +405,6 @@ pub fn save_values(app_asset_path: &Path, pairs: &[(&str, String)]) -> Result<Ve
     Ok(changed.into_iter().map(|(key, _)| key).collect())
 }
 
-/// Writes the `copilotReviews` value, the same surgical single-line edit `set_sound` makes.
-pub fn set_copilot_reviews(app_asset_path: &Path, on: bool) -> Result<(), String> {
-    set_flag(&config_path(app_asset_path), KEY_COPILOT_REVIEWS, on)
-}
-
 /// Writes one integration setting, `integration.<id>.<key>`, the same single-line edit every other
 /// setting gets, leaving every other byte of the file alone.
 ///

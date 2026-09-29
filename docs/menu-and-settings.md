@@ -48,21 +48,18 @@ If the local listener cannot start at all, the entries open that inbox directly.
 | Item | Does | Where the answer is kept |
 |---|---|---|
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
-| ☑ **Count Copilot comments as work** | Whether Copilot's unresolved comments light the amber bar | `copilotReviews` in `config.txt` |
 | ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
 | **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
-| **Open settings file** | Opens `config.txt`, then offers a restart once your edits settle (see below) | — |
 | **Open GitHoot on GitHub** | Opens this app's own repository: releases, issues, and these docs | — |
 
-All three checkboxes **take effect the moment you click them**, with no restart: the hoot and the
-Copilot rule are flags the poll loop reads each cycle, and the startup entry is written straight to the
-OS. Everything else in `config.txt` is still read only at startup, which is why editing the file still
-ends in a restart prompt.
+Both checkboxes **take effect the moment you click them**, with no restart: the hoot is a flag the poll
+loop reads each cycle, and the startup entry is written straight to the OS. Everything else is on the
+settings page, including the Copilot rule (**Portals ▸ GitHub**), which also applies at once and
+re-polls, since it changes what is counted.
 
-**Unticking Copilot re-polls at once.** Unlike the hoot, that box changes what is *counted*, so the
-amber bar and its page would otherwise sit on a number the rule behind them no longer produces — which
-reads as the click not having worked. Switching it off also stops both affected queries asking GitHub
-for review threads at all, so it is a saving as well as a preference.
+The menu no longer opens `config.txt` itself. The page covers every setting and checks what it writes;
+the file is still yours to edit by hand, and **Open settings page** falls back to opening it, with a
+restart offered once your edits settle, when the page cannot be served.
 
 **Ticking Hoot plays one hoot.** The question behind that box is not "is the setting on" but "what will
 I hear", and a silent tick leaves you waiting for a pull request to find out whether it works. Unticking

@@ -217,16 +217,10 @@ pub const STATUS_MENU_LABEL: &str = "GitHub is githubing again, check status";
 /// Always present, unlike every other entry here: it needs no credential, no poll and no available
 /// update, and it is the one thing that still works when everything else is switched off.
 ///
-/// A submenu since 1.16.0. It used to be a single entry that opened `config.txt`, which is still in
-/// there — the two settings people actually change now have a checkbox, and the file keeps the ones
-/// that are a list or a level rather than a switch.
+/// A submenu since 1.16.0. It used to be a single entry that opened `config.txt`. Now it holds the
+/// two switches people flip from the tray (the hoot, and starting at sign-in) and the way to the
+/// settings page, where everything else is.
 pub const SETTINGS_MENU_LABEL: &str = "Settings";
-
-/// Text of the Settings entry that opens `config.txt` itself.
-///
-/// Named "file" rather than "Open Settings" now that it sits *inside* Settings, where the old wording
-/// would have read as a second, different settings screen.
-pub const SETTINGS_FILE_MENU_LABEL: &str = "Open settings file";
 
 /// Text of the Settings entry that opens this app's own repository on GitHub.
 ///
@@ -239,13 +233,10 @@ pub const REPOSITORY_MENU_LABEL: &str = "Open GitHoot on GitHub";
 /// Text of the Settings entry that opens the configuration page.
 pub const SETTINGS_PAGE_MENU_LABEL: &str = "Open settings page";
 
-/// Text of the Settings checkbox for counting Copilot's unresolved comments as work.
-pub const COPILOT_MENU_LABEL: &str = "Count Copilot comments as work";
-
 /// Text of the Settings checkbox for the hoot.
 ///
-/// Says what it does rather than naming the `sound` key: the file is one click away for anyone who
-/// wants the key, and "sound" alone would suggest the app makes noise for more than this one thing.
+/// Says what it does rather than naming the `sound` key: "sound" alone would suggest the app makes
+/// noise for more than this one thing.
 pub const HOOT_MENU_LABEL: &str = "Hoot on new pull requests";
 
 /// Text of the Settings checkbox for starting with the session.

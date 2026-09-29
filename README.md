@@ -105,8 +105,8 @@ are fixed, so a bar always means the same thing → [the whole design](docs/icon
 ## Configure it
 
 The hoot and starting at sign-in are checkboxes under the menu's **Settings**, and take effect the
-moment you click them. Everything else lives in `~/.githoot/config.txt`, one `key=value` per line;
-**Settings ▸ Open settings file** opens it and offers a restart once your edits settle.
+moment you click them. Everything else is on **Settings ▸ Open settings page**, and lives in
+`~/.githoot/config.txt`, one `key=value` per line, if you prefer editing it by hand.
 
 ```ini
 reviewRequested=on          # the red bar
