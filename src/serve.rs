@@ -1193,6 +1193,15 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
             }
             redirect(stream, &format!("/{token}/{}", place.path()));
         }
+        // The page's Update button: the same install as the tray's "Install update", on the release the
+        // last check found. The install asks for confirmation itself and restarts the app when done.
+        Place::Updates if form.get("action").is_some_and(|a| a == "install") => {
+            infoln!("settings page asked to install the update");
+            if let Ok(wake) = settings.wake.lock() {
+                let _ = wake.send(scheduler::Wake::UpdateNow);
+            }
+            redirect(stream, &format!("/{token}/{}", place.path()));
+        }
         Place::Updates => save_core_section(stream, token, settings, place, crate::config::UPDATES, &form),
         Place::Portal(id) => {
             // Only a portal the poll loop knows. Anything else is a stale or hand-made post.

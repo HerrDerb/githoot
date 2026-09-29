@@ -8,8 +8,10 @@ between yours and the newest, then asks. Nothing is ever installed silently. On 
 verifies, replaces itself and restarts. Turn the automatic check off with `updateCheck=off`.
 
 **To check right now**, open **Updates** in the settings pages and press **Check now**. It asks at once,
-whether or not the automatic check is on, and the page says what it found: the newest release, a newer
-one to install from the tray menu, or why the check failed.
+whether or not the automatic check is on, and the page says what it found within a second or two: the
+newest release, a newer one with an **Update to X.Y.Z** button beside it, or why the check failed. A
+newer release also puts the arrow on the tray icon straight away. The button installs exactly as the
+tray's **Install update** does.
 
 ## What is verified, and what that proves
 

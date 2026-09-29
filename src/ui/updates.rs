@@ -46,16 +46,34 @@ pub fn updates_page(site: &Site, v: &UpdatesView) -> String {
         None => "Not checked yet since GitHoot started.".to_string(),
         Some((ago, Ok(None))) => format!("Checked {}: this is the newest release.", ago_text(*ago)),
         Some((ago, Ok(Some(newer)))) => format!(
-            "Checked {}: <strong>{} is available.</strong> Install it from the tray menu.",
+            "Checked {}: <strong>{} is available.</strong>",
             ago_text(*ago),
             esc(newer)
         ),
         Some((ago, Err(why))) => format!("Checked {}: the check failed ({}).", ago_text(*ago), esc(why)),
     };
     h.push_str(&format!("<p class=\"sub\">{last}</p>"));
+    // A newer release found: Update is what the visitor came for, so it is the filled button and
+    // Check now steps back. It runs the same install as the tray's "Install update", with the same
+    // confirmation, verification and restart.
+    let newer = match &v.last {
+        Some((_, Ok(Some(newer)))) => Some(newer.as_str()),
+        _ => None,
+    };
+    let install = newer
+        .map(|version| {
+            format!(
+                "<form method=\"post\" action=\"/{}/updates\"><input type=\"hidden\" name=\"action\" value=\"install\">\
+                 <button type=\"submit\">Update to {}</button></form>",
+                esc(token),
+                esc(version)
+            )
+        })
+        .unwrap_or_default();
+    let check_class = if newer.is_some() { " class=\"ghost\"" } else { "" };
     h.push_str(&format!(
-        "<div class=\"actions\"><form method=\"post\" action=\"/{}/updates\"><input type=\"hidden\" name=\"action\" value=\"check\">\
-         <button type=\"submit\">Check now</button></form></div></div></section>\n",
+        "<div class=\"actions\">{install}<form method=\"post\" action=\"/{}/updates\"><input type=\"hidden\" name=\"action\" value=\"check\">\
+         <button{check_class} type=\"submit\">Check now</button></form></div></div></section>\n",
         esc(token)
     ));
     h.push_str(&sections(token, &Place::Updates, crate::config::UPDATES, v.value, v.flash));
@@ -98,6 +116,7 @@ mod tests {
         assert!(page(None, Some((30, Ok(None)))).contains("Checked just now: this is the newest release."));
         let html = page(None, Some((120, Ok(Some("3.1.0".into())))));
         assert!(html.contains("Checked 2 min ago: <strong>3.1.0 is available.</strong>"), "{html}");
+        assert!(!html.contains("from the tray menu"), "the button is right there: {html}");
         let html = page(None, Some((7200, Err("<timeout>".into()))));
         assert!(html.contains("Checked 2 h ago: the check failed (&lt;timeout&gt;)."), "{html}");
     }
@@ -117,5 +136,18 @@ mod tests {
         let html = page(Some(WAIT_SECS), None);
         assert!(!html.contains("http-equiv=\"refresh\"") && html.contains("Still waiting for the check"));
         assert!(html.contains(">Check now<"));
+    }
+
+    /// A newer release found: an Update button beside Check now, the filled one because it is what
+    /// the visitor came for, running the same install as the tray's "Install update". Check now steps
+    /// back to outlined.
+    #[test]
+    fn a_newer_release_is_offered_as_an_update_button() {
+        let html = page(None, Some((120, Ok(Some("3.2.1".into())))));
+        assert!(html.contains(r#"<form method="post" action="/tok/updates"><input type="hidden" name="action" value="install"><button type="submit">Update to 3.2.1</button></form>"#), "{html}");
+        assert!(html.contains(r#"value="check"><button class="ghost" type="submit">Check now</button>"#), "{html}");
+        for last in [None, Some((30, Ok(None))), Some((30, Err("x".to_string())))] {
+            assert!(!page(None, last).contains(r#"value="install""#), "no newer release, no Update button");
+        }
     }
 }

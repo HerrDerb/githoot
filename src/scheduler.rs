@@ -625,6 +625,19 @@ fn sign_in_run(runs: &mut [PortalRun], i: usize) {
     PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(runs);
 }
 
+/// What the tray is told: the icon, the tooltip, the three entries' labels and the update entry.
+/// One function so the loop can draw it again the moment an update check changes the answer.
+fn tray_update(runs: &[PortalRun], update_available: Option<&str>) -> Update {
+    let views: Vec<crate::overview::PortalView> =
+        runs.iter().map(|run| crate::overview::PortalView { name: run.name(), state: &run.state }).collect();
+    Update {
+        icon: crate::overview::icon(&views, update_available.is_some()),
+        tooltip: crate::overview::tooltip(&views, update_available),
+        pr_labels: PrAxis::ALL.map(|axis| crate::overview::pr_menu_label(&views, axis)),
+        update_label: crate::overview::update_menu_label(update_available),
+    }
+}
+
 /// Puts a run where the run for the same portal stood, or at the end. Never two runs for one id,
 /// which would poll the same thing twice and hoot twice for it.
 fn put_run(runs: &mut Vec<PortalRun>, run: PortalRun) {
@@ -888,73 +901,13 @@ fn run_poll_loop(
     let mut update_available: Option<String> = None;
 
     loop {
-        for run in &mut runs {
-            run.cycle();
-        }
-
-        // Published before `emit` for the same reason the outage check is: the menu entries the URLs
-        // belong to are about to be relabeled with this cycle's counts, and a click between the two
-        // writes must open what the new label claims, not what the old one did.
-        {
-            let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
-            *snapshot = PrSnapshot {
-                portals: snapshot_of(&runs),
-                polled_at: Some(std::time::Instant::now()),
-                version: snapshot.version.saturating_add(1),
-            };
-        }
-        // After the lock is released: the integration runner reads these lists as soon as it wakes.
-        crate::integration::poll_published();
-
-        // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
-        // this cycle's responses, and taking them next to the code that produced them is what keeps a
-        // rise meaning one poll's worth of change. The sound itself waits until after `emit`.
-        //
-        // Taken unconditionally, even with the sound off, so the latch cannot accumulate. That matters
-        // more now than it used to: the sound can be switched back on from the menu mid-run, and a
-        // latch drained only while hooting was enabled would fire for every arrival missed while it
-        // was off — one click, and a hoot for news the user has already seen.
-        let per_portal: Vec<[bool; 3]> = runs.iter_mut().map(|run| run.state.take_pr_arrivals()).collect();
-        let arrivals = crate::overview::arrivals(&per_portal);
-
-        let (icon, tooltip, pr_labels) = {
-            let views: Vec<crate::overview::PortalView> = runs
-                .iter()
-                .map(|run| crate::overview::PortalView { name: run.name(), state: &run.state })
-                .collect();
-            (
-                crate::overview::icon(&views, update_available.is_some()),
-                crate::overview::tooltip(&views, update_available.as_deref()),
-                PrAxis::ALL.map(|axis| crate::overview::pr_menu_label(&views, axis)),
-            )
-        };
-
-        // Update the UI before anything else here can block.
-        let update_label = crate::overview::update_menu_label(update_available.as_deref());
-        if !emit(Update { icon, tooltip, pr_labels, update_label }) {
-            return; // UI has gone away
-        }
-
-        // ── The hoot ─────────────────────────────────────────────────────────
-        // After `emit`, so the icon is already showing what the sound is about — a hoot with nothing
-        // to look at yet would send the user to a tray that has not caught up. One hoot even when two
-        // or three axes, or two portals, turn over in the same cycle: `crate::sound::hoot` drops
-        // overlapping plays anyway, and three of the same clip at once is a noise rather than a
-        // notification.
-        if sound_enabled.is_on() && arrivals.iter().any(|&arrived| arrived) {
-            let axes: Vec<&str> = PrAxis::ALL
-                .iter()
-                .filter(|axis| arrivals[axis.index()])
-                .map(|axis| axis.menu_label())
-                .collect();
-            infoln!("hooting: {}", axes.join(", "));
-            crate::sound::hoot();
-        }
-
         // ── Is there a newer release? ────────────────────────────────────────
         // Cheap: one unauthenticated GET, gated to once a day, so it runs inline rather than needing a
-        // thread. Placed after `emit` deliberately — the icon is already showing this cycle's answer
-        // before this can add anything to it, so a slow or hanging check delays only itself.
+        // thread. At the top of the cycle, before the polls: "Check now" on the Updates page lands
+        // here straight after its wake, and used to wait out a whole round of polls (twenty seconds
+        // and more) before it ran, then a poll interval more before the icon showed the arrow. The
+        // cost is that a slow check delays this cycle's polls, bounded by the request timeout and at
+        // most once a day unless asked.
         //
         // Failures are logged and dropped, never surfaced. Not being able to ask whether an update
         // exists is not something the user can act on, and a dialog for it would be noise.
@@ -963,6 +916,7 @@ fn run_poll_loop(
         {
             check_asked = false;
             last_update_check = Some(Instant::now());
+            let before = update_available.clone();
             match crate::version::Version::current() {
                 Some(current) => match crate::update::check(&client, current) {
                     Ok(Some(available)) => {
@@ -992,6 +946,61 @@ fn run_poll_loop(
                     record_update_check(Err("this build's version is unparseable".to_string()));
                 }
             }
+            // A changed answer is drawn now, from the last cycle's lists, rather than after this cycle's
+            // polls: the arrow is news of its own and should not wait on GitHub.
+            if update_available != before && !emit(tray_update(&runs, update_available.as_deref())) {
+                return; // UI has gone away
+            }
+        }
+
+        for run in &mut runs {
+            run.cycle();
+        }
+
+        // Published before `emit` for the same reason the outage check is: the menu entries the URLs
+        // belong to are about to be relabeled with this cycle's counts, and a click between the two
+        // writes must open what the new label claims, not what the old one did.
+        {
+            let mut snapshot = PR_URLS.lock().expect("PR-URLs lock poisoned");
+            *snapshot = PrSnapshot {
+                portals: snapshot_of(&runs),
+                polled_at: Some(std::time::Instant::now()),
+                version: snapshot.version.saturating_add(1),
+            };
+        }
+        // After the lock is released: the integration runner reads these lists as soon as it wakes.
+        crate::integration::poll_published();
+
+        // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
+        // this cycle's responses, and taking them next to the code that produced them is what keeps a
+        // rise meaning one poll's worth of change. The sound itself waits until after `emit`.
+        //
+        // Taken unconditionally, even with the sound off, so the latch cannot accumulate. That matters
+        // more now than it used to: the sound can be switched back on from the menu mid-run, and a
+        // latch drained only while hooting was enabled would fire for every arrival missed while it
+        // was off — one click, and a hoot for news the user has already seen.
+        let per_portal: Vec<[bool; 3]> = runs.iter_mut().map(|run| run.state.take_pr_arrivals()).collect();
+        let arrivals = crate::overview::arrivals(&per_portal);
+
+        // Update the UI before anything else here can block.
+        if !emit(tray_update(&runs, update_available.as_deref())) {
+            return; // UI has gone away
+        }
+
+        // ── The hoot ─────────────────────────────────────────────────────────
+        // After `emit`, so the icon is already showing what the sound is about — a hoot with nothing
+        // to look at yet would send the user to a tray that has not caught up. One hoot even when two
+        // or three axes, or two portals, turn over in the same cycle: `crate::sound::hoot` drops
+        // overlapping plays anyway, and three of the same clip at once is a noise rather than a
+        // notification.
+        if sound_enabled.is_on() && arrivals.iter().any(|&arrived| arrived) {
+            let axes: Vec<&str> = PrAxis::ALL
+                .iter()
+                .filter(|axis| arrivals[axis.index()])
+                .map(|axis| axis.menu_label())
+                .collect();
+            infoln!("hooting: {}", axes.join(", "));
+            crate::sound::hoot();
         }
 
         // ── Credential recovery ──────────────────────────────────────────────
@@ -1586,6 +1595,17 @@ mod tests {
     use crate::portal::fake::FakePortal;
     use crate::portal::types::{PollResponse, PollResult};
     use crate::portal::{CredentialState, Health, PollOutcome};
+
+    /// What the tray is told is built in one place, so the loop can draw it again the moment an
+    /// update check changes the answer, rather than a whole poll interval later.
+    #[test]
+    fn the_tray_picture_carries_the_update_the_check_found() {
+        let runs = vec![PortalRun::new(Box::new(FakePortal::named("GitHub")), CredentialState::Ready, [true; 3])];
+        let with = tray_update(&runs, Some("3.2.1"));
+        assert!(with.icon.update_available, "the arrow");
+        assert!(with.update_label.as_deref().is_some_and(|l| l.contains("3.2.1")), "{:?}", with.update_label);
+        assert!(!tray_update(&runs, None).icon.update_available);
+    }
 
     fn job(running: bool, prompt: Option<SignInPrompt>, error: Option<&str>) -> SignInJob {
         SignInJob { running, prompt, cancel: false, error: error.map(str::to_string), done: false }

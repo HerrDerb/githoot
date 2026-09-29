@@ -95,7 +95,7 @@ same token and `Host` checks. It is organised by what you manage, with a sidebar
 | **Portals ▸ GitHub** | where pull requests come from: the sign-in, the Copilot rule, which parts of GitHub count as an outage. The Portals list is also where GitLab is installed |
 | **Integrations ▸ Herdr dispatcher** | where pull requests go: Install, a dry run, its settings and prompts → [integrations](integrations.md) |
 | **Muted** | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
-| **Updates** | this version, the last check, **Check now**, and the automatic check |
+| **Updates** | this version, the last check, **Check now**, **Update to X.Y.Z** when there is one, and the automatic check |
 | **Advanced** | the local API → [the local API](local-api.md), and how much the log records |
 
 Portals and Integrations are the two collections: a list with one card per item, its state, its main
@@ -127,8 +127,9 @@ If the local listener cannot start, the entry falls back to opening `config.txt`
 losing the only way into the configuration because a socket would not bind is the worse failure.
 
 **Updating by hand:** **Updates ▸ Check now** asks at once whether a newer release exists, whether or not
-the automatic check is on. The answer shows on the page, and a newer version is also named in the
-sidebar; install it from the tray menu as usual.
+the automatic check is on. The answer shows on the page within a second or two, a newer version is also
+named in the sidebar and gets the arrow on the tray icon, and **Update to X.Y.Z** on the page installs
+it just as the tray's **Install update** does.
 
 ## Signing in
 
