@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "githoot"
-version = "3.2.1"
+version = "3.2.2"
 dependencies = [
  "arboard",
  "dirs",
