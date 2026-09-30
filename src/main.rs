@@ -139,7 +139,7 @@ fn await_process_exit(pid: Option<&str>) {
 ///
 /// The portal's own HTTP client is built per call. Failing to build one is a broken TLS stack, not
 /// a missing credential, and nothing a click could fix: it is logged and the portal is not built.
-fn portal_builder(app_asset_path: std::path::PathBuf, copilot: config::Switch) -> scheduler::PortalBuilder {
+fn portal_builder(app_asset_path: std::path::PathBuf, rules: config::RuleSwitches) -> scheduler::PortalBuilder {
     std::sync::Arc::new(move |described, config| {
         let http = match portal::github::api::build_client() {
             Ok(http) => http,
@@ -155,7 +155,7 @@ fn portal_builder(app_asset_path: std::path::PathBuf, copilot: config::Switch) -
                 http,
                 app_asset_path.clone(),
                 GitHubOptions {
-                    copilot_reviews: copilot.clone(),
+                    rules: rules.clone(),
                     status_components: config.status_components.clone(),
                 },
             )),
@@ -165,6 +165,7 @@ fn portal_builder(app_asset_path: std::path::PathBuf, copilot: config::Switch) -
                 http,
                 app_asset_path.clone(),
                 described.client_id.as_deref(),
+                rules.clone(),
             )),
         })
     })
@@ -295,8 +296,9 @@ fn main() {
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
-    let copilot = config::Switch::new(config.copilot_reviews);
-    let build_portal = portal_builder(app_asset_path.clone(), copilot.clone());
+    // The green bar's rules, live: the portals read them every poll, the settings page sets them.
+    let rules = config::RuleSwitches::new(&config);
+    let build_portal = portal_builder(app_asset_path.clone(), rules.clone());
     let portals = build_portals(&config, &build_portal);
 
     let mut indicator = AppIndicator::new("githoot", "");
@@ -546,7 +548,7 @@ fn main() {
     serve::install(serve::Settings {
         app_asset_path: app_asset_path.clone(),
         sound: sound.clone(),
-        copilot: copilot.clone(),
+        rules: rules.clone(),
         local_api: config.local_api,
         wake: std::sync::Mutex::new(wake_tx.clone()),
     });
@@ -731,8 +733,9 @@ fn main() {
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
-    let copilot = config::Switch::new(config.copilot_reviews);
-    let build_portal = portal_builder(app_asset_path.clone(), copilot.clone());
+    // The green bar's rules, live: the portals read them every poll, the settings page sets them.
+    let rules = config::RuleSwitches::new(&config);
+    let build_portal = portal_builder(app_asset_path.clone(), rules.clone());
     let portals = build_portals(&config, &build_portal);
 
     // ── Tray ─────────────────────────────────────────────────────────────────
@@ -1557,7 +1560,7 @@ fn main() {
     serve::install(serve::Settings {
         app_asset_path: app_asset_path.clone(),
         sound: sound.clone(),
-        copilot: copilot.clone(),
+        rules: rules.clone(),
         local_api: config.local_api,
         wake: std::sync::Mutex::new(wake_tx.clone()),
     });

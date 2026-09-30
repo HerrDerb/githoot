@@ -500,7 +500,8 @@ mod tests {
         let html = page(card("github", PortalKind::GitHub, AuthStatus::SignedIn));
         assert!(html.contains(r#"class="card portal-card""#) && !html.contains("GitHub settings"), "{html}");
         assert!(!html.contains("<strong>GitHub</strong>"), "the page title already names it: {html}");
-        assert!(html.contains(r#"name="copilotReviews""#) && html.contains(r#"name="statusComponents""#));
+        assert!(html.contains(r#"name="statusComponents""#), "{html}");
+        assert!(!html.contains(r#"name="copilotReviews""#), "Copilot's rule lives on General's green-bar line now");
         for name in crate::config::all_components() {
             assert!(html.contains(&format!(r#"value="{name}""#)), "{name} is not offered");
         }

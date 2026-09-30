@@ -534,7 +534,8 @@ fn random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
 pub struct Settings {
     pub app_asset_path: std::path::PathBuf,
     pub sound: crate::config::Switch,
-    pub copilot: crate::config::Switch,
+    /// The green bar's rules, set from the file after a save so the next poll obeys them.
+    pub rules: crate::config::RuleSwitches,
     /// Whether `Route::Entries` is served and the listener binds at boot. A plain `bool`, not a
     /// `Switch`, because the bind happens once at startup: a control that claimed to take effect
     /// mid-run would be exactly the broken switch `config::Switch` exists to prevent.
@@ -1291,7 +1292,7 @@ fn save_core_section(
         Ok(changed) => {
             let (cfg, _) = crate::config::Config::load(&settings.app_asset_path);
             settings.sound.set(cfg.sound);
-            settings.copilot.set(cfg.copilot_reviews);
+            settings.rules.set_from(&cfg);
             if !changed.is_empty() {
                 infoln!("settings page wrote: {}", changed.join(", "));
                 if let Ok(wake) = settings.wake.lock() {
@@ -1820,7 +1821,8 @@ mod tests {
         let form = |body: &str| parse_form(body);
         assert_eq!(section_of(crate::config::GENERAL, &form("section=0")).map(|(i, m)| (i, m.len())), Some((0, 3)));
         assert_eq!(section_of(crate::config::GENERAL, &form("section=1")).map(|(i, m)| (i, m.len())), Some((1, 1)));
-        for bad in ["section=2", "section=-1", "section=x", "", "section=01e3"] {
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=2")).map(|(i, m)| (i, m.len())), Some((2, 4)), "the green bar's line");
+        for bad in ["section=3", "section=-1", "section=x", "", "section=01e3"] {
             assert!(section_of(crate::config::GENERAL, &form(bad)).is_none(), "{bad:?}");
         }
     }
@@ -2509,7 +2511,7 @@ mod tests {
         install(Settings {
             app_asset_path: dir.clone(),
             sound: crate::config::Switch::new(false),
-            copilot: crate::config::Switch::new(false),
+            rules: crate::config::RuleSwitches::new(&crate::config::Config::from_text("")),
             local_api: true,
             wake: std::sync::Mutex::new(wake_tx),
         });
@@ -2561,7 +2563,7 @@ mod tests {
         install(Settings {
             app_asset_path: dir.clone(),
             sound: crate::config::Switch::new(false),
-            copilot: crate::config::Switch::new(false),
+            rules: crate::config::RuleSwitches::new(&crate::config::Config::from_text("")),
             local_api: true,
             wake: std::sync::Mutex::new(wake_tx),
         });

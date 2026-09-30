@@ -32,7 +32,7 @@ use reqwest::blocking::Client;
 use super::oauth::{DeviceFlowConfig, TokenStore};
 use super::types::{PollResponse, PollResult};
 use super::{
-    AuthError, AuthStyle, Capabilities, CredentialState, HealthReport, PollOutcome, Portal, PortalId,
+    AuthError, CredentialState, HealthReport, PollOutcome, Portal, PortalId,
     PortalInfo, PortalKind, SignInProgress,
 };
 use crate::errorln;
@@ -94,10 +94,19 @@ pub struct GitLabPortal {
     flow: Option<DeviceFlowConfig>,
     /// `None` until a credential is loaded or obtained.
     store: Option<TokenStore>,
+    /// The green bar's rules, read on every poll.
+    rules: crate::config::RuleSwitches,
 }
 
 impl GitLabPortal {
-    pub fn new(id: PortalId, base_url: &str, http: Client, app_asset_path: PathBuf, client_id: Option<&str>) -> Self {
+    pub fn new(
+        id: PortalId,
+        base_url: &str,
+        http: Client,
+        app_asset_path: PathBuf,
+        client_id: Option<&str>,
+        rules: crate::config::RuleSwitches,
+    ) -> Self {
         let base = base_url.trim_end_matches('/');
         let endpoints = Endpoints::for_base(base);
         let shipped = shipped_client_id(base);
@@ -119,18 +128,10 @@ impl GitLabPortal {
             // status.gitlab.com runs on status.io, not Atlassian Statuspage, so `statuspage` cannot
             // read it; and a self-managed instance has none. No entry rather than a wrong one.
             status_page: None,
-            capabilities: Capabilities {
-                auth_style: AuthStyle::DeviceFlow,
-                conflict_state: true,
-                rereview_pending: true,
-                team_reviewers: false,
-                // GitLab Duo reviews by commenting, like Copilot, but its account name is not
-                // documented, and guessing it would fail silently.
-                bot_reviewer: None,
-            },
+            capabilities: PortalKind::GitLab.capabilities(),
             min_poll_interval: crate::state::MIN_POLL_INTERVAL,
         };
-        GitLabPortal { info, endpoints, http, flow, store: None }
+        GitLabPortal { info, endpoints, http, flow, store: None, rules }
     }
 
     /// What the tooltip says when there is no OAuth application to sign in with. Only a self-managed
@@ -185,7 +186,7 @@ impl Portal for GitLabPortal {
 
     fn poll(&mut self, axes: [bool; 3]) -> PollOutcome {
         let outcome = match self.store.as_ref() {
-            Some(store) => api::poll(&self.http, &self.endpoints.graphql, store.token(), axes),
+            Some(store) => api::poll(&self.http, &self.endpoints.graphql, store.token(), axes, self.rules.now()),
             // Asked without a credential: the one variant that says "only a sign-in fixes this".
             None => PollOutcome {
                 axes: axes.map(|wanted| {
@@ -211,7 +212,7 @@ mod tests {
     use super::*;
 
     fn portal(base: &str, client_id: Option<&str>) -> GitLabPortal {
-        GitLabPortal::new(PortalId("gitlab".to_string()), base, Client::new(), std::env::temp_dir(), client_id)
+        GitLabPortal::new(PortalId("gitlab".to_string()), base, Client::new(), std::env::temp_dir(), client_id, crate::config::RuleSwitches::new(&crate::config::Config::from_text("")))
     }
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn the_flow_asks_for_read_api_and_keeps_a_credential_per_portal() {
         let dir = std::env::temp_dir();
-        let p = GitLabPortal::new(PortalId("work".to_string()), DEFAULT_BASE_URL, Client::new(), dir.clone(), Some(" abc "));
+        let p = GitLabPortal::new(PortalId("work".to_string()), DEFAULT_BASE_URL, Client::new(), dir.clone(), Some(" abc "), crate::config::RuleSwitches::new(&crate::config::Config::from_text("")));
         let flow = p.flow.expect("a configured client id gives a flow");
         assert_eq!(flow.client_id, "abc", "trimmed");
         assert_eq!(flow.scope.as_deref(), Some("read_api"));
@@ -301,7 +302,7 @@ mod tests {
 
     #[test]
     fn nothing_asked_costs_nothing() {
-        let outcome = api::poll(&Client::new(), "https://gitlab.invalid/api/graphql", "t", [false; 3]);
+        let outcome = api::poll(&Client::new(), "https://gitlab.invalid/api/graphql", "t", [false; 3], crate::portal::types::Rules::ALL);
         assert!(outcome.axes.iter().all(Option::is_none));
     }
 
@@ -311,7 +312,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("gitlab_token.txt"), "access_token=x").unwrap();
         std::fs::write(dir.join("pr_token.txt"), "ghu_x").unwrap();
-        let mut p = GitLabPortal::new(PortalId("gitlab".to_string()), DEFAULT_BASE_URL, Client::new(), dir.clone(), Some("abc"));
+        let mut p = GitLabPortal::new(PortalId("gitlab".to_string()), DEFAULT_BASE_URL, Client::new(), dir.clone(), Some("abc"), crate::config::RuleSwitches::new(&crate::config::Config::from_text("")));
         p.sign_out().unwrap();
         assert!(!dir.join("gitlab_token.txt").exists());
         assert!(dir.join("pr_token.txt").exists(), "GitHub's credential is not GitLab's to delete");

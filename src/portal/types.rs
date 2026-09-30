@@ -65,6 +65,27 @@ pub struct PrEntry {
     pub changes: Option<Changes>,
 }
 
+/// The green bar's rules that can be switched off, read by every portal's judge. Each is a gate on the
+/// path to green and, where it fails, a reason for the amber bar or for waiting; switching one off
+/// ignores it on both bars, so a pull request is never green and amber at once. Approval and a
+/// standing objection are not here: they are what the bars mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    /// A merge conflict with somebody reviewing: amber, and not green.
+    pub conflicts: bool,
+    /// Failed checks on an approved pull request: amber, and not green.
+    pub failed_checks: bool,
+    /// Checks still running: not green yet, on neither bar.
+    pub running_checks: bool,
+    /// The automatic reviewer's open comments (GitHub's Copilot): amber, and not green.
+    pub bot_comments: bool,
+}
+
+#[cfg(test)]
+impl Rules {
+    pub const ALL: Rules = Rules { conflicts: true, failed_checks: true, running_checks: true, bot_comments: true };
+}
+
 /// The size of a pull request's change: lines added and removed, and files touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Changes {

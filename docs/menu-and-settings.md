@@ -54,8 +54,8 @@ If the local listener cannot start at all, the entries open that inbox directly.
 
 Both checkboxes **take effect the moment you click them**, with no restart: the hoot is a flag the poll
 loop reads each cycle, and the startup entry is written straight to the OS. Everything else is on the
-settings page, including the Copilot rule (**Portals ▸ GitHub**), which also applies at once and
-re-polls, since it changes what is counted.
+settings page, including the green bar's rules (**General**), which also apply at once and re-poll,
+since they change what is counted.
 
 The menu no longer opens `config.txt` itself. The page covers every setting and checks what it writes;
 the file is still yours to edit by hand, and **Open settings page** falls back to opening it, with a
@@ -91,8 +91,8 @@ same token and `Host` checks. It is organised by what you manage, with a sidebar
 
 | Page | Holds |
 |---|---|
-| **General** | what the tray shows and does: the three bars, the hoot |
-| **Portals ▸ GitHub** | where pull requests come from: the sign-in, the Copilot rule, which parts of GitHub count as an outage. The Portals list is also where GitLab is installed |
+| **General** | what the tray shows and does: the three bars, the hoot, and what makes a pull request green |
+| **Portals ▸ GitHub** | where pull requests come from: the sign-in, which parts of GitHub count as an outage. The Portals list is also where GitLab is installed |
 | **Integrations ▸ Herdr dispatcher** | where pull requests go: Install, a dry run, its settings and prompts → [integrations](integrations.md) |
 | **Muted** | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
 | **Updates** | this version, the last check, **Check now**, **Update to X.Y.Z** when there is one, and the automatic check |
@@ -111,9 +111,15 @@ only after a restart and stays. Sections with a text box (the Herdr folders, its
 **Save** button, because half-typed text should not save itself. Either way a save writes that
 section's settings and no others, **one line per changed setting**, through the same surgical edit the
 tray checkboxes make: your comments, blank lines, spacing and any keys this version has never heard of
-survive byte for byte. Only the hoot and the Copilot rule take effect at once among the core settings;
+survive byte for byte. Only the hoot and the green bar's rules take effect at once among the core settings;
 an integration's settings always do. Without JavaScript every section shows its Save button and posts
 as before.
+
+**What makes a pull request green** is drawn on General as the path a pull request walks to the green
+bar: two fixed steps (somebody approved it, nobody's objection stands), then one switch per rule, each
+with what happens to a pull request that fails it, *else amber* or *else waits*. A rule you switch off
+fades and is ignored on **both** bars, so nothing is ever green and amber at once. The switches are
+independent; their order is only who decides: people, then git, then CI, then the automatic reviewer.
 
 **Parts of GitHub that count as an outage** is a choice between *The whole status page* and *Only these
 parts*; the parts appear only under the second. It is the same `statusComponents` key: the whole page
@@ -205,7 +211,10 @@ existed — the key is appended rather than the file regenerated.
 | `reviewRequested` | `on` | The red bar |
 | `readyToMerge` | `on` | The green bar (approved PRs; the key keeps its old name so existing `config.txt` files still work) |
 | `changesRequested` | `on` | The amber bar (work required; the key keeps its old name so existing `config.txt` files still work) |
-| `copilotReviews` | `on` | Count unresolved comments from GitHub's automatic reviewer as work — see [PR status](pr-status.md) |
+| `copilotReviews` | `on` | Count unresolved comments from GitHub's automatic reviewer as work, and keep the PR off green; see [PR status](pr-status.md) |
+| `ruleConflicts` | `on` | A merge conflict while somebody is reviewing: amber, not green. Off ignores conflicts on both bars |
+| `ruleFailedChecks` | `on` | Failed checks on an approved pull request: amber, not green. Off ignores them on both bars |
+| `ruleRunningChecks` | `on` | Checks still running keep an approved pull request off green until they finish. Off shows it at once |
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |

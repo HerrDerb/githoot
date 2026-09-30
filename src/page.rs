@@ -263,6 +263,27 @@ border-radius:8px;font:.82rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,mon
 white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .actions form{margin:0}\
 .auto .save{display:none}\
+.gate-lead{margin:0 0 .5rem}\
+.gates{list-style:none;margin:0;padding:0}\
+.gate{position:relative;display:grid;grid-template-columns:1.75rem minmax(0,1fr) auto;column-gap:.7rem;align-items:center;padding:.5rem 0}\
+.gate::before{content:'';position:absolute;left:.875rem;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--line)}\
+.gate:first-child::before{top:50%}.gate.end::before{bottom:50%}\
+.gate-row{display:contents;cursor:pointer}\
+.gate-node,.gate input{grid-column:1;justify-self:center;position:relative;z-index:1;margin:0}\
+.gate-node{width:.7rem;height:.7rem;border-radius:50%;background:var(--dim);box-shadow:0 0 0 4px var(--card)}\
+.gate input{width:1.05rem;height:1.05rem;accent-color:var(--accent);box-shadow:0 0 0 4px var(--card);cursor:pointer}\
+.gate-text{grid-column:2;font-weight:500}\
+.gate-title{grid-column:2;display:flex;flex-wrap:wrap;align-items:center;gap:.25rem .5rem;min-width:0}\
+.gate-portal{font-size:.7rem;font-weight:600;letter-spacing:.02em;padding:.05rem .45rem;border-radius:4px;background:var(--bg);border:1px solid var(--line);color:var(--dim)}\
+.gate.fixed .gate-text{color:var(--dim);font-weight:400}\
+.gate-else{grid-column:3;font-size:.72rem;padding:.1rem .55rem;border-radius:999px;border:1px solid var(--line);color:var(--dim);white-space:nowrap}\
+.else-amber{color:var(--warn);border-color:var(--warn)}\
+.gate-help{grid-column:2/4;margin:.1rem 0 0}\
+.gate.end .gate-node{width:1rem;height:1rem;background:var(--accent)}\
+.gate.end .gate-text{font-weight:650}\
+.gate:has(input:not(:checked)) .gate-text{color:var(--dim);text-decoration:line-through}\
+.gate:has(input:not(:checked)) .gate-else,.gate:has(input:not(:checked)) .gate-help{opacity:.4}\
+.gate:has(input:not(:checked))::before{background:repeating-linear-gradient(to bottom,var(--line) 0 4px,transparent 4px 8px)}\
 .chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.5rem}\
 .chip{font-size:.82rem;padding:.12rem .65rem;border-radius:999px;border:1px solid var(--line)}\
 .chip-ok::before{content:'✓ ';color:var(--ok)}\
@@ -521,7 +542,7 @@ pub fn axis_page(
         esc(&count_text(groups, mutes)),
         esc(&age_text(polled))
     ));
-    h.push_str("<div class=\"rule\"></div>\n");
+    h.push_str("<div class=\"gate\"></div>\n");
     h.push_str(&format!("<div id=\"items\">{}</div>\n", items(groups, now_unix, mutes)));
 
     // One link per portal, the first portal's first. With none there is nowhere to send anyone.
@@ -635,7 +656,7 @@ pub(crate) fn shell_with(
         "<header><img src=\"/{}/owl.png\" alt=\"\" width=\"36\" height=\"36\">{heading}</header>\n",
         esc(token),
     ));
-    h.push_str("<div class=\"rule\"></div>\n");
+    h.push_str("<div class=\"gate\"></div>\n");
     h
 }
 

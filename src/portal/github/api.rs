@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::portal::types::{
-    BotReview, Changes, CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict,
+    BotReview, Changes, CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Rules, Verdict,
 };
 
 const AGENT: &str = "githoot";
@@ -151,14 +151,14 @@ query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!,$labels:Int!){\
 /// the server-side filter is unchanged and only the client-side intersection is new.
 ///
 /// No `If-None-Match`: GraphQL is a POST and does not answer `304`.
-pub fn poll_changes_requested(client: &Client, graphql_url: &str, token: &str, query: &str, copilot: bool) -> PollResponse {
+pub fn poll_changes_requested(client: &Client, graphql_url: &str, token: &str, query: &str, rules: Rules) -> PollResponse {
     poll_reviewed(
         client,
         graphql_url,
         token,
         query,
-        &|body| parse_reviewed(body, |pr| work_required(pr, copilot)),
-        copilot,
+        &|body| parse_reviewed(body, |pr| work_required(pr, rules)),
+        rules.bot_comments,
     )
 }
 
@@ -182,14 +182,14 @@ pub fn poll_review_requested(client: &Client, graphql_url: &str, token: &str, qu
 /// `query` must *not* carry `review:approved`: that qualifier is the `reviewDecision` projection this
 /// axis exists to get away from (see `PR_REVIEWS_DOCUMENT`). The server narrows to the user's open,
 /// non-draft pull requests; `approved` judges each hit by its reviews.
-pub fn poll_approved(client: &Client, graphql_url: &str, token: &str, query: &str, copilot: bool) -> PollResponse {
+pub fn poll_approved(client: &Client, graphql_url: &str, token: &str, query: &str, rules: Rules) -> PollResponse {
     poll_reviewed(
         client,
         graphql_url,
         token,
         query,
-        &|body| parse_reviewed(body, |pr| approved(pr, copilot)),
-        copilot,
+        &|body| parse_reviewed(body, |pr| approved(pr, rules)),
+        rules.bot_comments,
     )
 }
 
@@ -579,11 +579,13 @@ fn blocked_by_conflict(pr: &PullRequestNode) -> bool {
 /// (`still_on_you`), or a merge conflict with someone waiting (`blocked_by_conflict`). The bar used
 /// to be only the first, and its query said so server-side; it now asks for every open pull request
 /// of yours and decides here, because `mergeable` is not a search qualifier.
-fn work_required(pr: &PullRequestNode, copilot: bool) -> bool {
+/// Each reason after the first can be switched off (`Rules`), and off means ignored: not work here,
+/// and not a veto on `approved` either, so the two bars stay disjoint.
+fn work_required(pr: &PullRequestNode, rules: Rules) -> bool {
     still_on_you(pr)
-        || blocked_by_conflict(pr)
-        || (copilot && copilot_unresolved(pr) > 0)
-        || (checks_failed(pr) && has_approval(pr))
+        || (rules.conflicts && blocked_by_conflict(pr))
+        || (rules.bot_comments && copilot_unresolved(pr) > 0)
+        || (rules.failed_checks && checks_failed(pr) && has_approval(pr))
 }
 
 /// Whether the head's checks definitely failed: a rollup of `FAILURE` or `ERROR`. Pending, no
@@ -626,7 +628,7 @@ fn has_approval(pr: &PullRequestNode) -> bool {
 /// already vouched for, so a hole in the payload leaves the bar lit. This one is the only filter there
 /// is: the server hands over every open pull request, and a missing or empty review list is simply no
 /// evidence of approval. Lighting a green bar over a PR nobody approved would be the false claim.
-fn approved(pr: &PullRequestNode, copilot: bool) -> bool {
+fn approved(pr: &PullRequestNode, rules: Rules) -> bool {
     // Anything that puts the pull request on the work-required bar takes it off this one, so the two
     // never light for the same PR. Work before news, and the approval is still there to be told about
     // the moment you deal with it. The conflict veto needs no `has_active_reviewers` check of its own:
@@ -635,7 +637,11 @@ fn approved(pr: &PullRequestNode, copilot: bool) -> bool {
     // Failed checks veto it the same way: an approved pull request whose CI is red is work, and the
     // amber bar carries it (see `work_required`), with the approval still on its card. Checks still
     // running hold it back too, on neither bar: it is not good news until they pass.
-    if is_conflicting(pr) || (copilot && copilot_unresolved(pr) > 0) || checks_failed(pr) || checks_running(pr) {
+    if (rules.conflicts && is_conflicting(pr))
+        || (rules.bot_comments && copilot_unresolved(pr) > 0)
+        || (rules.failed_checks && checks_failed(pr))
+        || (rules.running_checks && checks_running(pr))
+    {
         return false;
     }
     has_approval(pr)
@@ -910,7 +916,7 @@ mod tests {
 
     /// Shorthand: classify a CHANGES-REQUESTED (GraphQL) response.
     fn changes(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, &|b| parse_reviewed(b, |pr| work_required(pr, true)))
+        classify_with(status, h, body, now, &|b| parse_reviewed(b, |pr| work_required(pr, Rules::ALL)))
     }
 
     /// One search hit, described by who blocked it and who has a re-review pending.
@@ -1141,7 +1147,7 @@ mod tests {
 
     /// Shorthand: classify an APPROVED (GraphQL) response.
     fn approved_resp(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
-        classify_with(status, h, body, now, &|b| parse_reviewed(b, |pr| approved(pr, true)))
+        classify_with(status, h, body, now, &|b| parse_reviewed(b, |pr| approved(pr, Rules::ALL)))
     }
 
     /// One search hit with the given latest opinionated review states, each from a distinct reviewer.
@@ -1492,7 +1498,7 @@ mod tests {
             &headers(&[]),
             &body,
             0,
-            &|b| parse_reviewed(b, |pr| work_required(pr, false)),
+            &|b| parse_reviewed(b, |pr| work_required(pr, Rules { bot_comments: false, ..Rules::ALL })),
         );
         match off {
             PollResult::Fresh { count, .. } => assert_eq!(count, Some(0), "not work when off"),
@@ -1508,7 +1514,7 @@ mod tests {
             &headers(&[]),
             &payload(&[approved_with_nits]),
             0,
-            &|b| parse_reviewed(b, |pr| approved(pr, false)),
+            &|b| parse_reviewed(b, |pr| approved(pr, Rules { bot_comments: false, ..Rules::ALL })),
         );
         match still_approved {
             PollResult::Fresh { count, .. } => assert_eq!(count, Some(1), "no veto when off"),
@@ -1698,6 +1704,31 @@ mod tests {
             PollResult::Fresh { count, .. } => assert_eq!(count, Some(0), "not green while running"),
             other => panic!("expected Fresh, got {other:?}"),
         }
+    }
+
+    /// Each rule on the green bar's line can be switched off, and off means ignored on both bars: a
+    /// pull request is then neither held off green nor counted as work for that reason.
+    #[test]
+    fn a_rule_switched_off_is_ignored_on_both_bars() {
+        let judge = |body: &str, rules: Rules| -> (u32, u32) {
+            let count = |r: Result<Parsed, String>| r.expect("parses").count.expect("a count");
+            (count(parse_reviewed(body, |pr| approved(pr, rules))), count(parse_reviewed(body, |pr| work_required(pr, rules))))
+        };
+        let with = |extra: &str| {
+            let hit = conflicted("https://github.com/o/r/pull/1", "MERGEABLE", &[("APPROVED", "alice")], &[]);
+            format!("{{{extra},{}", &hit[1..])
+        };
+        let conflict = payload(&[conflicted("https://github.com/o/r/pull/1", "CONFLICTING", &[("APPROVED", "alice")], &[])]);
+        assert_eq!(judge(&conflict, Rules::ALL), (0, 1), "on: work");
+        assert_eq!(judge(&conflict, Rules { conflicts: false, ..Rules::ALL }), (1, 0), "off: green, not work");
+
+        let failed = payload(&[with(r#""statusCheckRollup":{"state":"FAILURE"}"#)]);
+        assert_eq!(judge(&failed, Rules::ALL), (0, 1));
+        assert_eq!(judge(&failed, Rules { failed_checks: false, ..Rules::ALL }), (1, 0));
+
+        let running = payload(&[with(r#""statusCheckRollup":{"state":"PENDING"}"#)]);
+        assert_eq!(judge(&running, Rules::ALL), (0, 0), "on: waits");
+        assert_eq!(judge(&running, Rules { running_checks: false, ..Rules::ALL }), (1, 0), "off: green at once");
     }
 
     /// Only approved pull requests move: red CI on one nobody approved yet is not this rule's business.

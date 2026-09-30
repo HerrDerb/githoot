@@ -22,7 +22,7 @@ use reqwest::blocking::Client;
 
 use super::types::{PollResponse, PollResult};
 use super::{
-    AuthError, AuthStyle, Capabilities, CredentialState, HealthReport, PollOutcome, Portal, PortalId,
+    AuthError, CredentialState, HealthReport, PollOutcome, Portal, PortalId,
     PortalInfo, PortalKind, SignInProgress, StatusPage,
 };
 use crate::state::PrAxis;
@@ -137,14 +137,14 @@ pub fn poll_axis(
     endpoints: &Endpoints,
     token: &str,
     axis: PrAxis,
-    copilot: bool,
+    rules: super::types::Rules,
 ) -> PollResponse {
     let query = pr_query(axis);
     match pr_judge(axis) {
         PrJudge::EveryHit => api::poll_review_requested(client, &endpoints.graphql, token, query),
-        PrJudge::Approved => api::poll_approved(client, &endpoints.graphql, token, query, copilot),
+        PrJudge::Approved => api::poll_approved(client, &endpoints.graphql, token, query, rules),
         PrJudge::StillOnYou => {
-            api::poll_changes_requested(client, &endpoints.graphql, token, query, copilot)
+            api::poll_changes_requested(client, &endpoints.graphql, token, query, rules)
         }
     }
 }
@@ -188,9 +188,9 @@ impl Endpoints {
 
 /// The GitHub-specific settings, read from the same `config.txt` keys they always had.
 pub struct GitHubOptions {
-    /// Whether Copilot's unresolved comments count as work. Read on every poll, because the menu
-    /// checkbox flips it live.
-    pub copilot_reviews: crate::config::Switch,
+    /// The green bar's rules, Copilot's comments among them. Read on every poll, because the settings
+    /// page changes them live.
+    pub rules: crate::config::RuleSwitches,
     /// Which parts of GitHub count as an outage. Empty means the page-wide indicator.
     pub status_components: Vec<String>,
 }
@@ -225,13 +225,7 @@ impl GitHubPortal {
                 url: STATUS_PAGE.to_string(),
                 menu_label: crate::state::STATUS_MENU_LABEL.to_string(),
             }),
-            capabilities: Capabilities {
-                auth_style: AuthStyle::DeviceFlow,
-                conflict_state: true,
-                rereview_pending: true,
-                team_reviewers: true,
-                bot_reviewer: Some("Copilot"),
-            },
+            capabilities: PortalKind::GitHub.capabilities(),
             min_poll_interval: crate::state::MIN_POLL_INTERVAL,
         };
         GitHubPortal {
@@ -301,14 +295,14 @@ impl Portal for GitHubPortal {
 
     fn poll(&mut self, axes: [bool; 3]) -> PollOutcome {
         let mut outcome = PollOutcome::default();
-        let copilot = self.options.copilot_reviews.is_on();
+        let rules = self.options.rules.now();
         for axis in PrAxis::ALL {
             if !axes[axis.index()] {
                 continue;
             }
             let response = match self.store.as_ref() {
                 Some(store) => {
-                    poll_axis(&self.http, &self.endpoints, store.token(), axis, copilot)
+                    poll_axis(&self.http, &self.endpoints, store.token(), axis, rules)
                 }
                 // Asked without a credential. Not a transport failure and not a zero: the one
                 // variant that says "only a sign-in fixes this".
@@ -333,6 +327,7 @@ impl Portal for GitHubPortal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portal::AuthStyle;
 
     fn portal(base: &str) -> GitHubPortal {
         GitHubPortal::new(
@@ -341,7 +336,7 @@ mod tests {
             Client::new(),
             std::env::temp_dir(),
             GitHubOptions {
-                copilot_reviews: crate::config::Switch::new(true),
+                rules: crate::config::RuleSwitches::new(&crate::config::Config::from_text("")),
                 status_components: Vec::new(),
             },
         )
@@ -435,7 +430,7 @@ mod tests {
             DEFAULT_BASE_URL,
             Client::new(),
             dir.clone(),
-            GitHubOptions { copilot_reviews: crate::config::Switch::new(true), status_components: Vec::new() },
+            GitHubOptions { rules: crate::config::RuleSwitches::new(&crate::config::Config::from_text("")), status_components: Vec::new() },
         );
         p.sign_out().unwrap();
         assert!(!dir.join("pr_token.txt").exists(), "the file is gone");

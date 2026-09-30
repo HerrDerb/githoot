@@ -34,6 +34,9 @@ pub enum Kind {
     /// `on` or `off`, a checkbox. Only an explicit value moves it off its default, so a typo leaves the
     /// default standing in either direction.
     Flag { default_on: bool },
+    /// A flag drawn as a step on a rule line, with what happens to a pull request that fails it
+    /// (`otherwise`: "else amber", "else waits"). Stored, checked and read exactly like `Flag`.
+    Step { default_on: bool, otherwise: &'static str },
     /// Exactly one of `options`, as radio buttons: `(value, label)`.
     Choice { options: &'static [(&'static str, &'static str)] },
     /// A subset of `options` where empty means "all of it", stored comma-separated, shown as a choice
@@ -51,7 +54,7 @@ pub fn check(setting: &Setting, value: &str) -> Result<(), String> {
     }
     let ok = match setting.kind {
         Kind::Text { .. } => true,
-        Kind::Flag { .. } => matches!(value, "on" | "off"),
+        Kind::Flag { .. } | Kind::Step { .. } => matches!(value, "on" | "off"),
         Kind::Choice { options } => options.iter().any(|(v, _)| *v == value),
         Kind::Parts { options, .. } => split(value).all(|part| options.contains(&part)),
     };
@@ -66,8 +69,8 @@ pub fn split(value: &str) -> impl Iterator<Item = &str> {
 /// A flag's answer from the text the file holds, its default when that is empty or a typo.
 pub fn flag(kind: Kind, value: &str) -> bool {
     match kind {
-        Kind::Flag { default_on: true } => !crate::config::is_off(value),
-        Kind::Flag { default_on: false } => crate::config::is_on(value),
+        Kind::Flag { default_on: true } | Kind::Step { default_on: true, .. } => !crate::config::is_off(value),
+        Kind::Flag { default_on: false } | Kind::Step { default_on: false, .. } => crate::config::is_on(value),
         _ => false,
     }
 }
@@ -82,7 +85,7 @@ pub fn from_form(settings: &[&Setting], form: &crate::serve::Form) -> Vec<(&'sta
     settings
         .iter()
         .filter_map(|s| match s.kind {
-            Kind::Flag { .. } => Some((s.key, if form.ticked(s.key) { "on" } else { "off" }.to_string())),
+            Kind::Flag { .. } | Kind::Step { .. } => Some((s.key, if form.ticked(s.key) { "on" } else { "off" }.to_string())),
             // "The whole thing" chosen saves the empty list, whatever boxes are still ticked under
             // the other choice. With no choice posted the boxes decide, as a plain list does.
             Kind::Parts { options, .. } => {

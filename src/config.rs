@@ -35,6 +35,9 @@ const KEY_LOG_LEVEL: &str = "logLevel";
 const KEY_SOUND: &str = "sound";
 const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
+const KEY_RULE_CONFLICTS: &str = "ruleConflicts";
+const KEY_RULE_FAILED_CHECKS: &str = "ruleFailedChecks";
+const KEY_RULE_RUNNING_CHECKS: &str = "ruleRunningChecks";
 const KEY_LOCAL_API: &str = "localApi";
 /// Every integration's settings live under `integration.<id>.`, and only there. See `crate::integration`.
 const INTEGRATION_PREFIX: &str = "integration.";
@@ -194,6 +197,10 @@ pub struct Config {
     /// invisible to the amber bar. On by default; some teams treat its comments as suggestions rather
     /// than work, and for them this is noise.
     pub copilot_reviews: bool,
+    /// The green bar's other switchable rules; see `portal::types::Rules`. All on by default.
+    pub rule_conflicts: bool,
+    pub rule_failed_checks: bool,
+    pub rule_running_checks: bool,
     /// Whether the judged lists are served as JSON to scripts running as you on this machine.
     ///
     /// The only default-off setting in this file, and the only one that changes when the loopback
@@ -261,6 +268,47 @@ impl Switch {
     }
 }
 
+/// The green bar's rules as live switches, shared by the portals (which read them every poll) and
+/// the settings page (which sets them after a save), so a rule changes without a restart.
+#[derive(Clone)]
+pub struct RuleSwitches {
+    conflicts: Switch,
+    failed_checks: Switch,
+    running_checks: Switch,
+    bot_comments: Switch,
+}
+
+impl RuleSwitches {
+    pub fn new(cfg: &Config) -> Self {
+        let r = cfg.rules();
+        RuleSwitches {
+            conflicts: Switch::new(r.conflicts),
+            failed_checks: Switch::new(r.failed_checks),
+            running_checks: Switch::new(r.running_checks),
+            bot_comments: Switch::new(r.bot_comments),
+        }
+    }
+
+    /// The rules for the poll about to run.
+    pub fn now(&self) -> crate::portal::types::Rules {
+        crate::portal::types::Rules {
+            conflicts: self.conflicts.is_on(),
+            failed_checks: self.failed_checks.is_on(),
+            running_checks: self.running_checks.is_on(),
+            bot_comments: self.bot_comments.is_on(),
+        }
+    }
+
+    /// After a save: what the file now says.
+    pub fn set_from(&self, cfg: &Config) {
+        let r = cfg.rules();
+        self.conflicts.set(r.conflicts);
+        self.failed_checks.set(r.failed_checks);
+        self.running_checks.set(r.running_checks);
+        self.bot_comments.set(r.bot_comments);
+    }
+}
+
 pub fn set_sound(app_asset_path: &Path, on: bool) -> Result<(), String> {
     set_flag(&config_path(app_asset_path), KEY_SOUND, on)
 }
@@ -284,19 +332,38 @@ pub const GENERAL: &[Setting] = &[
     flag_setting(KEY_READY_TO_MERGE, "Your pull request was approved", true, "The green bar, its menu entry and its search.", "Bars", false),
     flag_setting(KEY_CHANGES_REQUESTED, "Your pull request needs work", true, "The amber bar, its menu entry and its search.", "Bars", false),
     flag_setting(KEY_SOUND, "Hoot when a pull request needs you", true, "The same switch as the tray menu's Hoot.", "Hoot", true),
+    // The green bar's rules, drawn as the path a pull request walks to green (see `ui::rule_line`).
+    // Each is ignored on both bars when off, so none can put a pull request on green and amber at once.
+    step_setting(KEY_RULE_CONFLICTS, "No merge conflict", "else amber", "While somebody is reviewing it. A conflict nobody is waiting on blocks nobody."),
+    step_setting(KEY_RULE_FAILED_CHECKS, "Checks did not fail", "else amber", "Red CI on an approved pull request is work, not good news."),
+    step_setting(KEY_RULE_RUNNING_CHECKS, "Checks have finished", "else waits", "Neither bar until they pass. A pull request with no checks is never held back."),
+    step_setting(KEY_COPILOT_REVIEWS, "Automatic reviewer's comments resolved", "else amber", "Copilot reviews by commenting, never by a verdict. Open, current comments count."),
 ];
+
+const fn step_setting(key: &'static str, label: &'static str, otherwise: &'static str, help: &'static str) -> Setting {
+    Setting { key, label, kind: Kind::Step { default_on: true, otherwise }, help, group: GREEN_RULES_GROUP, live: true }
+}
+
+/// The portal kinds a green-bar step works on, when that is not every kind GitHoot supports; `None`
+/// for a step every kind can judge. Read from each kind's declared capabilities, so a badge on the
+/// settings page cannot drift from what the adapters actually do.
+pub fn step_portals(key: &str) -> Option<Vec<PortalKind>> {
+    let applies: fn(&crate::portal::Capabilities) -> bool = match key {
+        KEY_RULE_CONFLICTS => |c| c.conflict_state,
+        KEY_COPILOT_REVIEWS => |c| c.bot_reviewer.is_some(),
+        // Checks: every kind reports a head's checks or pipeline.
+        _ => return None,
+    };
+    let kinds: Vec<PortalKind> = PortalKind::ALL.into_iter().filter(|k| applies(&k.capabilities())).collect();
+    (kinds.len() < PortalKind::ALL.len()).then_some(kinds)
+}
+
+/// The section the green bar's rules sit in. Named once, because the page draws it as a line.
+pub const GREEN_RULES_GROUP: &str = "What makes a pull request green";
 
 /// The GitHub portal's own settings. Their keys stay flat, as every existing `config.txt` has them;
 /// only where they are shown moved, to the portal they are about.
 pub const GITHUB: &[Setting] = &[
-    flag_setting(
-        KEY_COPILOT_REVIEWS,
-        "Count Copilot's unresolved comments as work",
-        true,
-        "Copilot reviews by commenting, never by a verdict, so without this its feedback never reaches the amber bar.",
-        "Pull requests",
-        true,
-    ),
     Setting {
         key: KEY_STATUS_COMPONENTS,
         label: "Parts of GitHub that count as an outage",
@@ -362,6 +429,9 @@ pub fn value_of(cfg: &Config, key: &str) -> String {
         KEY_READY_TO_MERGE => flag(cfg.pr_enabled[1]),
         KEY_CHANGES_REQUESTED => flag(cfg.pr_enabled[2]),
         KEY_COPILOT_REVIEWS => flag(cfg.copilot_reviews),
+        KEY_RULE_CONFLICTS => flag(cfg.rule_conflicts),
+        KEY_RULE_FAILED_CHECKS => flag(cfg.rule_failed_checks),
+        KEY_RULE_RUNNING_CHECKS => flag(cfg.rule_running_checks),
         KEY_LOCAL_API => flag(cfg.local_api),
         KEY_SOUND => flag(cfg.sound),
         KEY_UPDATE_CHECK => flag(cfg.update_check),
@@ -549,6 +619,10 @@ impl Config {
             // them, and an amber bar that cannot see them is the state this key was added to fix.
             // `is_off` rather than `!is_on`, so a typo leaves the default standing.
             copilot_reviews: !values.get(KEY_COPILOT_REVIEWS).is_some_and(|v| is_off(v)),
+            // Default **on**, like every rule on the green bar's line: off loosens what green means.
+            rule_conflicts: !values.get(KEY_RULE_CONFLICTS).is_some_and(|v| is_off(v)),
+            rule_failed_checks: !values.get(KEY_RULE_FAILED_CHECKS).is_some_and(|v| is_off(v)),
+            rule_running_checks: !values.get(KEY_RULE_RUNNING_CHECKS).is_some_and(|v| is_off(v)),
             // Default **off**, alone in this file, because it opens a listening socket at boot and
             // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
             // *missing* key as on and open the door on every install that never asked.
@@ -625,6 +699,16 @@ impl Config {
                 !std::mem::replace(&mut github_seen, true)
             })
             .collect()
+    }
+
+    /// The green bar's rules as the file has them.
+    pub fn rules(&self) -> crate::portal::types::Rules {
+        crate::portal::types::Rules {
+            conflicts: self.rule_conflicts,
+            failed_checks: self.rule_failed_checks,
+            running_checks: self.rule_running_checks,
+            bot_comments: self.copilot_reviews,
+        }
     }
 
     pub fn any_pr_enabled(&self) -> bool {
@@ -765,6 +849,15 @@ fn default_config() -> String {
          # bar. Copilot reviews by commenting and never by approving or requesting changes, so\n\
          # without this its feedback is invisible here. Resolved and outdated threads never count.\n\
          {KEY_COPILOT_REVIEWS}=on\n\
+         \n\
+         # What else keeps one of your approved pull requests off the green bar. Each rule switched\n\
+         # off is ignored on both bars, so nothing is ever green and amber at once.\n\
+         # A merge conflict while somebody is reviewing it: amber instead of green.\n\
+         {KEY_RULE_CONFLICTS}=on\n\
+         # Failed checks: amber instead of green.\n\
+         {KEY_RULE_FAILED_CHECKS}=on\n\
+         # Checks still running: on neither bar until they pass.\n\
+         {KEY_RULE_RUNNING_CHECKS}=on\n\
          \n\
          # Which parts of GitHub may put the exclamation on the icon, comma separated, one line.\n\
          # Delete the ones you do not care about and they stop raising the mark; add any of the\n\
@@ -1018,7 +1111,7 @@ mod tests {
     fn exactly_the_settings_that_need_no_restart_are_live() {
         let live: Vec<&str> =
             declared().filter(|s| s.live).map(|s| s.key).collect();
-        assert_eq!(live, [KEY_SOUND, KEY_COPILOT_REVIEWS]);
+        assert_eq!(live, [KEY_SOUND, KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS]);
         let live = |key: &str| declared().any(|s| s.key == key && s.live);
         assert!(live(KEY_SOUND) && !live(KEY_LOG_LEVEL));
         assert!(!live(KEY_LOCAL_API), "the listener binds once, at startup");
@@ -1137,10 +1230,13 @@ mod tests {
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // The two keys shipped off. Written explicitly anyway, so the file says the doors exist.
         assert_eq!(values.get(KEY_LOCAL_API), Some(&"off"));
+        for rule in [KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS] {
+            assert_eq!(values.get(rule), Some(&"on"), "{rule}: every green-bar rule ships on");
+        }
         // And nothing else, so a key added to the template without being read is caught. The
         // integration keys are held to the registry by their own test below.
         let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
-        assert_eq!(own, 9, "unexpected keys in the template: {values:?}");
+        assert_eq!(own, 12, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -1195,6 +1291,9 @@ mod tests {
             KEY_SOUND,
             KEY_STATUS_COMPONENTS,
             KEY_COPILOT_REVIEWS,
+            KEY_RULE_CONFLICTS,
+            KEY_RULE_FAILED_CHECKS,
+            KEY_RULE_RUNNING_CHECKS,
             KEY_LOCAL_API,
         ];
         let text = default_config();
@@ -1311,10 +1410,11 @@ mod tests {
     }
 
     /// The GitHub-only settings are declared on the GitHub page, not on General, keeping their keys.
+    /// Copilot's rule moved to General, onto the green bar's line with the other rules it belongs to.
     #[test]
     fn the_github_only_settings_sit_with_github() {
         let github: Vec<&str> = GITHUB.iter().map(|s| s.key).collect();
-        assert_eq!(github, [KEY_COPILOT_REVIEWS, KEY_STATUS_COMPONENTS]);
+        assert_eq!(github, [KEY_STATUS_COMPONENTS]);
         assert!(!GENERAL.iter().any(|s| github.contains(&s.key)));
     }
 
@@ -1893,5 +1993,38 @@ mod tests {
         assert_eq!(std::fs::read_to_string(config_path(&dir)).unwrap(), "sound=off\n");
         assert_eq!(ids_in(&dir), ["github"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── The green bar's rules ─────────────────────────────────────────────────
+
+    /// A step that only some portal kinds can judge names them; one every kind can judge names none.
+    #[test]
+    fn a_step_names_the_portals_it_works_on_only_when_not_all() {
+        use crate::portal::PortalKind;
+        assert_eq!(step_portals(KEY_COPILOT_REVIEWS), Some(vec![PortalKind::GitHub]));
+        assert_eq!(step_portals(KEY_RULE_CONFLICTS), None, "GitHub and GitLab both report conflicts");
+        assert_eq!(step_portals(KEY_RULE_FAILED_CHECKS), None);
+        assert_eq!(step_portals(KEY_RULE_RUNNING_CHECKS), None);
+    }
+
+    /// Every rule on the green bar's line is on unless the file says off, and each is live: a switch
+    /// the poll reads, set from the file after a save.
+    #[test]
+    fn the_green_bar_rules_default_on_and_follow_the_file() {
+        let all_on = from("");
+        assert_eq!(all_on.rules(), crate::portal::types::Rules::ALL);
+        let some_off = from("ruleConflicts=off\nruleFailedChecks=off\nruleRunningChecks=off\ncopilotReviews=off\n");
+        assert_eq!(
+            some_off.rules(),
+            crate::portal::types::Rules { conflicts: false, failed_checks: false, running_checks: false, bot_comments: false }
+        );
+        let switches = RuleSwitches::new(&all_on);
+        assert_eq!(switches.now(), crate::portal::types::Rules::ALL);
+        switches.set_from(&some_off);
+        assert_eq!(switches.now(), some_off.rules(), "a save reaches the next poll without a restart");
+        for key in ["ruleConflicts", "ruleFailedChecks", "ruleRunningChecks", "copilotReviews"] {
+            assert_eq!(value_of(&some_off, key), "off", "{key}");
+            assert!(GENERAL.iter().any(|s| s.key == key && s.live), "{key} is a live General setting");
+        }
     }
 }

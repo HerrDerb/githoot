@@ -68,6 +68,30 @@ impl PortalKind {
         PortalKind::ALL.into_iter().find(|kind| kind.key() == key)
     }
 
+    /// What this kind of portal can tell, declared once: its adapter uses it for `PortalInfo`, and
+    /// the settings page reads it to badge a rule that only some kinds can judge.
+    pub fn capabilities(self) -> Capabilities {
+        match self {
+            PortalKind::GitHub => Capabilities {
+                auth_style: AuthStyle::DeviceFlow,
+                conflict_state: true,
+                rereview_pending: true,
+                team_reviewers: true,
+                bot_reviewer: Some("Copilot"),
+            },
+            PortalKind::GitLab => Capabilities {
+                auth_style: AuthStyle::DeviceFlow,
+                conflict_state: true,
+                rereview_pending: true,
+                // Every GitLab reviewer is a user.
+                team_reviewers: false,
+                // GitLab Duo reviews by commenting, like Copilot, but its account name is not
+                // documented, and guessing it would fail silently.
+                bot_reviewer: None,
+            },
+        }
+    }
+
     /// What the list calls a kind that is not running yet, before any portal exists to ask.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -343,6 +367,15 @@ mod tests {
             assert!(!kind.display_name().is_empty());
         }
         assert_eq!(PortalKind::parse("bitbucket"), None);
+    }
+
+    /// What each kind can tell is declared once, per kind, and the adapters take it from there, so
+    /// the settings page can say which steps work where without a portal running.
+    #[test]
+    fn each_kind_declares_what_it_can_tell() {
+        assert_eq!(PortalKind::GitHub.capabilities().bot_reviewer, Some("Copilot"));
+        assert_eq!(PortalKind::GitLab.capabilities().bot_reviewer, None);
+        assert!(PortalKind::ALL.iter().all(|k| k.capabilities().conflict_state), "both report conflicts today");
         assert_eq!(PortalKind::parse("GitHub"), None, "keys are lowercase, as the file has them");
     }
 }

@@ -32,7 +32,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::portal::types::{CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Verdict};
+use crate::portal::types::{CheckRollup, PollResponse, PollResult, PrEntry, ReviewState, Reviewer, Rules, Verdict};
 use crate::portal::PollOutcome;
 use crate::state::PrAxis;
 
@@ -78,7 +78,7 @@ fragment mr on MergeRequest{\
 }";
 
 /// Asks for the axes marked `true` in one request. No axis in play costs no request at all.
-pub fn poll(client: &Client, graphql_url: &str, token: &str, axes: [bool; 3]) -> PollOutcome {
+pub fn poll(client: &Client, graphql_url: &str, token: &str, axes: [bool; 3], rules: Rules) -> PollOutcome {
     let mut outcome = PollOutcome::default();
     if !axes.iter().any(|&wanted| wanted) {
         return outcome;
@@ -101,7 +101,7 @@ pub fn poll(client: &Client, graphql_url: &str, token: &str, axes: [bool; 3]) ->
             let status = response.status();
             let headers = response.headers().clone();
             let text = response.text().unwrap_or_default();
-            classify(status, &headers, &text, unix_now(), axes)
+            classify_with_rules(status, &headers, &text, unix_now(), axes, rules)
         }
         Err(e) => axes.map(|wanted| wanted.then(|| PollResult::Transient(format!("request failed: {e}")))),
     };
@@ -116,7 +116,19 @@ pub fn poll(client: &Client, graphql_url: &str, token: &str, axes: [bool; 3]) ->
 ///
 /// One response answers every axis, so a failure is every asked axis's failure: the three slots never
 /// disagree about whether the request worked, only about what it found.
+#[cfg(test)]
 fn classify(status: StatusCode, headers: &HeaderMap, body: &str, now: u64, axes: [bool; 3]) -> [Option<PollResult>; 3] {
+    classify_with_rules(status, headers, body, now, axes, Rules::ALL)
+}
+
+fn classify_with_rules(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &str,
+    now: u64,
+    axes: [bool; 3],
+    rules: Rules,
+) -> [Option<PollResult>; 3] {
     let every = |make: &dyn Fn() -> PollResult| axes.map(|wanted| wanted.then(make));
 
     // Never transient: a rejected token stays rejected until it is replaced.
@@ -148,8 +160,8 @@ fn classify(status: StatusCode, headers: &HeaderMap, body: &str, now: u64, axes:
         }
         let judged = match axis {
             PrAxis::ReviewRequested => judge(&lists.review_requested, |mr| awaiting_review(mr, &lists.username)),
-            PrAxis::ReadyToMerge => judge(&lists.authored, approved),
-            PrAxis::ChangesRequested => judge(&lists.authored, work_required),
+            PrAxis::ReadyToMerge => judge(&lists.authored, |mr| approved(mr, rules)),
+            PrAxis::ChangesRequested => judge(&lists.authored, |mr| work_required(mr, rules)),
         };
         results[axis.index()] = Some(judged);
     }
@@ -384,8 +396,10 @@ fn has_active_reviewers(mr: &MergeRequest) -> bool {
 
 /// Needs work from its author: a standing objection, or a conflict with someone waiting. Same rule as
 /// GitHub's, minus the re-request intersection GitLab's reset makes unnecessary.
-fn work_required(mr: &MergeRequest) -> bool {
-    has_objection(mr) || (mr.conflicts && has_active_reviewers(mr)) || (pipeline_failed(mr) && has_approval(mr))
+fn work_required(mr: &MergeRequest, rules: Rules) -> bool {
+    has_objection(mr)
+        || (rules.conflicts && mr.conflicts && has_active_reviewers(mr))
+        || (rules.failed_checks && pipeline_failed(mr) && has_approval(mr))
 }
 
 /// The head pipeline definitely failed. Running, cancelled, skipped or no pipeline are not failures.
@@ -410,10 +424,13 @@ fn has_approval(mr: &MergeRequest) -> bool {
 /// `approvedBy` only. A reviewer's `APPROVED` state is not read here on purpose: approvals can be
 /// reset without that column moving, and a green bar over a merge request nobody currently approves
 /// is the false claim this axis must not make.
-fn approved(mr: &MergeRequest) -> bool {
+fn approved(mr: &MergeRequest, rules: Rules) -> bool {
     // A failed pipeline takes it off too: approved with red CI is work, and the amber bar carries it.
     // A pipeline still running holds it back, on neither bar, until it passes.
-    if mr.conflicts || pipeline_failed(mr) || pipeline_running(mr) {
+    if (rules.conflicts && mr.conflicts)
+        || (rules.failed_checks && pipeline_failed(mr))
+        || (rules.running_checks && pipeline_running(mr))
+    {
         return false;
     }
     has_approval(mr)
@@ -719,6 +736,29 @@ mod tests {
         let m = mr("p/2", &[("alice", "UNREVIEWED")], &[], false);
         let body = payload(&[], &[format!(r#"{{"headPipeline":{{"status":"FAILED"}},{}"#, &m[1..])]);
         assert_eq!(work(&body), Vec::<String>::new());
+    }
+
+    /// The green bar's rules switched off are ignored on both bars, as on GitHub.
+    #[test]
+    fn a_rule_switched_off_is_ignored_on_both_bars() {
+        let judge = |body: &str, rules: Rules| -> (Vec<String>, Vec<String>) {
+            let results = classify_with_rules(StatusCode::OK, &headers(&[]), body, 0, ALL, rules);
+            (urls(&results[PrAxis::ReadyToMerge.index()]), urls(&results[PrAxis::ChangesRequested.index()]))
+        };
+        let with_pipeline = |status: &str, conflicts: bool| {
+            let m = mr("p/1", &[("alice", "APPROVED")], &["alice"], conflicts);
+            format!(r#"{{"headPipeline":{{"status":"{status}"}},{}"#, &m[1..])
+        };
+        let none: Vec<String> = Vec::new();
+        let one = vec!["p/1".to_string()];
+        let conflict = payload(&[], &[with_pipeline("SUCCESS", true)]);
+        assert_eq!(judge(&conflict, Rules::ALL), (none.clone(), one.clone()));
+        assert_eq!(judge(&conflict, Rules { conflicts: false, ..Rules::ALL }), (one.clone(), none.clone()));
+        let failed = payload(&[], &[with_pipeline("FAILED", false)]);
+        assert_eq!(judge(&failed, Rules { failed_checks: false, ..Rules::ALL }), (one.clone(), none.clone()));
+        let running = payload(&[], &[with_pipeline("RUNNING", false)]);
+        assert_eq!(judge(&running, Rules::ALL), (none.clone(), none.clone()));
+        assert_eq!(judge(&running, Rules { running_checks: false, ..Rules::ALL }), (one, none));
     }
 
     // ── The entry ─────────────────────────────────────────────────────────────

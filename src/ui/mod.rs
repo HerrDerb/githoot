@@ -256,7 +256,12 @@ pub fn sections(
         .into_iter()
         .enumerate()
         .map(|(i, (title, members))| {
-            let fields: String = members.iter().map(|s| field(s, &value(s))).collect();
+            // A section of steps is drawn as a rule line rather than as a list of checkboxes.
+            let fields: String = if members.iter().all(|s| matches!(s.kind, Kind::Step { .. })) {
+                rule_line(&members, value)
+            } else {
+                members.iter().map(|s| field(s, &value(s))).collect()
+            };
             let line = match flash {
                 Some((at, line)) if *at == i => esc(line),
                 _ => String::new(),
@@ -276,12 +281,57 @@ pub fn sections(
         .collect()
 }
 
+/// The green bar's rules as the path a pull request of yours walks to green, top to bottom: the two
+/// steps that define the bar (drawn as dots, not switches), then one switch per rule with what happens
+/// to a pull request that fails it, ending at the green bar itself.
+///
+/// The order is who decides: people, then git, then CI, then bots. It is not a ladder: every switch
+/// is independent, because nothing makes one rule depend on another. A rule switched off fades and
+/// its stretch of the line turns dashed, so a skipped gate is visible at a glance.
+fn rule_line(steps: &[&'static Setting], value: &dyn Fn(&Setting) -> String) -> String {
+    let fixed = |text: &str, otherwise: &str| {
+        let chip = if otherwise.is_empty() { String::new() } else { format!("<span class=\"gate-else else-amber\">{otherwise}</span>") };
+        format!("<li class=\"gate fixed\"><span class=\"gate-node\" aria-hidden=\"true\"></span><span class=\"gate-text\">{text}</span>{chip}</li>")
+    };
+    let mut h = String::from(
+        "<p class=\"sub gate-lead\">What one of your pull requests has to pass to light the green bar. \
+         A step you switch off is ignored on both bars.</p><ol class=\"gates\">",
+    );
+    h.push_str(&fixed("Somebody approved it", ""));
+    h.push_str(&fixed("Nobody's objection stands", "else amber"));
+    for s in steps {
+        let Kind::Step { otherwise, .. } = s.kind else { continue };
+        let on = crate::setting::flag(s.kind, &value(s));
+        let tone = if otherwise.contains("amber") { "else-amber" } else { "else-wait" };
+        // A step only some portal kinds can judge names them, so a switch that does nothing for the
+        // portal you use says so rather than looking broken.
+        let badge = crate::config::step_portals(s.key)
+            .map(|kinds| {
+                let names: Vec<&str> = kinds.iter().map(|k| k.display_name()).collect();
+                format!("<span class=\"gate-portal\">{}</span>", esc(&names.join(" · ")))
+            })
+            .unwrap_or_default();
+        h.push_str(&format!(
+            "<li class=\"gate\"><label class=\"gate-row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{}>\
+             <span class=\"gate-title\"><span class=\"gate-text\">{}</span>{badge}</span></label>\
+             <span class=\"gate-else {tone}\">{}</span><p class=\"sub gate-help\">{}</p></li>",
+            esc(s.key),
+            if on { " checked" } else { "" },
+            esc(s.label),
+            esc(otherwise),
+            esc(s.help),
+        ));
+    }
+    h.push_str("<li class=\"gate end\"><span class=\"gate-node\" aria-hidden=\"true\"></span><span class=\"gate-text\">Green bar</span></li></ol>");
+    h
+}
+
 /// One declared setting as its control, showing `value`, with its help underneath.
 fn field(s: &Setting, value: &str) -> String {
     let help = if s.help.is_empty() { String::new() } else { format!("<p class=\"sub help\">{}</p>", esc(s.help)) };
     let checked = |on: bool| if on { " checked" } else { "" };
     match s.kind {
-        Kind::Flag { .. } => format!(
+        Kind::Flag { .. } | Kind::Step { .. } => format!(
             "<label class=\"row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{}> {}</label>{help}",
             esc(s.key),
             checked(crate::setting::flag(s.kind, value)),
@@ -520,6 +570,33 @@ pub(crate) mod tests {
         let html = sidebar(&site(), &Place::General);
         assert!(html.contains(r#"href="/tok/portals/github"><span class="up-name">Portals › </span>GitHub</a>"#), "{html}");
         assert!(html.contains(r#"<span class="up-name">Integrations › </span>Herdr dispatcher</a>"#), "{html}");
+    }
+
+    /// The green bar's rules are drawn as the path a pull request walks to green: two fixed steps,
+    /// then one switch per rule with what happens when it fails, ending at the green bar. One form
+    /// that saves as it changes.
+    #[test]
+    fn the_green_bar_rules_are_drawn_as_a_line_to_green() {
+        let value = |s: &Setting| if s.key == "ruleRunningChecks" { "off".to_string() } else { "on".to_string() };
+        let html = sections("tok", &Place::General, crate::config::GENERAL, &value, None);
+        let at = html.find(r#"<ol class="gates">"#).expect("the line");
+        let line = &html[at..at + html[at..].find("</ol>").unwrap()];
+        let order: Vec<usize> = ["Somebody approved it", "Nobody's objection stands", "No merge conflict", "Checks did not fail", "Checks have finished", "Automatic reviewer&#39;s comments resolved", "Green bar"]
+            .iter()
+            .map(|label| line.find(label).unwrap_or_else(|| panic!("{label} missing: {line}")))
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "in order: {order:?}");
+        assert!(line.contains(r#"<li class="gate fixed">"#), "fixed steps are dots, not switches");
+        assert!(line.contains(r#"<input type="checkbox" name="ruleConflicts" value="on" checked>"#), "{line}");
+        assert!(line.contains(r#"<input type="checkbox" name="ruleRunningChecks" value="on">"#), "off: unticked");
+        assert!(line.contains(r#"<span class="gate-else else-amber">else amber</span>"#), "{line}");
+        assert!(line.contains(r#"<span class="gate-else else-wait">else waits</span>"#), "{line}");
+        assert!(line.contains(r#"<li class="gate end">"#), "{line}");
+        // A step only some portals can judge carries a badge naming them; the others carry none.
+        assert!(line.contains(r#"comments resolved</span><span class="gate-portal">GitHub</span>"#), "{line}");
+        assert_eq!(line.matches("gate-portal").count(), 1, "only the Copilot step is portal-specific today");
+        let form = &html[..at];
+        assert!(form[form.rfind("<form").unwrap()..].contains("data-autosave"), "saves as it changes");
     }
 
     /// Every page carries the site script when it has a nonce, and nothing without one.
