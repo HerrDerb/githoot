@@ -385,7 +385,23 @@ fn has_active_reviewers(mr: &MergeRequest) -> bool {
 /// Needs work from its author: a standing objection, or a conflict with someone waiting. Same rule as
 /// GitHub's, minus the re-request intersection GitLab's reset makes unnecessary.
 fn work_required(mr: &MergeRequest) -> bool {
-    has_objection(mr) || (mr.conflicts && has_active_reviewers(mr))
+    has_objection(mr) || (mr.conflicts && has_active_reviewers(mr)) || (pipeline_failed(mr) && has_approval(mr))
+}
+
+/// The head pipeline definitely failed. Running, cancelled, skipped or no pipeline are not failures.
+fn pipeline_failed(mr: &MergeRequest) -> bool {
+    mr.head_pipeline.as_ref().is_some_and(|p| pipeline_rollup(&p.status) == CheckRollup::Failure)
+}
+
+/// The head pipeline is still running, from created to running. Not good news yet, and not work. A
+/// manual job waiting for a press is not counted, or it could hold an approval back forever.
+fn pipeline_running(mr: &MergeRequest) -> bool {
+    mr.head_pipeline.as_ref().is_some_and(|p| pipeline_rollup(&p.status) == CheckRollup::Pending)
+}
+
+/// Somebody approved it and nobody's objection stands: the reviews half of the green bar.
+fn has_approval(mr: &MergeRequest) -> bool {
+    !has_objection(mr) && approvers(mr).next().is_some()
 }
 
 /// Approved by somebody, and nothing standing against it. Anything on the needs-work bar is off this
@@ -395,10 +411,12 @@ fn work_required(mr: &MergeRequest) -> bool {
 /// reset without that column moving, and a green bar over a merge request nobody currently approves
 /// is the false claim this axis must not make.
 fn approved(mr: &MergeRequest) -> bool {
-    if mr.conflicts || has_objection(mr) {
+    // A failed pipeline takes it off too: approved with red CI is work, and the amber bar carries it.
+    // A pipeline still running holds it back, on neither bar, until it passes.
+    if mr.conflicts || pipeline_failed(mr) || pipeline_running(mr) {
         return false;
     }
-    approvers(mr).next().is_some()
+    has_approval(mr)
 }
 
 /// Counts the merge requests `keep` accepts and builds their entries; one without a URL poisons the
@@ -672,6 +690,35 @@ mod tests {
         );
         assert_eq!(work(&body), ["x/1", "x/2"]);
         assert_eq!(approved(&body), ["x/3"]);
+    }
+
+    /// An approved merge request whose pipeline failed is work, not news: amber, not green. Only a
+    /// failed pipeline moves it; running, cancelled or none leave the approval where it was.
+    #[test]
+    fn an_approved_merge_request_with_a_failed_pipeline_is_work_not_news() {
+        let with_pipeline = |status: &str| {
+            let m = mr("p/1", &[("alice", "APPROVED")], &["alice"], false);
+            format!(r#"{{"headPipeline":{{"status":"{status}"}},{}"#, &m[1..])
+        };
+        let failed = payload(&[], &[with_pipeline("FAILED")]);
+        assert_eq!(work(&failed), ["p/1"]);
+        assert_eq!(approved(&failed), Vec::<String>::new());
+        for fine in ["SUCCESS", "CANCELED", "MANUAL"] {
+            let body = payload(&[], &[with_pipeline(fine)]);
+            assert_eq!(work(&body), Vec::<String>::new(), "{fine}");
+            assert_eq!(approved(&body), ["p/1"], "{fine}");
+        }
+        // Still running: not green yet, and not work either. A manual job waiting for a press does not
+        // count as running, or it could hold the approval back forever.
+        for running in ["CREATED", "WAITING_FOR_RESOURCE", "PREPARING", "WAITING_FOR_CALLBACK", "PENDING", "RUNNING", "SCHEDULED"] {
+            let body = payload(&[], &[with_pipeline(running)]);
+            assert_eq!(approved(&body), Vec::<String>::new(), "{running}: not green while running");
+            assert_eq!(work(&body), Vec::<String>::new(), "{running}: not work");
+        }
+        // Unapproved with a failed pipeline: not this rule's business.
+        let m = mr("p/2", &[("alice", "UNREVIEWED")], &[], false);
+        let body = payload(&[], &[format!(r#"{{"headPipeline":{{"status":"FAILED"}},{}"#, &m[1..])]);
+        assert_eq!(work(&body), Vec::<String>::new());
     }
 
     // ── The entry ─────────────────────────────────────────────────────────────

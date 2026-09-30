@@ -580,7 +580,38 @@ fn blocked_by_conflict(pr: &PullRequestNode) -> bool {
 /// to be only the first, and its query said so server-side; it now asks for every open pull request
 /// of yours and decides here, because `mergeable` is not a search qualifier.
 fn work_required(pr: &PullRequestNode, copilot: bool) -> bool {
-    still_on_you(pr) || blocked_by_conflict(pr) || (copilot && copilot_unresolved(pr) > 0)
+    still_on_you(pr)
+        || blocked_by_conflict(pr)
+        || (copilot && copilot_unresolved(pr) > 0)
+        || (checks_failed(pr) && has_approval(pr))
+}
+
+/// Whether the head's checks definitely failed: a rollup of `FAILURE` or `ERROR`. Pending, no
+/// rollup at all (no checks configured, or a refusal degraded away) and a state this version has
+/// never heard of are not failures, for the reason `CheckRollup::Unknown` gives: painting them red
+/// would invent a problem.
+fn checks_failed(pr: &PullRequestNode) -> bool {
+    matches!(pr.status_check_rollup.as_ref().map(|r| r.state.as_str()), Some("FAILURE" | "ERROR"))
+}
+
+/// Whether the head's checks are still running: a rollup of `PENDING`. Not good news yet, so the green
+/// bar waits for them, and not work either. `EXPECTED` (a required check that has never reported) is
+/// not counted as running, or a check nobody configured to report could hold an approval back forever.
+fn checks_running(pr: &PullRequestNode) -> bool {
+    pr.status_check_rollup.as_ref().is_some_and(|r| r.state == "PENDING")
+}
+
+/// Somebody approved it and nobody's objection stands: the reviews half of the green bar.
+fn has_approval(pr: &PullRequestNode) -> bool {
+    let mut any_approved = false;
+    for review in pr.latest_opinionated_reviews.iter().flat_map(|c| c.nodes.iter().flatten()) {
+        match review.state.as_str() {
+            "CHANGES_REQUESTED" => return false,
+            "APPROVED" => any_approved = true,
+            _ => {}
+        }
+    }
+    any_approved
 }
 
 /// Whether a reviewer approved this pull request and nobody's objection stands against it.
@@ -600,18 +631,14 @@ fn approved(pr: &PullRequestNode, copilot: bool) -> bool {
     // never light for the same PR. Work before news, and the approval is still there to be told about
     // the moment you deal with it. The conflict veto needs no `has_active_reviewers` check of its own:
     // a pull request cannot be approved without a review, so anything reaching it already has one.
-    if is_conflicting(pr) || (copilot && copilot_unresolved(pr) > 0) {
+    //
+    // Failed checks veto it the same way: an approved pull request whose CI is red is work, and the
+    // amber bar carries it (see `work_required`), with the approval still on its card. Checks still
+    // running hold it back too, on neither bar: it is not good news until they pass.
+    if is_conflicting(pr) || (copilot && copilot_unresolved(pr) > 0) || checks_failed(pr) || checks_running(pr) {
         return false;
     }
-    let mut any_approved = false;
-    for review in pr.latest_opinionated_reviews.iter().flat_map(|c| c.nodes.iter().flatten()) {
-        match review.state.as_str() {
-            "CHANGES_REQUESTED" => return false,
-            "APPROVED" => any_approved = true,
-            _ => {}
-        }
-    }
-    any_approved
+    has_approval(pr)
 }
 
 /// Builds the page's view of one hit, or `None` when it has no URL.
@@ -1631,6 +1658,54 @@ mod tests {
             PollResult::Fresh { count, .. } => assert_eq!(count, Some(1)),
             other => panic!("expected Fresh, got {:?}", other),
         }
+    }
+
+    /// An approved pull request whose checks failed is work, not news: it leaves the green bar for
+    /// the amber one. Only a definite failure or error moves it; pending, a missing rollup, or a state
+    /// this version has never heard of leave the approval where it was.
+    #[test]
+    fn an_approved_pull_request_with_failed_checks_is_work_not_news() {
+        let with_rollup = |state: &str| {
+            let hit = reviewed("https://github.com/o/r/pull/1", &["APPROVED"]);
+            format!(r#"{{"statusCheckRollup":{state},{}"#, &hit[1..])
+        };
+        for failed in [r#"{"state":"FAILURE"}"#, r#"{"state":"ERROR"}"#] {
+            let body = payload(&[with_rollup(failed)]);
+            assert_eq!(count_of(&body), 1, "{failed}: work required");
+            match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
+                PollResult::Fresh { count, .. } => assert_eq!(count, Some(0), "{failed}: not on green"),
+                other => panic!("expected Fresh, got {other:?}"),
+            }
+        }
+        for fine in [r#"{"state":"SUCCESS"}"#, "null", r#"{"state":"EXPECTED"}"#, r#"{"state":"SOMETHING_NEW"}"#] {
+            let body = payload(&[with_rollup(fine)]);
+            assert_eq!(count_of(&body), 0, "{fine}: not work");
+            match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
+                PollResult::Fresh { count, .. } => assert_eq!(count, Some(1), "{fine}: still approved"),
+                other => panic!("expected Fresh, got {other:?}"),
+            }
+        }
+    }
+
+    /// Checks still running: not good news yet, and not work either. It shows on green once they pass.
+    /// `EXPECTED` (a required check that never reported) does not hold it back, or it could wait forever.
+    #[test]
+    fn an_approved_pull_request_with_checks_still_running_waits_off_both_bars() {
+        let hit = reviewed("https://github.com/o/r/pull/1", &["APPROVED"]);
+        let body = payload(&[format!(r#"{{"statusCheckRollup":{{"state":"PENDING"}},{}"#, &hit[1..])]);
+        assert_eq!(count_of(&body), 0, "not work");
+        match approved_resp(StatusCode::OK, &headers(&[]), &body, 0) {
+            PollResult::Fresh { count, .. } => assert_eq!(count, Some(0), "not green while running"),
+            other => panic!("expected Fresh, got {other:?}"),
+        }
+    }
+
+    /// Only approved pull requests move: red CI on one nobody approved yet is not this rule's business.
+    #[test]
+    fn failed_checks_without_an_approval_are_not_work() {
+        let hit = reviewed("https://github.com/o/r/pull/1", &[]);
+        let body = payload(&[format!(r#"{{"statusCheckRollup":{{"state":"FAILURE"}},{}"#, &hit[1..])]);
+        assert_eq!(count_of(&body), 0);
     }
 
     /// The conflict reaches the page too, or a pull request counted for a reason the page cannot show

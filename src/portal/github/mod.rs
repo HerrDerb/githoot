@@ -65,9 +65,11 @@ const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false ar
 /// them. The green bar sat dark over six approved PRs before this was noticed. Reading the reviews
 /// themselves is what the PR page does, and it is what this axis does now — see `PR_REVIEWS_DOCUMENT`.
 ///
-/// There is deliberately no CI qualifier either. A red check used to disqualify a hit — the bar meant
-/// *approved and mergeable* — and that hid the one thing worth being told, that somebody approved your
-/// work. Whether CI is green is a question you go and answer on the page the entry opens. So
+/// There is deliberately no CI qualifier either. A red check used to make a hit vanish, the bar meaning
+/// *approved and mergeable*, and that hid the one thing worth being told, that somebody approved your
+/// work. Failed checks now move an approved pull request to the amber bar instead, and checks still
+/// running keep it off green until they finish, both judged client-side by `api::approved` and
+/// `api::work_required` from each hit's rollup. So
 /// `status:success` is not merely unused but unwanted. (It would not have worked anyway: it reads only
 /// GitHub's legacy combined commit status, empty for repos whose checks are all check runs.) Also still
 /// unchecked, and always was: branch-protection rules needing more than one approval or named reviewers.

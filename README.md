@@ -94,13 +94,65 @@ marks around it do, and **every mark combines with every other**, so any state c
 | <img src="docs/icons/tray.png" height="26"> | Nothing pending. Genuinely nothing — an unreadable answer is never reported as a confident zero |
 | <img src="docs/icons/tray_review.png" height="26"> | Red bar: a PR waits on your review |
 | <img src="docs/icons/tray_merge.png" height="26"> | Green bar: one of your PRs is approved |
-| <img src="docs/icons/tray_changes.png" height="26"> | Amber bar: a reviewer asked for changes, or a conflict is blocking one |
+| <img src="docs/icons/tray_changes.png" height="26"> | Amber bar: a reviewer asked for changes, a conflict is blocking one, or an approved one failed its checks |
 | <img src="docs/icons/tray_update.png" height="26"> | Green arrow: a newer release is available |
-| <img src="docs/icons/tray_alert.png" height="26"> | Red exclamation: not authorized, GitHub is down, or a poll failed — the tooltip says which |
+| <img src="docs/icons/tray_alert.png" height="26"> | Red exclamation: sign-in needed, a portal is down, or a poll failed; the tooltip says which |
 | <img src="docs/icons/tray_review_merge_changes.png" height="26"> | All three at once. A very bad Monday |
 
 Those are the real icons the app draws, composited at runtime from one owl, not mock-ups. Positions
 are fixed, so a bar always means the same thing → [the whole design](docs/icons.md).
+
+### How each state is decided
+
+The same rules apply to every portal, GitHub and GitLab alike. "Pull request" covers GitLab's merge
+requests. Only pull requests that are **open and not drafts** are ever considered: a draft is work
+nobody can act on yet, so it lights nothing until it is marked ready.
+
+**Red bar: somebody wants your review.** A pull request counts when a review has been asked of you and
+you have not given it yet.
+
+- Giving your review, whether approving, asking for changes or commenting, takes it off the bar.
+  Being asked again puts it back.
+- A request made to a team you belong to counts too (GitHub). Anyone on the team reviewing clears it.
+- Pull requests opened by bots, such as dependency updaters, are left out.
+
+**Green bar: your pull request was approved.** One of your own pull requests counts when:
+
+- at least one person has approved it,
+- nobody's request for changes still stands,
+- it does not conflict with the branch it merges into,
+- its checks have finished without failing (while they are still running it waits, on neither bar),
+- and no automatic reviewer comments are still open (GitHub's Copilot, if you count those).
+
+It reports good news, not permission to merge: your repository's required number of approvals is not
+checked. A pull request with no checks at all counts as soon as it is approved.
+
+**Amber bar: your pull request needs work.** One of your own pull requests counts when any of these is
+true:
+
+- a reviewer asked for changes and you have not handed it back to them by asking for their review
+  again,
+- it conflicts with the branch it merges into while somebody is reviewing it (a conflict on a pull
+  request nobody is looking at blocks nobody),
+- it is approved but its checks failed (red CI on an approved pull request is work, not good news),
+- the automatic reviewer left comments that are still open and not outdated (GitHub's Copilot, if you
+  count those).
+
+**The green and amber bars never light for the same pull request.** Anything that puts it on amber takes
+it off green: work comes before good news, and the approval is still there once the work is done.
+
+**Muted pull requests count for nothing** until the mute ends, then return as if new. Each bar can be
+switched off, which also stops it being asked for.
+
+**The hoot** plays when a pull request arrives on a bar that you have not been told about yet. Leaving a
+bar is silent, and several arriving at once are one hoot → [the hoot](docs/hoot.md).
+
+**The exclamation** means GitHoot cannot vouch for what it shows: you need to sign in, a portal reports
+an outage, or asking failed. A failed answer is never shown as zero; the last known state is kept and
+the tooltip says what went wrong.
+
+**The arrow** means a newer GitHoot release is available. Install it from the tray menu or from
+**Updates** in the settings pages.
 
 ## Configure it
 

@@ -27,9 +27,14 @@ counts: the PR page shows it, and this bar reports news rather than gating a mer
 
 **The green bar means approved, not mergeable.** It used to mean both: through 1.10.0 the bar counted an
 approved pull request only when its GraphQL `statusCheckRollup` was `SUCCESS`, so one red or still-running
-check darkened it. That hid the thing worth being told — somebody approved your work — and it also
-disagreed with the entry beside it. Approval is the whole signal now. Whether CI is green is shown beside
-each pull request on [the page](pr-page.md) the entry opens, where it informs rather than hides.
+check darkened it. That hid the thing worth being told, that somebody approved your work, and it also
+disagreed with the entry beside it. Now **failed checks move it to the amber bar** instead of hiding it:
+an approved pull request with red CI is work, and it shows there with its approval on the card. **Checks
+still running hold it back** from green, on neither bar, until they pass: it is not good news yet, and it
+hoots when it lands. Two states are deliberately not "running", because either could hold an approval
+back forever: GitHub's `EXPECTED` (a required check that never reported) and GitLab's `manual` (a
+pipeline waiting for someone to start a job). A repository with no checks is not held back at all. Whether CI is green is shown beside each pull request on
+[the page](pr-page.md) the entry opens.
 
 Still not checked: branch protection needing multiple approvals or named reviewers. Merge conflicts used
 to be on that list, for the lazy-computation reason below; the amber bar reads them now. Also unchanged:
@@ -40,7 +45,7 @@ stopped gating on CI. They were kept rather than withdrawn, because narrowing an
 permissions makes every installation owner re-approve. That turned out well: the PR page reads the check
 rollup again, at no re-approval cost to anyone.
 
-**The amber bar means work required from you, and counts two things.**
+**The amber bar means work required from you, and counts four things.**
 
 *A reviewer's objection still standing.* Re-requesting a review does not dismiss the earlier verdict, so
 `review:changes_requested` keeps matching a pull request you have already handed back, and the bar used to
@@ -53,6 +58,12 @@ blocker; erring that way keeps the bar lit rather than hiding work.
 a reviewer attached — either a pending request or a standing review. A conflict blocks the reviewer as
 surely as their own objection does, and it is yours to fix. A conflict on a pull request **nobody is
 attached to** blocks nobody and does not count.
+
+*Approved, but the checks failed.* An approved pull request whose head's check rollup is `FAILURE` or
+`ERROR` is work, not news, so it moves from the green bar to this one, with the approval still shown on
+its card. Only a definite failure moves it: pending checks, no checks at all, a rollup the token may not
+read, or a state this version does not know leave it on green. A pull request nobody has approved yet is
+not moved by red CI; it was never on the green bar to begin with.
 
 *Unresolved Copilot comments.* **Copilot never approves and never requests changes — it only
 comments**, so `latestOpinionatedReviews` drops its review entirely and the objection rule above cannot
@@ -95,9 +106,9 @@ handed to GraphQL unchanged, so the count does not move, except that the red bar
 cap above: past 100 pull requests awaiting your review, the extras are not seen. Undercounting rather
 than overcounting, and unreachable by the inbox this app exists for.
 
-**The check rollup is back, for display only.** Each hit's `statusCheckRollup` is read again so the PR
-page can show whether CI is green. It decides nothing: the green bar still means approved, not
-mergeable. A repository with no checks answers `null`, and a token refused the field degrades to the
+**The check rollup is read again.** Each hit's `statusCheckRollup` is shown on the PR page, and it
+decides two things for an approved pull request: a definite failure moves it from green to amber, and
+checks still running keep it off green until they finish. It never lights a bar on its own. A repository with no checks answers `null`, and a token refused the field degrades to the
 same value, so both render as *Checks unknown* rather than as a failure — and a refusal on that one
 field costs the field, not the poll. That distinction matters: under the old rule any error failed the
 whole poll, which is what left this axis frozen from 1.7.0 to 1.10.0.
