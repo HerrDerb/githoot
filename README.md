@@ -138,8 +138,10 @@ true:
 - the automatic reviewer left comments that are still open and not outdated (GitHub's Copilot, if you
   count those).
 
-**Each rule after the approval can be switched off** on **General ▸ What makes a pull request green**,
-drawn there as the path a pull request walks to green. A rule switched off is ignored on both bars.
+**The rules can be switched** on **General**, one folded section per bar: the red and green bars are
+drawn as the path a pull request walks to them, the amber bar as its list of reasons. A green-bar rule
+switched off is ignored on both green and amber; on the red bar you can also count only requests naming
+you directly (GitHub), or let pull requests opened by bots in.
 
 **The green and amber bars never light for the same pull request.** Anything that puts it on amber takes
 it off green: work comes before good news, and the approval is still there once the work is done.

@@ -1821,8 +1821,9 @@ mod tests {
         let form = |body: &str| parse_form(body);
         assert_eq!(section_of(crate::config::GENERAL, &form("section=0")).map(|(i, m)| (i, m.len())), Some((0, 3)));
         assert_eq!(section_of(crate::config::GENERAL, &form("section=1")).map(|(i, m)| (i, m.len())), Some((1, 1)));
-        assert_eq!(section_of(crate::config::GENERAL, &form("section=2")).map(|(i, m)| (i, m.len())), Some((2, 4)), "the green bar's line");
-        for bad in ["section=3", "section=-1", "section=x", "", "section=01e3"] {
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=2")).map(|(i, m)| (i, m.len())), Some((2, 2)), "the red bar's line");
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=3")).map(|(i, m)| (i, m.len())), Some((3, 4)), "the green bar's line");
+        for bad in ["section=4", "section=-1", "section=x", "", "section=01e3"] {
             assert!(section_of(crate::config::GENERAL, &form(bad)).is_none(), "{bad:?}");
         }
     }

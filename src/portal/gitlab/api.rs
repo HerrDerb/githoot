@@ -159,7 +159,7 @@ fn classify_with_rules(
             continue;
         }
         let judged = match axis {
-            PrAxis::ReviewRequested => judge(&lists.review_requested, |mr| awaiting_review(mr, &lists.username)),
+            PrAxis::ReviewRequested => judge(&lists.review_requested, |mr| awaiting_review(mr, &lists.username, rules)),
             PrAxis::ReadyToMerge => judge(&lists.authored, |mr| approved(mr, rules)),
             PrAxis::ChangesRequested => judge(&lists.authored, |mr| work_required(mr, rules)),
         };
@@ -369,8 +369,8 @@ fn is_pending(state: Option<&str>) -> bool {
 /// costs a colleague waiting.
 ///
 /// Bot authors are left out, as GitHub's query leaves out Dependabot and Renovate.
-fn awaiting_review(mr: &MergeRequest, me: &str) -> bool {
-    if mr.author.as_ref().is_some_and(|a| a.bot) {
+fn awaiting_review(mr: &MergeRequest, me: &str, rules: Rules) -> bool {
+    if rules.skip_bots && mr.author.as_ref().is_some_and(|a| a.bot) {
         return false;
     }
     match reviewers(mr).find(|r| r.username == me) {
@@ -736,6 +736,16 @@ mod tests {
         let m = mr("p/2", &[("alice", "UNREVIEWED")], &[], false);
         let body = payload(&[], &[format!(r#"{{"headPipeline":{{"status":"FAILED"}},{}"#, &m[1..])]);
         assert_eq!(work(&body), Vec::<String>::new());
+    }
+
+    /// "Not opened by a bot" switched off lets a bot's merge request onto the red bar.
+    #[test]
+    fn a_bots_merge_request_counts_when_bots_are_let_in() {
+        let bot = mr("u/1", &[("me", "UNREVIEWED")], &[], false).replacen('{', r#"{"author":{"username":"renovate-bot","bot":true},"#, 1);
+        let body = payload(&[bot], &[]);
+        let red = |rules: Rules| urls(&classify_with_rules(StatusCode::OK, &headers(&[]), &body, 0, ALL, rules)[PrAxis::ReviewRequested.index()]);
+        assert_eq!(red(Rules::ALL), Vec::<String>::new());
+        assert_eq!(red(Rules { skip_bots: false, ..Rules::ALL }), ["u/1"]);
     }
 
     /// The green bar's rules switched off are ignored on both bars, as on GitHub.

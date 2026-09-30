@@ -115,11 +115,20 @@ survive byte for byte. Only the hoot and the green bar's rules take effect at on
 an integration's settings always do. Without JavaScript every section shows its Save button and posts
 as before.
 
-**What makes a pull request green** is drawn on General as the path a pull request walks to the green
-bar: two fixed steps (somebody approved it, nobody's objection stands), then one switch per rule, each
+**What makes a pull request green** sits on General folded to one row that says how many of its rules
+are on ("4 of 4 rules on"); a click opens it. Open, it is drawn as the path a pull request walks to the
+green bar: two fixed steps (somebody approved it, nobody's objection stands), then one switch per rule, each
 with what happens to a pull request that fails it, *else amber* or *else waits*. A rule you switch off
 fades and is ignored on **both** bars, so nothing is ever green and amber at once. The switches are
 independent; their order is only who decides: people, then git, then CI, then the automatic reviewer.
+
+**The red and amber bars get the same treatment**, each folded with its own count and wearing its own
+bar. *What makes a review request red* is a path too: a review was asked of you, you have not given it
+yet, then two switches, team requests (GitHub) and leaving out pull requests opened by bots. *What makes
+a pull request amber* is a list of reasons rather than a path, since any one of them is enough: a
+standing request for changes, then the green bar's own conflict, failed-checks and Copilot switches,
+shown again as the very same settings. Ticking one on the amber line ticks it on the green one, because
+each of those rules acts on both bars.
 
 **Parts of GitHub that count as an outage** is a choice between *The whole status page* and *Only these
 parts*; the parts appear only under the second. It is the same `statusComponents` key: the whole page
@@ -215,6 +224,8 @@ existed — the key is appended rather than the file regenerated.
 | `ruleConflicts` | `on` | A merge conflict while somebody is reviewing: amber, not green. Off ignores conflicts on both bars |
 | `ruleFailedChecks` | `on` | Failed checks on an approved pull request: amber, not green. Off ignores them on both bars |
 | `ruleRunningChecks` | `on` | Checks still running keep an approved pull request off green until they finish. Off shows it at once |
+| `ruleTeamRequests` | `on` | A review asked of a team you are in lights the red bar, not only one naming you (GitHub) |
+| `ruleSkipBots` | `on` | Pull requests opened by bots (Dependabot, Renovate) stay off the red bar. Off lets them in |
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |

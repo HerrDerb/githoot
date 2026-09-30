@@ -91,12 +91,27 @@ const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:fals
 /// a semantic change and a poll-loop refactor do not land in the same commit.
 const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
 
+/// The red bar's query as the rules shape it: `REVIEW_QUERY` itself with both on, requests naming you
+/// only (`user-review-requested`) with team requests off, and no bot exclusions with bots let in.
+/// Drafts, archived repositories and closed pull requests stay out whatever the rules say.
+fn review_query(rules: super::types::Rules) -> String {
+    if rules.team_requests && rules.skip_bots {
+        return REVIEW_QUERY.to_string();
+    }
+    let who = if rules.team_requests { "review-requested:@me" } else { "user-review-requested:@me" };
+    let mut q = format!("is:pr {who} state:open draft:false archived:false");
+    if rules.skip_bots {
+        q.push_str(" -label:dependencies -author:app/dependabot -author:app/renovate");
+    }
+    q
+}
+
 /// The search query behind `axis`'s dot.
-fn pr_query(axis: PrAxis) -> &'static str {
+fn pr_query(axis: PrAxis, rules: super::types::Rules) -> String {
     match axis {
-        PrAxis::ReviewRequested => REVIEW_QUERY,
-        PrAxis::ReadyToMerge => MERGE_QUERY,
-        PrAxis::ChangesRequested => CHANGES_QUERY,
+        PrAxis::ReviewRequested => review_query(rules),
+        PrAxis::ReadyToMerge => MERGE_QUERY.to_string(),
+        PrAxis::ChangesRequested => CHANGES_QUERY.to_string(),
     }
 }
 
@@ -139,7 +154,8 @@ pub fn poll_axis(
     axis: PrAxis,
     rules: super::types::Rules,
 ) -> PollResponse {
-    let query = pr_query(axis);
+    let query = pr_query(axis, rules);
+    let query = query.as_str();
     match pr_judge(axis) {
         PrJudge::EveryHit => api::poll_review_requested(client, &endpoints.graphql, token, query),
         PrJudge::Approved => api::poll_approved(client, &endpoints.graphql, token, query, rules),
@@ -357,6 +373,19 @@ mod tests {
             "is:pr review-requested:@me state:open draft:false archived:false \
 -label:dependencies -author:app/dependabot -author:app/renovate"
         );
+    }
+
+    /// The red bar's two rules shape the query itself. Team requests off asks only for requests that
+    /// name you (`user-review-requested`); bots off drops the exclusions.
+    #[test]
+    fn the_review_query_follows_the_red_bar_rules() {
+        use crate::portal::types::Rules;
+        assert_eq!(review_query(Rules::ALL), REVIEW_QUERY);
+        let direct = review_query(Rules { team_requests: false, ..Rules::ALL });
+        assert!(direct.contains("user-review-requested:@me") && !direct.contains(" review-requested:@me"), "{direct}");
+        let with_bots = review_query(Rules { skip_bots: false, ..Rules::ALL });
+        assert!(!with_bots.contains("dependabot") && !with_bots.contains("-label:dependencies"), "{with_bots}");
+        assert!(with_bots.contains("draft:false"), "drafts stay out whatever the rules say");
     }
 
     /// `review:approved` matches nothing in a repository that requires no reviews — GitHub leaves

@@ -79,11 +79,22 @@ pub struct Rules {
     pub running_checks: bool,
     /// The automatic reviewer's open comments (GitHub's Copilot): amber, and not green.
     pub bot_comments: bool,
+    /// The red bar: a review asked of a team you are in counts, not only one naming you (GitHub).
+    pub team_requests: bool,
+    /// The red bar: pull requests opened by bots (dependency updaters) are left out.
+    pub skip_bots: bool,
 }
 
 #[cfg(test)]
 impl Rules {
-    pub const ALL: Rules = Rules { conflicts: true, failed_checks: true, running_checks: true, bot_comments: true };
+    pub const ALL: Rules = Rules {
+        conflicts: true,
+        failed_checks: true,
+        running_checks: true,
+        bot_comments: true,
+        team_requests: true,
+        skip_bots: true,
+    };
 }
 
 /// The size of a pull request's change: lines added and removed, and files touched.

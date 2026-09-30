@@ -38,6 +38,8 @@ const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 const KEY_RULE_CONFLICTS: &str = "ruleConflicts";
 const KEY_RULE_FAILED_CHECKS: &str = "ruleFailedChecks";
 const KEY_RULE_RUNNING_CHECKS: &str = "ruleRunningChecks";
+const KEY_RULE_TEAM_REQUESTS: &str = "ruleTeamRequests";
+const KEY_RULE_SKIP_BOTS: &str = "ruleSkipBots";
 const KEY_LOCAL_API: &str = "localApi";
 /// Every integration's settings live under `integration.<id>.`, and only there. See `crate::integration`.
 const INTEGRATION_PREFIX: &str = "integration.";
@@ -201,6 +203,9 @@ pub struct Config {
     pub rule_conflicts: bool,
     pub rule_failed_checks: bool,
     pub rule_running_checks: bool,
+    /// The red bar's rules; see `portal::types::Rules`. On by default.
+    pub rule_team_requests: bool,
+    pub rule_skip_bots: bool,
     /// Whether the judged lists are served as JSON to scripts running as you on this machine.
     ///
     /// The only default-off setting in this file, and the only one that changes when the loopback
@@ -276,6 +281,8 @@ pub struct RuleSwitches {
     failed_checks: Switch,
     running_checks: Switch,
     bot_comments: Switch,
+    team_requests: Switch,
+    skip_bots: Switch,
 }
 
 impl RuleSwitches {
@@ -286,6 +293,8 @@ impl RuleSwitches {
             failed_checks: Switch::new(r.failed_checks),
             running_checks: Switch::new(r.running_checks),
             bot_comments: Switch::new(r.bot_comments),
+            team_requests: Switch::new(r.team_requests),
+            skip_bots: Switch::new(r.skip_bots),
         }
     }
 
@@ -296,6 +305,8 @@ impl RuleSwitches {
             failed_checks: self.failed_checks.is_on(),
             running_checks: self.running_checks.is_on(),
             bot_comments: self.bot_comments.is_on(),
+            team_requests: self.team_requests.is_on(),
+            skip_bots: self.skip_bots.is_on(),
         }
     }
 
@@ -306,6 +317,8 @@ impl RuleSwitches {
         self.failed_checks.set(r.failed_checks);
         self.running_checks.set(r.running_checks);
         self.bot_comments.set(r.bot_comments);
+        self.team_requests.set(r.team_requests);
+        self.skip_bots.set(r.skip_bots);
     }
 }
 
@@ -332,6 +345,9 @@ pub const GENERAL: &[Setting] = &[
     flag_setting(KEY_READY_TO_MERGE, "Your pull request was approved", true, "The green bar, its menu entry and its search.", "Bars", false),
     flag_setting(KEY_CHANGES_REQUESTED, "Your pull request needs work", true, "The amber bar, its menu entry and its search.", "Bars", false),
     flag_setting(KEY_SOUND, "Hoot when a pull request needs you", true, "The same switch as the tray menu's Hoot.", "Hoot", true),
+    // The red bar's rules, drawn as the path a review request walks to red (see `ui::rule_line`).
+    red_step(KEY_RULE_TEAM_REQUESTS, "Team requests count", "A review asked of a team you are in counts, not only one naming you. Anyone on the team reviewing clears it."),
+    red_step(KEY_RULE_SKIP_BOTS, "Not opened by a bot", "Pull requests from dependency updaters such as Dependabot and Renovate stay off the red bar."),
     // The green bar's rules, drawn as the path a pull request walks to green (see `ui::rule_line`).
     // Each is ignored on both bars when off, so none can put a pull request on green and amber at once.
     step_setting(KEY_RULE_CONFLICTS, "No merge conflict", "else amber", "While somebody is reviewing it. A conflict nobody is waiting on blocks nobody."),
@@ -344,6 +360,11 @@ const fn step_setting(key: &'static str, label: &'static str, otherwise: &'stati
     Setting { key, label, kind: Kind::Step { default_on: true, otherwise }, help, group: GREEN_RULES_GROUP, live: true }
 }
 
+/// A default-on flag's value read the way `Config` reads it: only an explicit off value is off.
+pub fn is_on_or_default(value: &str) -> bool {
+    !is_off(value)
+}
+
 /// The portal kinds a green-bar step works on, when that is not every kind GitHoot supports; `None`
 /// for a step every kind can judge. Read from each kind's declared capabilities, so a badge on the
 /// settings page cannot drift from what the adapters actually do.
@@ -351,12 +372,20 @@ pub fn step_portals(key: &str) -> Option<Vec<PortalKind>> {
     let applies: fn(&crate::portal::Capabilities) -> bool = match key {
         KEY_RULE_CONFLICTS => |c| c.conflict_state,
         KEY_COPILOT_REVIEWS => |c| c.bot_reviewer.is_some(),
+        KEY_RULE_TEAM_REQUESTS => |c| c.team_reviewers,
         // Checks: every kind reports a head's checks or pipeline.
         _ => return None,
     };
     let kinds: Vec<PortalKind> = PortalKind::ALL.into_iter().filter(|k| applies(&k.capabilities())).collect();
     (kinds.len() < PortalKind::ALL.len()).then_some(kinds)
 }
+
+const fn red_step(key: &'static str, label: &'static str, help: &'static str) -> Setting {
+    Setting { key, label, kind: Kind::Step { default_on: true, otherwise: "else not counted" }, help, group: RED_RULES_GROUP, live: true }
+}
+
+/// The section the red bar's rules sit in.
+pub const RED_RULES_GROUP: &str = "What makes a review request red";
 
 /// The section the green bar's rules sit in. Named once, because the page draws it as a line.
 pub const GREEN_RULES_GROUP: &str = "What makes a pull request green";
@@ -432,6 +461,8 @@ pub fn value_of(cfg: &Config, key: &str) -> String {
         KEY_RULE_CONFLICTS => flag(cfg.rule_conflicts),
         KEY_RULE_FAILED_CHECKS => flag(cfg.rule_failed_checks),
         KEY_RULE_RUNNING_CHECKS => flag(cfg.rule_running_checks),
+        KEY_RULE_TEAM_REQUESTS => flag(cfg.rule_team_requests),
+        KEY_RULE_SKIP_BOTS => flag(cfg.rule_skip_bots),
         KEY_LOCAL_API => flag(cfg.local_api),
         KEY_SOUND => flag(cfg.sound),
         KEY_UPDATE_CHECK => flag(cfg.update_check),
@@ -623,6 +654,8 @@ impl Config {
             rule_conflicts: !values.get(KEY_RULE_CONFLICTS).is_some_and(|v| is_off(v)),
             rule_failed_checks: !values.get(KEY_RULE_FAILED_CHECKS).is_some_and(|v| is_off(v)),
             rule_running_checks: !values.get(KEY_RULE_RUNNING_CHECKS).is_some_and(|v| is_off(v)),
+            rule_team_requests: !values.get(KEY_RULE_TEAM_REQUESTS).is_some_and(|v| is_off(v)),
+            rule_skip_bots: !values.get(KEY_RULE_SKIP_BOTS).is_some_and(|v| is_off(v)),
             // Default **off**, alone in this file, because it opens a listening socket at boot and
             // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
             // *missing* key as on and open the door on every install that never asked.
@@ -708,6 +741,8 @@ impl Config {
             failed_checks: self.rule_failed_checks,
             running_checks: self.rule_running_checks,
             bot_comments: self.copilot_reviews,
+            team_requests: self.rule_team_requests,
+            skip_bots: self.rule_skip_bots,
         }
     }
 
@@ -858,6 +893,12 @@ fn default_config() -> String {
          {KEY_RULE_FAILED_CHECKS}=on\n\
          # Checks still running: on neither bar until they pass.\n\
          {KEY_RULE_RUNNING_CHECKS}=on\n\
+         \n\
+         # What puts a review request on the red bar. A request to a team you are in counts, not only\n\
+         # one naming you (GitHub):\n\
+         {KEY_RULE_TEAM_REQUESTS}=on\n\
+         # Pull requests opened by bots such as Dependabot and Renovate are left out:\n\
+         {KEY_RULE_SKIP_BOTS}=on\n\
          \n\
          # Which parts of GitHub may put the exclamation on the icon, comma separated, one line.\n\
          # Delete the ones you do not care about and they stop raising the mark; add any of the\n\
@@ -1111,7 +1152,10 @@ mod tests {
     fn exactly_the_settings_that_need_no_restart_are_live() {
         let live: Vec<&str> =
             declared().filter(|s| s.live).map(|s| s.key).collect();
-        assert_eq!(live, [KEY_SOUND, KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS]);
+        assert_eq!(
+            live,
+            [KEY_SOUND, KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS, KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS]
+        );
         let live = |key: &str| declared().any(|s| s.key == key && s.live);
         assert!(live(KEY_SOUND) && !live(KEY_LOG_LEVEL));
         assert!(!live(KEY_LOCAL_API), "the listener binds once, at startup");
@@ -1230,13 +1274,13 @@ mod tests {
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // The two keys shipped off. Written explicitly anyway, so the file says the doors exist.
         assert_eq!(values.get(KEY_LOCAL_API), Some(&"off"));
-        for rule in [KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS] {
+        for rule in [KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS, KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS] {
             assert_eq!(values.get(rule), Some(&"on"), "{rule}: every green-bar rule ships on");
         }
         // And nothing else, so a key added to the template without being read is caught. The
         // integration keys are held to the registry by their own test below.
         let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
-        assert_eq!(own, 12, "unexpected keys in the template: {values:?}");
+        assert_eq!(own, 14, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -1294,6 +1338,8 @@ mod tests {
             KEY_RULE_CONFLICTS,
             KEY_RULE_FAILED_CHECKS,
             KEY_RULE_RUNNING_CHECKS,
+            KEY_RULE_TEAM_REQUESTS,
+            KEY_RULE_SKIP_BOTS,
             KEY_LOCAL_API,
         ];
         let text = default_config();
@@ -2016,7 +2062,7 @@ mod tests {
         let some_off = from("ruleConflicts=off\nruleFailedChecks=off\nruleRunningChecks=off\ncopilotReviews=off\n");
         assert_eq!(
             some_off.rules(),
-            crate::portal::types::Rules { conflicts: false, failed_checks: false, running_checks: false, bot_comments: false }
+            crate::portal::types::Rules { conflicts: false, failed_checks: false, running_checks: false, bot_comments: false, ..crate::portal::types::Rules::ALL }
         );
         let switches = RuleSwitches::new(&all_on);
         assert_eq!(switches.now(), crate::portal::types::Rules::ALL);
@@ -2025,6 +2071,20 @@ mod tests {
         for key in ["ruleConflicts", "ruleFailedChecks", "ruleRunningChecks", "copilotReviews"] {
             assert_eq!(value_of(&some_off, key), "off", "{key}");
             assert!(GENERAL.iter().any(|s| s.key == key && s.live), "{key} is a live General setting");
+        }
+    }
+
+    /// The red bar's two rules: on by default, live, badged where only some portals can judge them.
+    #[test]
+    fn the_red_bar_rules_default_on_and_team_requests_are_github_only() {
+        let on = from("");
+        assert!(on.rules().team_requests && on.rules().skip_bots);
+        let off = from("ruleTeamRequests=off\nruleSkipBots=off\n");
+        assert!(!off.rules().team_requests && !off.rules().skip_bots);
+        assert_eq!(step_portals(KEY_RULE_TEAM_REQUESTS), Some(vec![crate::portal::PortalKind::GitHub]));
+        assert_eq!(step_portals(KEY_RULE_SKIP_BOTS), None);
+        for key in [KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS] {
+            assert!(GENERAL.iter().any(|s| s.key == key && s.live && s.group == RED_RULES_GROUP), "{key}");
         }
     }
 }

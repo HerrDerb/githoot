@@ -233,12 +233,17 @@ const SITE_SCRIPT: &str = "(function(){\
 document.querySelectorAll('form[data-autosave]').forEach(function(f){f.classList.add('auto');});\
 function parts(){document.querySelectorAll('[data-parts]').forEach(function(p){var some=p.querySelector('input[value=\"some\"]');\
 var boxes=p.querySelector('.boxes');if(some&&boxes)boxes.hidden=!some.checked;});}parts();\
-document.addEventListener('change',function(ev){parts();var f=ev.target.form;if(!f||!f.hasAttribute('data-autosave'))return;\
-var line=f.querySelector('.save-line');line.textContent='Saving…';clearTimeout(f.fade);\
+function counts(){document.querySelectorAll('[data-gates-count]').forEach(function(c){var boxes=c.closest('details').querySelectorAll('.gates input[type=checkbox]');\
+var on=0;boxes.forEach(function(b){if(b.checked)on++;});c.textContent=on+' of '+boxes.length+' '+(c.getAttribute('data-noun')||'rules')+' on';});}\
+function mirror(t){if(t.type!=='checkbox'||!t.form)return;document.querySelectorAll('input[type=checkbox]').forEach(function(o){\
+if(o!==t&&o.form===t.form&&o.name===t.name)o.checked=t.checked;});}/* same name, same form: a data-mirror box and its original */\
+document.addEventListener('change',function(ev){mirror(ev.target);parts();counts();var f=ev.target.form;if(!f||!f.hasAttribute('data-autosave'))return;\
+var lines=[f.querySelector('.save-line')];document.querySelectorAll('[data-save-for=\"'+f.id+'\"]').forEach(function(l){lines.push(l);});\
+function say(t){lines.forEach(function(l){if(l)l.textContent=t;});}say('Saving…');clearTimeout(f.fade);\
 var body=new URLSearchParams(new FormData(f));body.append('reply','json');\
 fetch(f.getAttribute('action'),{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){\
-line.textContent=j.line;if(j.fade){f.fade=setTimeout(function(){line.textContent='';},2000);}\
-}).catch(function(){line.textContent='Not saved: GitHoot did not answer. Is it still running?';});});\
+say(j.line);if(j.fade){f.fade=setTimeout(function(){say('');},2000);}\
+}).catch(function(){say('Not saved: GitHoot did not answer. Is it still running?');});});\
 })();";
 
 /// Every section `settings` is cut into, each its own form posting to `place` with its index.
@@ -258,7 +263,7 @@ pub fn sections(
         .map(|(i, (title, members))| {
             // A section of steps is drawn as a rule line rather than as a list of checkboxes.
             let fields: String = if members.iter().all(|s| matches!(s.kind, Kind::Step { .. })) {
-                rule_line(&members, value)
+                rule_line(title, &members, value)
             } else {
                 members.iter().map(|s| field(s, &value(s))).collect()
             };
@@ -268,9 +273,17 @@ pub fn sections(
             };
             // No text box in it: the section saves as it changes, and the script hides its button.
             let auto = if members.iter().any(|s| matches!(s.kind, Kind::Text { .. })) { "" } else { " data-autosave" };
+            // The green bar's rules wear the bar itself in front of their title.
+            let mark = if title == crate::config::GREEN_RULES_GROUP {
+                "<span class=\"bar-mark bar-merge\" aria-hidden=\"true\"></span>"
+            } else if title == crate::config::RED_RULES_GROUP {
+                "<span class=\"bar-mark bar-review\" aria-hidden=\"true\"></span>"
+            } else {
+                ""
+            };
             format!(
-                "<section class=\"block\" id=\"s{i}\"><h2 class=\"section\">{}</h2><div class=\"card\">\
-                 <form method=\"post\" action=\"/{}/{}\"{auto}><input type=\"hidden\" name=\"section\" value=\"{i}\">{fields}\
+                "<section class=\"block\" id=\"s{i}\"><h2 class=\"section\">{mark}{}</h2><div class=\"card\">\
+                 <form id=\"form-s{i}\" method=\"post\" action=\"/{}/{}\"{auto}><input type=\"hidden\" name=\"section\" value=\"{i}\">{fields}\
                  <div class=\"actions\"><button class=\"small save\" type=\"submit\">Save</button>\
                  <span class=\"save-line\" aria-live=\"polite\">{line}</span></div></form></div></section>\n",
                 esc(title),
@@ -281,49 +294,135 @@ pub fn sections(
         .collect()
 }
 
-/// The green bar's rules as the path a pull request of yours walks to green, top to bottom: the two
-/// steps that define the bar (drawn as dots, not switches), then one switch per rule with what happens
-/// to a pull request that fails it, ending at the green bar itself.
+/// How one bar's line reads: what its folded row says, the fixed steps it opens with, the colour of
+/// its end node and what the end is called. Red and green are paths a pull request walks to the bar;
+/// see `amber_line` for the one bar that is a list of reasons instead.
+struct Line {
+    summary: &'static str,
+    /// The line under the summary. Red's rules act on red only; green's act on green and amber.
+    lead: &'static str,
+    fixed: &'static [(&'static str, &'static str)],
+    end: &'static str,
+    bar: &'static str,
+}
+
+fn line_for(group: &str) -> Line {
+    if group == crate::config::RED_RULES_GROUP {
+        Line {
+            summary: "What a review request has to pass to light the red bar",
+            lead: "A step you switch off is no longer checked.",
+            fixed: &[("A review was asked of you", ""), ("You have not given it yet", "")],
+            end: "Red bar",
+            bar: "review",
+        }
+    } else {
+        Line {
+            summary: "What one of your pull requests has to pass to light the green bar",
+            lead: "A step you switch off is ignored on both bars.",
+            fixed: &[("Somebody approved it", ""), ("Nobody's objection stands", "else amber")],
+            end: "Green bar",
+            bar: "merge",
+        }
+    }
+}
+
+/// The badge naming the portals a step works on, when not all of them. A switch that does nothing
+/// for the portal you use says so rather than looking broken.
+fn portal_badge(key: &str) -> String {
+    crate::config::step_portals(key)
+        .map(|kinds| {
+            let names: Vec<&str> = kinds.iter().map(|k| k.display_name()).collect();
+            format!("<span class=\"gate-portal\">{}</span>", esc(&names.join(" · ")))
+        })
+        .unwrap_or_default()
+}
+
+/// The fold every bar's line sits in: one row that says how it is set, opened on a click. The count
+/// is kept in step by the site script as boxes are ticked, so the closed row never lies.
+fn fold(summary: &str, count: String, noun: &str, lead: &str, bar: &str, items: String, end: &str) -> String {
+    // "rules" is what the script assumes; any other word travels with the count so a recount keeps it.
+    let noun_attr = if noun == "rules" { String::new() } else { format!(" data-noun=\"{noun}\"") };
+    format!(
+        "<details class=\"gates-fold\"><summary><span class=\"gates-sum\">{summary}</span>\
+         <span class=\"gates-count\" data-gates-count{noun_attr}>{count}</span></summary>\
+         <p class=\"sub gate-lead\">{lead}</p><ol class=\"gates gates-{bar}\">{items}\
+         <li class=\"gate end\"><span class=\"gate-node\" aria-hidden=\"true\"></span><span class=\"gate-text\">{end}</span></li></ol></details>"
+    )
+}
+
+fn fixed_step(text: &str, otherwise: &str) -> String {
+    let chip = if otherwise.is_empty() { String::new() } else { format!("<span class=\"gate-else else-amber\">{otherwise}</span>") };
+    format!(
+        "<li class=\"gate fixed\"><span class=\"gate-node\" aria-hidden=\"true\"></span><span class=\"gate-text\">{}</span>{chip}</li>",
+        esc(text)
+    )
+}
+
+fn switch_step(key: &str, label: &str, on: bool, form: Option<&str>, otherwise: &str, help: &str) -> String {
+    let tone = if otherwise.contains("amber") { "else-amber" } else { "else-wait" };
+    let bound = form.map(|id| format!(" form=\"{}\" data-mirror", esc(id))).unwrap_or_default();
+    format!(
+        "<li class=\"gate\"><label class=\"gate-row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{bound}{}>\
+         <span class=\"gate-title\"><span class=\"gate-text\">{}</span>{}</span></label>\
+         <span class=\"gate-else {tone}\">{}</span><p class=\"sub gate-help\">{}</p></li>",
+        esc(key),
+        if on { " checked" } else { "" },
+        esc(label),
+        portal_badge(key),
+        esc(otherwise),
+        esc(help),
+    )
+}
+
+/// A bar's rules as the path a pull request walks to it, top to bottom: the fixed steps that define
+/// the bar (dots, not switches), then one switch per rule with what happens to a pull request that
+/// fails it, ending at the bar itself.
 ///
 /// The order is who decides: people, then git, then CI, then bots. It is not a ladder: every switch
-/// is independent, because nothing makes one rule depend on another. A rule switched off fades and
-/// its stretch of the line turns dashed, so a skipped gate is visible at a glance.
-fn rule_line(steps: &[&'static Setting], value: &dyn Fn(&Setting) -> String) -> String {
-    let fixed = |text: &str, otherwise: &str| {
-        let chip = if otherwise.is_empty() { String::new() } else { format!("<span class=\"gate-else else-amber\">{otherwise}</span>") };
-        format!("<li class=\"gate fixed\"><span class=\"gate-node\" aria-hidden=\"true\"></span><span class=\"gate-text\">{text}</span>{chip}</li>")
-    };
-    let mut h = String::from(
-        "<p class=\"sub gate-lead\">What one of your pull requests has to pass to light the green bar. \
-         A step you switch off is ignored on both bars.</p><ol class=\"gates\">",
-    );
-    h.push_str(&fixed("Somebody approved it", ""));
-    h.push_str(&fixed("Nobody's objection stands", "else amber"));
+/// is independent. A rule switched off fades and its stretch of the line turns dashed.
+fn rule_line(group: &str, steps: &[&'static Setting], value: &dyn Fn(&Setting) -> String) -> String {
+    let line = line_for(group);
+    let on = steps.iter().filter(|s| crate::setting::flag(s.kind, &value(s))).count();
+    let mut items: String = line.fixed.iter().map(|(text, otherwise)| fixed_step(text, otherwise)).collect();
     for s in steps {
         let Kind::Step { otherwise, .. } = s.kind else { continue };
-        let on = crate::setting::flag(s.kind, &value(s));
-        let tone = if otherwise.contains("amber") { "else-amber" } else { "else-wait" };
-        // A step only some portal kinds can judge names them, so a switch that does nothing for the
-        // portal you use says so rather than looking broken.
-        let badge = crate::config::step_portals(s.key)
-            .map(|kinds| {
-                let names: Vec<&str> = kinds.iter().map(|k| k.display_name()).collect();
-                format!("<span class=\"gate-portal\">{}</span>", esc(&names.join(" · ")))
-            })
-            .unwrap_or_default();
-        h.push_str(&format!(
-            "<li class=\"gate\"><label class=\"gate-row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{}>\
-             <span class=\"gate-title\"><span class=\"gate-text\">{}</span>{badge}</span></label>\
-             <span class=\"gate-else {tone}\">{}</span><p class=\"sub gate-help\">{}</p></li>",
-            esc(s.key),
-            if on { " checked" } else { "" },
-            esc(s.label),
-            esc(otherwise),
-            esc(s.help),
-        ));
+        items.push_str(&switch_step(s.key, s.label, crate::setting::flag(s.kind, &value(s)), None, otherwise, s.help));
     }
-    h.push_str("<li class=\"gate end\"><span class=\"gate-node\" aria-hidden=\"true\"></span><span class=\"gate-text\">Green bar</span></li></ol>");
-    h
+    fold(
+        line.summary,
+        format!("{on} of {} rules on", steps.len()),
+        "rules",
+        line.lead,
+        line.bar,
+        items,
+        line.end,
+    )
+}
+
+/// The amber bar is a list of reasons, not a path: any one puts a pull request there. Three of them
+/// are the green bar's own switches, because each rule acts on both bars, so they are drawn here as
+/// the very same inputs, bound to the green section's form (`form="…"`). One setting, one answer,
+/// shown in both places; the site script keeps the two boxes in step.
+fn amber_line(green_form: &str, value: &dyn Fn(&str) -> String) -> String {
+    const REASONS: [(&str, &str, &str); 3] = [
+        ("ruleConflicts", "A merge conflict while somebody reviews it", "A conflict nobody is waiting on blocks nobody."),
+        ("ruleFailedChecks", "Approved, but its checks failed", "Red CI on an approved pull request is work, not good news."),
+        ("copilotReviews", "Automatic reviewer's comments open", "Copilot reviews by commenting, never by a verdict. Open, current comments count."),
+    ];
+    let on = REASONS.iter().filter(|(key, _, _)| crate::config::is_on_or_default(&value(key))).count();
+    let mut items = fixed_step("A reviewer's request for changes stands", "");
+    for (key, label, help) in REASONS {
+        items.push_str(&switch_step(key, label, crate::config::is_on_or_default(&value(key)), Some(green_form), "also off green", help));
+    }
+    fold(
+        "Any one of these puts one of your pull requests on the amber bar",
+        format!("{on} of {} reasons on", REASONS.len()),
+        "reasons",
+        "A request for changes stands until you ask that reviewer for their review again. The switches here are the green bar's own: one setting, both bars.",
+        "changes",
+        items,
+        "Amber bar",
+    )
 }
 
 /// One declared setting as its control, showing `value`, with its help underneath.
@@ -412,8 +511,17 @@ pub fn take_flash(place: &Place) -> Option<(usize, String)> {
 /// General: what the tray shows and does.
 pub fn general_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(usize, String)>) -> String {
     let value = |s: &Setting| crate::config::value_of(cfg, s.key);
+    // The amber bar's reasons follow the green bar's section, bound to its form: see `amber_line`.
+    let green = crate::setting::groups(crate::config::GENERAL)
+        .iter()
+        .position(|(title, _)| *title == crate::config::GREEN_RULES_GROUP)
+        .expect("General declares the green bar's rules");
+    let amber = amber_line(&format!("form-s{green}"), &|key| crate::config::value_of(cfg, key));
     let body = format!(
-        "<p class=\"sub lead\">What the tray shows and does. Changes save as you make them.</p>\n{}",
+        "<p class=\"sub lead\">What the tray shows and does. Changes save as you make them.</p>\n{}\
+         <section class=\"block\" id=\"amber\"><h2 class=\"section\"><span class=\"bar-mark bar-changes\" aria-hidden=\"true\"></span>\
+         What makes a pull request amber</h2><div class=\"card\">{amber}<div class=\"actions auto\">\
+         <span class=\"save-line\" aria-live=\"polite\" data-save-for=\"form-s{green}\"></span></div></div></section>\n",
         sections(site.token, &Place::General, crate::config::GENERAL, &value, flash)
     );
     layout(site, &Place::General, "General", None, &body)
@@ -524,7 +632,7 @@ pub(crate) mod tests {
     fn a_section_without_text_saves_as_it_changes() {
         let value = |_: &Setting| "on".to_string();
         let html = sections("tok", &Place::General, crate::config::GENERAL, &value, None);
-        assert!(html.contains(r#"<form method="post" action="/tok/general" data-autosave>"#), "{html}");
+        assert!(html.contains(r#"<form id="form-s0" method="post" action="/tok/general" data-autosave>"#), "{html}");
         assert!(html.contains(r#"<button class="small save" type="submit">Save</button>"#), "{html}");
         assert!(html.contains(r#"<span class="save-line" aria-live="polite"></span>"#), "{html}");
     }
@@ -579,9 +687,9 @@ pub(crate) mod tests {
     fn the_green_bar_rules_are_drawn_as_a_line_to_green() {
         let value = |s: &Setting| if s.key == "ruleRunningChecks" { "off".to_string() } else { "on".to_string() };
         let html = sections("tok", &Place::General, crate::config::GENERAL, &value, None);
-        let at = html.find(r#"<ol class="gates">"#).expect("the line");
+        let at = html.find(r#"<ol class="gates gates-merge">"#).expect("the green line");
         let line = &html[at..at + html[at..].find("</ol>").unwrap()];
-        let order: Vec<usize> = ["Somebody approved it", "Nobody's objection stands", "No merge conflict", "Checks did not fail", "Checks have finished", "Automatic reviewer&#39;s comments resolved", "Green bar"]
+        let order: Vec<usize> = ["Somebody approved it", "Nobody&#39;s objection stands", "No merge conflict", "Checks did not fail", "Checks have finished", "Automatic reviewer&#39;s comments resolved", "Green bar"]
             .iter()
             .map(|label| line.find(label).unwrap_or_else(|| panic!("{label} missing: {line}")))
             .collect();
@@ -597,6 +705,61 @@ pub(crate) mod tests {
         assert_eq!(line.matches("gate-portal").count(), 1, "only the Copilot step is portal-specific today");
         let form = &html[..at];
         assert!(form[form.rfind("<form").unwrap()..].contains("data-autosave"), "saves as it changes");
+    }
+
+    /// The green bar's line is folded away by default, to one row that still says how it is set,
+    /// and opens on a click. The count is kept in step by the site script as boxes are ticked.
+    #[test]
+    fn the_green_bar_rules_are_folded_away_by_default_with_a_count() {
+        let value = |s: &Setting| if s.key == "ruleRunningChecks" { "off".to_string() } else { "on".to_string() };
+        let html = sections("tok", &Place::General, crate::config::GENERAL, &value, None);
+        let green = html.find("bar-mark bar-merge").expect("the green section");
+        let at = green + html[green..].find(r#"<details class="gates-fold">"#).expect("folded, and closed: no open attribute");
+        let fold = &html[at..at + html[at..].find("</details>").unwrap()];
+        assert!(fold.contains(r#"<span class="gates-count" data-gates-count>3 of 4 rules on</span>"#), "{fold}");
+        assert!(fold.find("<summary").unwrap() < fold.find(r#"<ol class="gates gates-merge">"#).unwrap(), "the line is inside the fold");
+        let html_all_on = sections("tok", &Place::General, crate::config::GENERAL, &|_| "on".to_string(), None);
+        assert!(html_all_on.contains(">4 of 4 rules on<"));
+        assert!(SITE_SCRIPT.contains("data-gates-count"), "the count follows the boxes");
+        // The section is about the green bar, so its title wears it: the tray's own pill, in its green.
+        assert!(html.contains(r#"<h2 class="section"><span class="bar-mark bar-merge" aria-hidden="true"></span>What makes a pull request green</h2>"#), "{html}");
+    }
+
+    /// All three bars get their line, in bar order, each folded, each wearing its bar. Red is a path
+    /// like green; amber is a list of reasons whose switches are the very same inputs as green's,
+    /// bound to green's form, so one setting never shows two answers.
+    #[test]
+    fn each_bar_has_its_folded_line_in_bar_order() {
+        let cfg = crate::config::Config::from_text("ruleSkipBots=off\n");
+        let html = general_page(&site(), &cfg, None);
+        let red = html.find("bar-mark bar-review").expect("red");
+        let green = html.find("bar-mark bar-merge").expect("green");
+        let amber = html.find("bar-mark bar-changes").expect("amber");
+        assert!(red < green && green < amber, "bar order");
+        assert_eq!(html.matches(r#"<details class="gates-fold">"#).count(), 3, "all folded");
+        assert!(html.contains(">1 of 2 rules on<"), "red counts its own switches: {html}");
+        for text in ["A review was asked of you", "You have not given it yet", "Team requests count", "Not opened by a bot", "Red bar"] {
+            assert!(html[red..green].contains(text), "{text}");
+        }
+        let amber_html = &html[amber..];
+        for text in ["A reviewer&#39;s request for changes stands", "Amber bar"] {
+            assert!(amber_html.contains(text), "{text}: {amber_html}");
+        }
+        let green_form = html[green..amber].find("<form").map(|i| &html[green + i..]).expect("green's form");
+        let id = green_form.split("id=\"").nth(1).and_then(|r| r.split('"').next()).expect("the form has an id");
+        for key in ["ruleConflicts", "ruleFailedChecks", "copilotReviews"] {
+            assert!(amber_html.contains(&format!(r#"name="{key}" value="on" form="{id}""#)), "{key} bound to green's form: {amber_html}");
+        }
+        assert!(amber_html.contains(r#"<span class="gate-else else-wait">also off green</span>"#));
+        // The amber count keeps its own word when the script recounts it.
+        assert!(amber_html.contains(r#"data-gates-count data-noun="reasons">3 of 3 reasons on<"#), "{amber_html}");
+        assert!(SITE_SCRIPT.contains("data-noun"));
+        // Red's rules act on red only, so its lead says so; amber reports saves in its own card.
+        assert!(html[red..green].contains("A step you switch off is no longer checked."), "red's own lead");
+        assert!(!html[red..green].contains("both bars"), "red's rules do not touch the other bars");
+        assert!(amber_html.contains(&format!(r#"<span class="save-line" aria-live="polite" data-save-for="{id}"></span>"#)), "{amber_html}");
+        assert!(SITE_SCRIPT.contains("data-save-for"));
+        assert!(SITE_SCRIPT.contains("data-mirror") || SITE_SCRIPT.contains("same name"), "shared switches stay in step");
     }
 
     /// Every page carries the site script when it has a nonce, and nothing without one.
@@ -725,7 +888,7 @@ pub(crate) mod tests {
             assert!(html.contains(&format!(r#"<section class="block" id="s{i}">"#)), "{html}");
             assert!(html.contains(&format!(r#"<input type="hidden" name="section" value="{i}">"#)));
         }
-        assert_eq!(html.matches(r#"<form method="post" action="/tok/general""#).count(), 3);
+        assert_eq!(html.matches(r#"method="post" action="/tok/general""#).count(), 3);
         assert_eq!(html.matches(">Save</button>").count(), 3);
         assert!(html.contains("<h2 class=\"section\">Noise</h2>") && html.contains("<h2 class=\"section\">Parts</h2>"));
     }

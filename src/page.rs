@@ -263,7 +263,20 @@ border-radius:8px;font:.82rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,mon
 white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .actions form{margin:0}\
 .auto .save{display:none}\
-.gate-lead{margin:0 0 .5rem}\
+.gate-lead{margin:.6rem 0 .4rem}\
+.gates-fold>summary{list-style:none;cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:.3rem .8rem}\
+.gates-fold>summary::-webkit-details-marker{display:none}\
+.gates-fold>summary::before{content:'';width:.45rem;height:.45rem;border-right:2px solid var(--dim);border-bottom:2px solid var(--dim);transform:rotate(-45deg);transition:transform .15s;flex:none}\
+.gates-fold[open]>summary::before{transform:rotate(45deg)}\
+.gates-sum{flex:1 1 16rem;min-width:0}\
+.gates-count{font-size:.8rem;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}\
+@media(prefers-reduced-motion:reduce){.gates-fold>summary::before{transition:none}}\
+.bar-mark{display:inline-block;width:1.05em;height:.7em;border-radius:.22em;margin-right:.5em;vertical-align:-.05em;box-shadow:0 0 0 1px rgba(0,0,0,.35)}\
+.bar-merge{background:#1AC94A}\
+.bar-review{background:#F03E3E}\
+.bar-changes{background:#E08A00}\
+.gates-review .gate.end .gate-node{background:#F03E3E}\
+.gates-changes .gate.end .gate-node{background:#E08A00}\
 .gates{list-style:none;margin:0;padding:0}\
 .gate{position:relative;display:grid;grid-template-columns:1.75rem minmax(0,1fr) auto;column-gap:.7rem;align-items:center;padding:.5rem 0}\
 .gate::before{content:'';position:absolute;left:.875rem;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--line)}\
@@ -298,6 +311,7 @@ details.prompt textarea{margin:.6rem 0 0}\
 .save-line{color:var(--dim);font-size:.85rem}\
 .auto .actions{margin-top:.3rem}\
 .auto .actions:has(.save-line:empty){display:none}\
+.actions.auto:has(.save-line:empty){display:none}\
 .small{padding:.4rem 1rem;font-size:.9rem}\
 .card a.ghost,a.ghost,button.ghost{display:inline-flex;align-items:center;gap:.4rem;padding:.4rem 1rem;font-size:.9rem;\
 font-weight:600;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);\
