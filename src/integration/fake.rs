@@ -48,6 +48,21 @@ impl Integration for Echo {
     }
 }
 
+/// Has every tool it needs and hits the same setup trouble on every pass, as a wrong clone root does.
+pub struct Stuck;
+
+pub static STUCK: Info = Info { id: "stuck", name: "Stuck", summary: "", portals: &[PortalKind::GitHub], settings: &[], unsupported: None };
+
+impl Integration for Stuck {
+    fn info(&self) -> &'static Info {
+        &STUCK
+    }
+
+    fn pass(&self, _ctx: &Context, _batches: &[Batch], _dry_run: bool) -> Said {
+        Said { setup: vec!["no clone at /nowhere/thing".to_string()], ..Said::default() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

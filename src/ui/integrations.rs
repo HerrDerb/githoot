@@ -5,6 +5,7 @@
 //! integration adds below, such as the dispatcher's prompts.
 
 use super::{layout, settings_button, Place, Site};
+use crate::integration::Problem;
 use crate::page::esc;
 
 /// One integration as the list shows it.
@@ -13,10 +14,14 @@ pub struct IntegrationRow<'a> {
     pub name: &'a str,
     pub summary: &'a str,
     pub status: String,
+    /// `" status-bad"` when it is installed and cannot do its job, else empty. See [`status_tone`].
+    pub tone: &'static str,
     /// The button the row carries.
     pub switch: Switch,
     /// The line the last Install or Uninstall pressed here left, shown once.
     pub flash: Option<String>,
+    /// What is wrong with its settings, said on the card as on its page.
+    pub problems: Vec<Problem>,
 }
 
 /// Which way an integration's button goes, or that it has none: where the build cannot run an
@@ -39,10 +44,11 @@ pub fn integration_switch(installed: bool, unsupported: Option<&str>) -> Switch 
 }
 
 /// "Installed", "Not installed", and the two states that must not read as either.
-pub fn integration_status(installed: bool, unsupported: Option<&str>, missing: &[&str]) -> String {
+pub fn integration_status(installed: bool, unsupported: Option<&str>, missing: &[&str], problems: usize) -> String {
     match (unsupported, installed, missing.is_empty()) {
         (Some(_), _, _) => "Not available here".to_string(),
         (None, false, _) => "Not installed".to_string(),
+        (None, true, true) if problems > 0 => "Installed, but check its settings".to_string(),
         (None, true, true) => "Installed".to_string(),
         // Installed but unable to do anything is not "installed" in any sense that matters to the reader.
         (None, true, false) => format!("Installed, but idle: missing {}", missing.join(", ")),
@@ -77,11 +83,13 @@ pub fn integrations_page(site: &Site, rows: &[IntegrationRow]) -> String {
         let path = Place::Integration(crate::integration::find(row.id).map(|i| i.info().id).unwrap_or("")).path();
         let flash = row.flash.as_deref().map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
         let switch = switch_form(token, row.id, row.switch, Some("list"));
+        let alert = problems_alert(matches!(row.switch, Switch::Uninstall), &row.problems, "alert", &format!("/{}/{path}", esc(token)));
         h.push_str(&format!(
             "<div class=\"card\"><div class=\"row\"><strong><a href=\"/{}/{path}\">{}</a></strong> · \
-             <span class=\"portal-status\">{}</span></div><p class=\"sub\">{}</p>{flash}<div class=\"actions\">{switch}{}</div></div>\n",
+             <span class=\"portal-status{}\">{}</span></div><p class=\"sub\">{}</p>{alert}{flash}<div class=\"actions\">{switch}{}</div></div>\n",
             esc(token),
             esc(row.name),
+            row.tone,
             esc(&row.status),
             esc(row.summary),
             // Installed, the page is its settings. Not installed, it is where the prompts are read and
@@ -96,6 +104,32 @@ pub fn integrations_page(site: &Site, rows: &[IntegrationRow]) -> String {
     layout(site, &Place::Integrations, "Integrations", None, &h)
 }
 
+/// What is wrong with its settings, as an alert: a card of its own on its page, a box inside its card
+/// on the list. `page` is where the boxes are, empty when that is this page; each line's "Fix it" goes
+/// to the box at fault there. Empty when nothing is wrong.
+fn problems_alert(installed: bool, problems: &[Problem], class: &str, page: &str) -> String {
+    if problems.is_empty() {
+        return String::new();
+    }
+    let items: String = problems
+        .iter()
+        .map(|p| {
+            let fix = if p.key.is_empty() { String::new() } else { format!("<a class=\"fix\" href=\"{page}#field-{}\">Fix it</a>", esc(p.key)) };
+            format!("<li><span>{}</span>{fix}</li>", esc(&p.text))
+        })
+        .collect();
+    let lead = if installed { "Until these are fixed it cannot start an agent." } else { "Fix these before you install it, or it will start no agents." };
+    format!(
+        "<div class=\"{class}\" role=\"alert\">{WARNING}<div class=\"alert-body\"><strong class=\"alert-title\">Check its settings</strong>\
+         <p class=\"alert-lead\">{lead}</p><ul>{items}</ul></div></div>\n"
+    )
+}
+
+/// A warning triangle, drawn in the alert's own colour.
+const WARNING: &str = "<svg class=\"alert-icon\" viewBox=\"0 0 24 24\" width=\"20\" height=\"20\" aria-hidden=\"true\" fill=\"none\" \
+stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+<path d=\"M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/></svg>";
+
 /// Everything the header card of an integration's page shows, as plain data.
 pub struct IntegrationView<'a> {
     pub id: &'static str,
@@ -106,6 +140,8 @@ pub struct IntegrationView<'a> {
     pub unsupported: Option<&'a str>,
     /// Tools it needs that will not run. Only ever asked while installed.
     pub missing: &'a [&'a str],
+    /// What is wrong with its settings on this machine, such as a folder that is not there.
+    pub problems: &'a [Problem],
     /// The outcome of the last button press on the header, shown once.
     pub flash: Option<&'a str>,
     /// What the last Dry run said, in the order a pass produced it. Empty until one is asked for.
@@ -127,7 +163,8 @@ pub fn integration_page(site: &Site, v: &IntegrationView) -> String {
 /// Dry run is offered installed or not, and that is the point: the only safe way to learn what
 /// installing it would do is to ask first.
 fn header_card(token: &str, v: &IntegrationView) -> String {
-    let status = integration_status(v.installed, v.unsupported, v.missing);
+    let status = integration_status(v.installed, v.unsupported, v.missing, v.problems.len());
+    let tone = status_tone(v.installed, v.unsupported, v.missing, v.problems.len());
     let mut notes = String::new();
     if let Some(why) = v.unsupported {
         notes.push_str(&format!("<p class=\"sub\">{}</p>", esc(why)));
@@ -137,6 +174,9 @@ fn header_card(token: &str, v: &IntegrationView) -> String {
             v.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
         ));
     }
+    // A card of its own, ahead of everything, and shown before Install too: that is the moment a wrong
+    // folder is cheapest to fix. Each line jumps to the box at fault, which is marked as well.
+    let alert = if v.unsupported.is_none() { problems_alert(v.installed, v.problems, "card alert", "") } else { String::new() };
     let flash = v.flash.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
     let switch = switch_form(token, v.id, integration_switch(v.installed, v.unsupported), None);
     let dry = if v.unsupported.is_some() {
@@ -155,11 +195,16 @@ fn header_card(token: &str, v: &IntegrationView) -> String {
         format!("<pre class=\"dry\">{}</pre>", v.dry_run.iter().map(|l| esc(l)).collect::<Vec<_>>().join("\n"))
     };
     format!(
-        "<div class=\"card\"><div class=\"row\"><span class=\"portal-status\">{}</span></div><p class=\"sub\">{}</p>{notes}{flash}\
+        "{alert}<div class=\"card\"><div class=\"row\"><span class=\"portal-status{tone}\">{}</span></div><p class=\"sub\">{}</p>{notes}{flash}\
          <div class=\"actions\">{switch}{dry}</div>{said}</div>\n",
         esc(&status),
         esc(v.summary),
     )
+}
+
+/// The status in red when it is installed and cannot do its job, so it does not read as fine.
+pub fn status_tone(installed: bool, unsupported: Option<&str>, missing: &[&str], problems: usize) -> &'static str {
+    if installed && unsupported.is_none() && (!missing.is_empty() || problems > 0) { " status-bad" } else { "" }
 }
 
 #[cfg(test)]
@@ -175,6 +220,7 @@ mod tests {
             installed,
             unsupported: None,
             missing,
+            problems: &[],
             flash: None,
             dry_run: &[],
             sections: "<section class=\"block\" id=\"s0\">bars</section>".to_string(),
@@ -212,6 +258,33 @@ mod tests {
         assert!(html.contains("<code>herdr</code>, <code>gh</code>"));
     }
 
+    /// A clone root pointing nowhere is installed and doing nothing, the same as a missing tool, and
+    /// was found only by reading the log. The page says it, and says it before Install too.
+    #[test]
+    fn a_setting_that_points_nowhere_is_on_the_page_installed_or_not() {
+        let problems = [Problem {
+            key: "cloneRoot",
+            text: "\"Clones live in\" is empty, so it looks in C:\\x, and that folder does not exist".to_string(),
+        }];
+        let v = IntegrationView { problems: &problems, ..view(true, &[]) };
+        let html = page(&v);
+        assert!(html.contains("<span class=\"portal-status status-bad\">Installed, but check its settings</span>"), "{html}");
+        // Not a line among the others: a card of its own, announced, before the header's buttons.
+        let alert = html.find("<div class=\"card alert\" role=\"alert\">").expect("an alert card");
+        assert!(alert < html.find("value=\"uninstall\"").unwrap(), "{html}");
+        assert!(html.contains("<li><span>&quot;Clones live in&quot; is empty, so it looks in C:\\x, and that folder does not exist</span>\
+                               <a class=\"fix\" href=\"#field-cloneRoot\">Fix it</a></li>"), "{html}");
+        // A title to scan and the consequence under it, with a mark that says "warning" without the colour.
+        assert!(html.contains("<svg class=\"alert-icon\"") && html.contains("aria-hidden=\"true\""), "{html}");
+        assert!(html.contains("<strong class=\"alert-title\">Check its settings</strong>\
+                               <p class=\"alert-lead\">Until these are fixed it cannot start an agent.</p>"), "{html}");
+        let html = page(&IntegrationView { problems: &problems, ..view(false, &[]) });
+        assert!(html.contains("portal-status\">Not installed<") && html.contains("card alert"), "{html}");
+        assert!(!page(&view(true, &[])).contains("card alert"), "nothing wrong, nothing shown");
+        // A missing tool still comes first: nothing runs without it, whatever the folders say.
+        assert_eq!(integration_status(true, None, &["gh"], 1), "Installed, but idle: missing gh");
+    }
+
     #[test]
     fn unsupported_offers_no_install_and_says_why() {
         let v = IntegrationView { unsupported: Some("Needs Linux or Windows."), ..view(false, &[]) };
@@ -233,7 +306,23 @@ mod tests {
     }
 
     fn row(status: &str, switch: Switch) -> IntegrationRow<'static> {
-        IntegrationRow { id: "herdr", name: "Herdr dispatcher", summary: "Starts agents.", status: status.into(), switch, flash: None }
+        IntegrationRow { id: "herdr", name: "Herdr dispatcher", summary: "Starts agents.", status: status.into(), tone: "", switch, flash: None, problems: Vec::new() }
+    }
+
+    /// The list is where you land, so a setting that stops it from working is said on its card too,
+    /// with the same words as its page, and "Fix it" goes to that box on that page.
+    #[test]
+    fn the_list_card_says_a_setting_is_wrong_and_links_to_the_box() {
+        let problems = vec![Problem { key: "cloneRoot", text: "that folder does not exist".into() }];
+        let html = integrations_page(&site(), &[IntegrationRow { problems: problems.clone(), ..row("Installed, but check its settings", Switch::Uninstall) }]);
+        let card = &html[html.find("<div class=\"card\">").unwrap()..];
+        let alert = card.find("<div class=\"alert\" role=\"alert\">").expect("inside the card");
+        assert!(alert < card.find("value=\"uninstall\"").unwrap(), "ahead of its buttons: {html}");
+        assert!(card.contains("<p class=\"alert-lead\">Until these are fixed it cannot start an agent.</p>"), "{html}");
+        assert!(card.contains("<li><span>that folder does not exist</span><a class=\"fix\" href=\"/tok/integrations/herdr#field-cloneRoot\">Fix it</a></li>"), "{html}");
+        let html = integrations_page(&site(), &[IntegrationRow { problems, ..row("Not installed", Switch::Install) }]);
+        assert!(html.contains("<p class=\"alert-lead\">Fix these before you install it, or it will start no agents.</p>"), "{html}");
+        assert!(!integrations_page(&site(), &[row("Installed", Switch::Uninstall)]).contains("role=\"alert\""));
     }
 
     /// Not installed means a button you cannot miss, right in the list. It says it came from the

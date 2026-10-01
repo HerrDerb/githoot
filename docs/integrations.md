@@ -16,10 +16,16 @@ an **Install** button, or **Uninstall** once it is installed, and each has a pag
 - **Dry run.** A real pass with every effect suppressed and nothing recorded, so it cannot change
   what the next real pass does. Offered installed or not: asking first is the only safe way to learn
   what installing would do.
-- **Its settings**, as sections: switches save as they change, text boxes with their Save. Only keys the
+- **Its settings**, as sections: switches save as they change, text boxes with their Save, and a folder's box has a Browse… button
+  beside it. Only keys the
   integration declared can be written, a switch only as `on` or `off`, and an unticked switch saves as
   `off`.
 - **What it is missing.** Installed but unable to run reads *Installed, but idle*, never *Installed*.
+- **What is wrong with its settings**, such as a folder that is not there. A red card at the top lists
+  each one with a link to the box at fault, which is outlined in red with the reason under it. Shown
+  before Install as well as after, said by Install itself, and the status reads *Installed, but check
+  its settings*, in red on the page and in the list. Its card in the list carries the same alert, and
+  "Fix it" there opens its page at the box.
 - **Whatever it adds**, such as the dispatcher's prompts.
 
 No restart anywhere: the runner reads `config.txt` on every pass.
@@ -51,7 +57,8 @@ any one of them.
 - **`pass`** gets the bars, already judged, and acts. It never polls a forge.
 - **`prepare`** runs once at startup, installed or not: the dispatcher brings unedited prompts up to
   the new defaults there.
-- **`missing`**, **`page`** and **`action`** feed its page.
+- **`missing`**, **`problems`**, **`page`** and **`action`** feed its page. `problems` is what is wrong
+  with its settings on this machine before any pull request arrives; the runner logs it too.
 - **`integration::fake`** is a test double that imports nothing from `herdr`. It compiles only if the
   trait can be implemented without a single Herdr type, which is the whole promise of the seam.
 
@@ -74,4 +81,5 @@ the icon. It wakes right after each poll publishes, and at least every thirty se
 how soon an Install takes effect.
 
 What a pass did is logged at info level; what went wrong with a pull request at error level, every
-time; what is wrong with the setup, such as a missing tool, at error level once until it changes.
+time; what is wrong with the setup, such as a missing tool or a folder that is not there, at error level
+once until it changes.

@@ -30,7 +30,13 @@ pub struct Setting {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     /// Free text on one line. Empty means the setting's default, which `placeholder` shows greyed.
+    /// Nothing ships one since the dispatcher's two roots became folders; kept, and drawn, for the
+    /// next setting that is text.
+    #[cfg_attr(not(test), allow(dead_code))]
     Text { placeholder: &'static str },
+    /// A folder: text, with a Browse button that asks GitHoot for the native folder picker and fills
+    /// the box with what was chosen. Stored, checked and read exactly like `Text`.
+    Folder { placeholder: &'static str },
     /// `on` or `off`, a checkbox. Only an explicit value moves it off its default, so a typo leaves the
     /// default standing in either direction.
     Flag { default_on: bool },
@@ -53,7 +59,7 @@ pub fn check(setting: &Setting, value: &str) -> Result<(), String> {
         return Err(format!("{} must stay on one line", setting.key));
     }
     let ok = match setting.kind {
-        Kind::Text { .. } => true,
+        Kind::Text { .. } | Kind::Folder { .. } => true,
         Kind::Flag { .. } | Kind::Step { .. } => matches!(value, "on" | "off"),
         Kind::Choice { options } => options.iter().any(|(v, _)| *v == value),
         Kind::Parts { options, .. } => split(value).all(|part| options.contains(&part)),
@@ -95,7 +101,7 @@ pub fn from_form(settings: &[&Setting], form: &crate::serve::Form) -> Vec<(&'sta
                 let ticked: Vec<&str> = form.all(s.key).into_iter().filter(|v| options.contains(v)).collect();
                 Some((s.key, ticked.join(", ")))
             }
-            Kind::Text { .. } | Kind::Choice { .. } => form.get(s.key).map(|v| (s.key, v.trim().to_string())),
+            Kind::Text { .. } | Kind::Folder { .. } | Kind::Choice { .. } => form.get(s.key).map(|v| (s.key, v.trim().to_string())),
         })
         .collect()
 }
@@ -173,6 +179,15 @@ mod tests {
         );
         let got = from_form(&all, &form("root=+%2Fsrc+"));
         assert!(got.contains(&("root", "/src".to_string())) && got.contains(&("parts", String::new())));
+    }
+
+    /// A folder is text with a Browse button: stored, checked and read off a form exactly as text is.
+    #[test]
+    fn a_folder_is_stored_and_read_like_text() {
+        static FOLDER: Setting = s("root", Kind::Folder { placeholder: "~/src" }, "Paths");
+        assert!(check(&FOLDER, r"D:\projects").is_ok() && check(&FOLDER, "").is_ok() && check(&FOLDER, "a\nb=c").is_err());
+        assert_eq!(from_form(&[&FOLDER], &form("root=+D%3A%5Cprojects+")), [("root", r"D:\projects".to_string())]);
+        assert_eq!(from_form(&[&FOLDER], &form("other=x")), [], "absent is left alone");
     }
 
     static SCOPED: Setting = Setting {

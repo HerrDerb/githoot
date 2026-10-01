@@ -358,6 +358,164 @@ pub fn report(title: &str, msg: &str) {
     }
 }
 
+/// What the folder picker came back with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picked {
+    Folder(std::path::PathBuf),
+    /// Closed without choosing. A real answer, and not worth a word.
+    Cancelled,
+    /// No picker could be shown at all, and why.
+    Unavailable(String),
+}
+
+/// Shows the platform's own folder picker, opened at `start` when given, and blocks until it closes.
+///
+/// For the settings page's Browse buttons. A browser cannot hand a page a real path, by design, so
+/// GitHoot shows the picker itself: it runs on the same machine as the browser, as the same user. Call
+/// it from a thread of its own, never the page server's, which would stop answering while it is open.
+pub fn pick_folder(title: &str, start: Option<&std::path::Path>) -> Picked {
+    #[cfg(target_os = "windows")]
+    {
+        pick_folder_windows(title, start)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // `choose folder` errors when cancelled, which `osascript` reports as a non-zero exit.
+        let at = start.map(|s| format!(" default location POSIX file \"{}\"", escape(&s.display().to_string()))).unwrap_or_default();
+        let script = format!(r#"POSIX path of (choose folder with prompt "{}"{at})"#, escape(title));
+        match std::process::Command::new("osascript").arg("-e").arg(script).stdin(std::process::Stdio::null()).output() {
+            Ok(out) if out.status.success() => folder_from(&String::from_utf8_lossy(&out.stdout)),
+            Ok(_) => Picked::Cancelled,
+            Err(e) => Picked::Unavailable(format!("osascript would not run: {e}")),
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // The same two tools and the same display check as `confirm`, for the same reasons.
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Picked::Unavailable("there is no display to show a folder picker on".to_string());
+        }
+        let start = start.map(|s| s.display().to_string());
+        let mut zenity = vec!["--file-selection".to_string(), "--directory".to_string(), format!("--title={title}")];
+        // A trailing slash opens the folder itself rather than selecting it in its parent.
+        if let Some(s) = &start {
+            zenity.push(format!("--filename={}/", s.trim_end_matches('/')));
+        }
+        let mut kdialog = vec!["--title".to_string(), title.to_string(), "--getexistingdirectory".to_string()];
+        kdialog.extend(start);
+        for (tool, args) in [("zenity", zenity), ("kdialog", kdialog)] {
+            match std::process::Command::new(tool).args(&args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output() {
+                Ok(out) if out.status.success() => return folder_from(&String::from_utf8_lossy(&out.stdout)),
+                Ok(_) => return Picked::Cancelled,
+                Err(_) => continue,
+            }
+        }
+        Picked::Unavailable("neither zenity nor kdialog is installed".to_string())
+    }
+}
+
+/// A picker's printed answer as a folder. An empty one is a cancel.
+#[cfg(not(target_os = "windows"))]
+fn folder_from(printed: &str) -> Picked {
+    let path = printed.trim_end_matches(['\r', '\n']);
+    // macOS ends a folder with `/`; the root itself must keep its one.
+    let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
+    if path.is_empty() { Picked::Cancelled } else { Picked::Folder(path.into()) }
+}
+
+/// `IFileOpenDialog` in folder mode: the picker Explorer itself uses, not the old tree of
+/// `SHBrowseForFolder`.
+///
+/// Owned by a tiny topmost window of its own. GitHoot has no window, and Windows does not let a
+/// background process take the foreground, so an ownerless picker opened behind the browser that asked
+/// for it. The owned windows of a topmost window are topmost too.
+#[cfg(target_os = "windows")]
+fn pick_folder_windows(title: &str, start: Option<&std::path::Path>) -> Picked {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::ptr::null_mut;
+    use winapi::Interface;
+    use winapi::shared::winerror::{HRESULT_FROM_WIN32, SUCCEEDED};
+    use winapi::shared::wtypesbase::CLSCTX_INPROC_SERVER;
+    use winapi::um::combaseapi::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize};
+    use winapi::um::objbase::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+    use winapi::um::shobjidl::{FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, IFileOpenDialog};
+    use winapi::um::shobjidl_core::{CLSID_FileOpenDialog, IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH};
+    use winapi::um::winuser::{CreateWindowExW, DestroyWindow, SetForegroundWindow, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP};
+
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    const ERROR_CANCELLED: u32 = 1223;
+
+    unsafe {
+        let init = CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        if !SUCCEEDED(init) {
+            return Picked::Unavailable(format!("COM would not start (0x{init:08x})"));
+        }
+        let mut dialog: *mut IFileOpenDialog = null_mut();
+        let made = CoCreateInstance(
+            &CLSID_FileOpenDialog,
+            null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IFileOpenDialog::uuidof(),
+            &mut dialog as *mut _ as *mut _,
+        );
+        if !SUCCEEDED(made) || dialog.is_null() {
+            CoUninitialize();
+            return Picked::Unavailable(format!("the folder picker would not open (0x{made:08x})"));
+        }
+        let d = &*dialog;
+        let mut options = 0;
+        d.GetOptions(&mut options);
+        d.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        d.SetTitle(wide(std::ffi::OsStr::new(title)).as_ptr());
+        if let Some(start) = start {
+            let mut item: *mut IShellItem = null_mut();
+            let path = wide(start.as_os_str());
+            if SUCCEEDED(SHCreateItemFromParsingName(path.as_ptr(), null_mut(), &IShellItem::uuidof(), &mut item as *mut _ as *mut _)) && !item.is_null() {
+                d.SetFolder(item);
+                (*item).Release();
+            }
+        }
+
+        let class = wide(std::ffi::OsStr::new("STATIC"));
+        let owner = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, class.as_ptr(), null_mut(), WS_POPUP, 0, 0, 0, 0, null_mut(), null_mut(), null_mut(), null_mut());
+        if !owner.is_null() {
+            SetForegroundWindow(owner);
+        }
+        let shown = d.Show(owner);
+        if !owner.is_null() {
+            DestroyWindow(owner);
+        }
+
+        let picked = if shown == HRESULT_FROM_WIN32(ERROR_CANCELLED) {
+            Picked::Cancelled
+        } else if !SUCCEEDED(shown) {
+            Picked::Unavailable(format!("the folder picker failed (0x{shown:08x})"))
+        } else {
+            let mut item: *mut IShellItem = null_mut();
+            let mut name = null_mut();
+            if SUCCEEDED(d.GetResult(&mut item)) && !item.is_null() {
+                let got = (*item).GetDisplayName(SIGDN_FILESYSPATH, &mut name);
+                (*item).Release();
+                if SUCCEEDED(got) && !name.is_null() {
+                    let len = (0..).take_while(|&i| *name.add(i) != 0).count();
+                    let path = std::ffi::OsString::from_wide(std::slice::from_raw_parts(name, len));
+                    CoTaskMemFree(name as *mut _);
+                    Picked::Folder(path.into())
+                } else {
+                    Picked::Unavailable("the chosen folder has no file system path".to_string())
+                }
+            } else {
+                Picked::Unavailable("the folder picker gave nothing back".to_string())
+            }
+        };
+        d.Release();
+        CoUninitialize();
+        picked
+    }
+}
+
 /// Escapes a string for embedding in an AppleScript string literal.
 ///
 /// Backslash first, or escaping the quotes would then have their own backslashes doubled.
@@ -405,6 +563,16 @@ mod confirm_tests {
             true,
         );
         assert!(accepted, "the accepting button must return true");
+    }
+
+    /// The picker itself, which only a person can drive. Run by hand with
+    /// `cargo test -- --ignored shows_a_folder_picker` and choose your home folder.
+    #[test]
+    #[ignore = "needs a real desktop session and a human to choose"]
+    fn shows_a_folder_picker() {
+        let home = dirs::home_dir().unwrap();
+        let picked = pick_folder("githoot: choose your home folder", Some(&home));
+        assert_eq!(picked, Picked::Folder(home));
     }
 
     /// With no display server the graphical path is skipped entirely and `on_unavailable` decides.

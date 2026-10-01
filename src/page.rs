@@ -301,6 +301,26 @@ white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .chip{font-size:.82rem;padding:.12rem .65rem;border-radius:999px;border:1px solid var(--line)}\
 .chip-ok::before{content:'✓ ';color:var(--ok)}\
 .chip-no{color:var(--bad);border-color:var(--bad)}\
+.alert{display:flex;gap:.7rem;align-items:flex-start;color:var(--ink);background:color-mix(in srgb,var(--bad) 7%,var(--card));border:1px solid color-mix(in srgb,var(--bad) 35%,var(--line));border-left:4px solid var(--bad);border-radius:8px}\
+.card .alert{margin:.7rem 0 0;padding:.7rem .85rem}\
+.alert-icon{flex:none;color:var(--bad);margin-top:.1rem}\
+.alert-body{flex:1;min-width:0}\
+.alert-title{display:block;font-weight:650;color:var(--bad)}\
+.alert-lead{margin:.1rem 0 0;color:var(--dim);font-size:.88rem}\
+.alert ul{list-style:none;margin:.6rem 0 0;padding:0;display:grid;gap:.4rem}\
+.alert li{display:flex;flex-wrap:wrap;gap:.4rem .8rem;align-items:center;justify-content:space-between;padding:.45rem .6rem;background:var(--card);border:1px solid var(--line);border-radius:6px;font-size:.9rem}\
+.alert li span{flex:1 1 18rem;min-width:0;overflow-wrap:anywhere}\
+.alert a.fix,.alert a.fix:hover{flex:none;color:var(--bad);border:1px solid currentColor;border-radius:999px;padding:.15rem .75rem;font-size:.82rem;font-weight:600;text-decoration:none;white-space:nowrap}\
+.alert a.fix:hover{background:var(--bad);color:var(--card)}\
+.alert a.fix:focus-visible{outline:2px solid var(--bad);outline-offset:2px}\
+.path.bad span{color:var(--bad);font-weight:600}\
+.path.bad input{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 6%,var(--bg))}\
+.path.bad input:focus{outline:2px solid color-mix(in srgb,var(--bad) 45%,transparent);outline-offset:1px}\
+.path.bad:target input{box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 30%,transparent)}\
+[id^=field-]{scroll-margin-top:1.5rem}\
+.why{display:flex;gap:.45rem;align-items:flex-start;color:var(--bad);margin:.35rem 0 0 1.6rem;overflow-wrap:anywhere}\
+.why::before{content:'!';flex:none;display:inline-grid;place-items:center;width:1.05rem;height:1.05rem;margin-top:.08rem;border-radius:50%;background:var(--bad);color:var(--card);font-weight:700;font-size:.72rem;line-height:1}\
+.portal-status.status-bad{color:var(--bad);font-weight:600;background:color-mix(in srgb,var(--bad) 11%,transparent);border-radius:999px;padding:.05rem .6rem}\
 .chip-no::before{content:'✗ '}\
 .prompts{margin-top:.6rem}\
 details.prompt{border-top:1px solid var(--line);padding:.55rem 0}\

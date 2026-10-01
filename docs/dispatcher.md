@@ -43,7 +43,13 @@ differently.
 The exception is a **setup** failure, such as no clone where `integration.herdr.cloneRoot` says there should
 be one. That is a mistake you can correct, and the very next pass can then succeed, so it is not
 recorded. It is said once rather than every pass, or a wrong path would write a line per pull
-request every thirty seconds forever.
+request every thirty seconds forever. The line says where it looked and why there:
+
+> `no clone of QUMEA/care-web-ui: "Clones live in" is empty, so it looks in C:\Users\me\projects, and that folder does not exist. To fix it, set "Clones live in" on the Herdr dispatcher's settings page`
+
+A clone root that does not exist, or holds no git clone at all, is caught before any pull request
+needs it: Install says so, the page lists it and reads *Installed, but check its settings*, and the
+runner logs it once.
 
 **The agent works on a branch of its own**, `githoot/pr-<number>-<repo>`, cut from the pull request's
 head. Never the pull request's branch itself: that is usually checked out in your own clone, because
@@ -76,6 +82,10 @@ a real pass does not bother to say, which is the whole point of pressing it.
 | `integration.herdr.approved` | `off` | Start agents for the green bar: your approved pull requests |
 | `integration.herdr.cloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
 | `integration.herdr.worktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
+
+Both folders have a **Browse…** button beside the box, which opens your system's folder picker
+(Explorer's on Windows, `zenity` or `kdialog` on Linux) and fills the box with what you choose. Save
+keeps it. A browser cannot give a page a real path, so GitHoot shows the picker itself.
 
 The three bar switches are checkboxes on its page. **Approved is off by default**: an approved pull
 request is usually one you are about to merge yourself, and an agent started for it mostly spends

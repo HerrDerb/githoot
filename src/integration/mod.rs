@@ -98,6 +98,15 @@ pub struct Batch {
     pub confirmed: bool,
 }
 
+/// Something wrong with one of its settings on this machine, such as a folder that is not there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// The setting at fault, as declared, so the page can mark that box. Empty for none in particular.
+    pub key: &'static str,
+    /// One sentence, which reads both on its own and beside the box.
+    pub text: String,
+}
+
 /// What one pass said, sorted by who needs to hear it.
 #[derive(Debug, Default)]
 pub struct Said {
@@ -124,6 +133,12 @@ pub trait Integration: Send + Sync {
 
     /// Tools it needs that will not run. Empty when it has everything.
     fn missing(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// What is wrong with its settings on this machine, before any pull request comes along: a folder
+    /// that is not there, say. Shown on its page and by Install, and logged once by the runner.
+    fn problems(&self, _ctx: &Context) -> Vec<Problem> {
         Vec::new()
     }
 
@@ -208,14 +223,19 @@ pub fn set(app_asset_path: &Path, integration: &dyn Integration, key: &str, valu
 
 /// Install or uninstall. Refused where the build cannot run it, so the page cannot switch on something
 /// that would sit there doing nothing.
-pub fn install(app_asset_path: &Path, integration: &dyn Integration, on: bool) -> Result<(), String> {
+///
+/// Answers with what is wrong with its settings as they stand, so Install can say so at once rather
+/// than leaving it to a log line the first time a pull request arrives. Installed regardless: the
+/// settings are on the same page, and fixing them takes effect on the next pass.
+pub fn install(app_asset_path: &Path, integration: &dyn Integration, on: bool) -> Result<Vec<Problem>, String> {
     if let (true, Some(why)) = (on, integration.info().unsupported) {
         return Err(why.to_string());
     }
     set(app_asset_path, integration, "enabled", if on { "on" } else { "off" })?;
     let cfg = Config::load(app_asset_path).0;
-    integration.installed(&Context::new(app_asset_path, &cfg, integration.info().id), on);
-    Ok(())
+    let ctx = Context::new(app_asset_path, &cfg, integration.info().id);
+    integration.installed(&ctx, on);
+    Ok(if on { integration.problems(&ctx) } else { Vec::new() })
 }
 
 // ── The runner ───────────────────────────────────────────────────────────────
@@ -272,18 +292,49 @@ pub fn take_flash(id: &str) -> Option<String> {
     FLASH.lock().ok().and_then(|mut m| m.remove(id))
 }
 
-fn complain_once(id: &'static str, said: String) {
-    let Ok(mut last) = LAST_COMPLAINT.lock() else { return };
-    let before = last.get(id).cloned().unwrap_or_default();
+/// One line for the log: `true` for an error, `false` for info.
+type Line = (bool, String);
+
+/// What changed about `id`'s setup complaint, if anything. An unchanged one says nothing.
+fn complain_once(last: &mut BTreeMap<&'static str, String>, id: &'static str, said: String) -> Option<Line> {
+    let before = last.insert(id, said.clone()).unwrap_or_default();
     if before == said {
-        return;
+        None
+    } else if !said.is_empty() {
+        Some((true, format!("{id}: {said}")))
+    } else {
+        Some((false, format!("{id}: everything it needs is back")))
     }
-    if !said.is_empty() {
-        crate::errorln!("{id}: {said}");
-    } else if !before.is_empty() {
-        crate::infoln!("{id}: everything it needs is back");
+}
+
+/// One real pass of one installed integration, and what it leaves for the log.
+///
+/// Pure apart from the pass itself, so that "said once until it changes" is tested rather than trusted:
+/// a wrong clone root once wrote the same line every thirty seconds.
+fn run_once(
+    integration: &dyn Integration,
+    ctx: &Context,
+    batches: &[Batch],
+    last: &mut BTreeMap<&'static str, String>,
+) -> Vec<Line> {
+    let id = integration.info().id;
+    let mut lines = Vec::new();
+    // One complaint per pass, never two: a "missing nothing" said first would overwrite what the
+    // pass said last time, and the pass would then say it again as if it were news.
+    let missing = integration.missing();
+    if !missing.is_empty() {
+        lines.extend(complain_once(last, id, format!("missing {}", missing.join(", "))));
+        return lines;
     }
-    last.insert(id, said);
+    let out = integration.pass(ctx, batches, false);
+    lines.extend(out.said.into_iter().map(|l| (false, format!("{id}: {l}"))));
+    lines.extend(out.trouble.into_iter().map(|l| (true, format!("{id}: {l}"))));
+    // What is wrong before any pull request arrives, as well as what the pass ran into, so a wrong
+    // folder is in the log from the first pass and not only once a pull request needs it.
+    let mut setup: Vec<String> = integration.problems(ctx).into_iter().map(|p| p.text).collect();
+    setup.extend(out.setup);
+    lines.extend(complain_once(last, id, setup.join("; ")));
+    lines
 }
 
 /// The bars as they stand, filtered for `integration`.
@@ -330,21 +381,15 @@ pub fn start(app_asset_path: PathBuf) {
                 if !enabled(&cfg, *integration) {
                     continue;
                 }
-                let id = integration.info().id;
-                let missing = integration.missing();
-                complain_once(id, if missing.is_empty() { String::new() } else { format!("missing {}", missing.join(", ")) });
-                if !missing.is_empty() {
-                    continue;
+                let ctx = Context::new(&app_asset_path, &cfg, integration.info().id);
+                let Ok(mut last) = LAST_COMPLAINT.lock() else { continue };
+                for (error, line) in run_once(*integration, &ctx, &current_batches(*integration), &mut last) {
+                    if error {
+                        crate::errorln!("{line}");
+                    } else {
+                        crate::infoln!("{line}");
+                    }
                 }
-                let ctx = Context::new(&app_asset_path, &cfg, id);
-                let out = integration.pass(&ctx, &current_batches(*integration), false);
-                for line in out.said {
-                    crate::infoln!("{id}: {line}");
-                }
-                for problem in out.trouble {
-                    crate::errorln!("{id}: {problem}");
-                }
-                complain_once(id, out.setup.join("; "));
             }
         })
         .map(|_| ())
@@ -466,6 +511,20 @@ mod tests {
         install(&dir, &fake::Echo, false).unwrap();
         assert_eq!(fake::INSTALLS.load(std::sync::atomic::Ordering::SeqCst), before + 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same setup trouble on every pass is said once, not every thirty seconds. Having every tool
+    /// it needs is not news either, so it must not make the next pass forget what it already said.
+    #[test]
+    fn the_same_setup_trouble_is_logged_once_not_every_pass() {
+        let cfg = Config::from_text("");
+        let ctx = Context::new(Path::new("/nonexistent"), &cfg, "stuck");
+        let mut last = BTreeMap::new();
+        let first = run_once(&fake::Stuck, &ctx, &[], &mut last);
+        assert_eq!(first, [(true, "stuck: no clone at /nowhere/thing".to_string())]);
+        for _ in 0..3 {
+            assert_eq!(run_once(&fake::Stuck, &ctx, &[], &mut last), [], "said again");
+        }
     }
 
     static FLAGGED: Info = Info {

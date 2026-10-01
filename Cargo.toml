@@ -71,4 +71,6 @@ winit = "0.30.12"
 # `bcrypt` is `serve.rs`: `BCryptGenRandom` for the PR page's path token. Same argument as `winreg` —
 # the token needs a real CSPRNG rather than a hash seed, and this is one already-present crate's
 # feature flag rather than a new dependency. `/dev/urandom` covers Linux and macOS from std alone.
-winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver", "winreg", "winerror", "bcrypt"] }
+# `combaseapi`, `objbase`, `shobjidl`, `shobjidl_core` and `wtypesbase` are `dialog::pick_folder`: the
+# settings page's Browse button, Explorer's own `IFileOpenDialog` in folder mode. Feature flags again.
+winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver", "winreg", "winerror", "bcrypt", "combaseapi", "objbase", "shobjidl", "shobjidl_core", "wtypesbase"] }

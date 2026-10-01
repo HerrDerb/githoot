@@ -229,6 +229,10 @@ pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, bod
 /// posts as it always did.
 ///
 /// **A "whole or only these" list** (`[data-parts]`) shows its boxes only while "Only these" is chosen.
+///
+/// **A folder's Browse button** (`[data-browse]`) is revealed here, since it does nothing without the
+/// script. It asks GitHoot to show the native folder picker, opened where the box points, and fills the
+/// box with the answer. It saves nothing: Save does, as for any text.
 const SITE_SCRIPT: &str = "(function(){\
 document.querySelectorAll('form[data-autosave]').forEach(function(f){f.classList.add('auto');});\
 function parts(){document.querySelectorAll('[data-parts]').forEach(function(p){var some=p.querySelector('input[value=\"some\"]');\
@@ -244,6 +248,12 @@ var body=new URLSearchParams(new FormData(f));body.append('reply','json');\
 fetch(f.getAttribute('action'),{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){\
 say(j.line);if(j.fade){f.fade=setTimeout(function(){say('');},2000);}\
 }).catch(function(){say('Not saved: GitHoot did not answer. Is it still running?');});});\
+document.querySelectorAll('[data-browse]').forEach(function(b){b.hidden=false;b.addEventListener('click',function(){\
+var f=b.form,box=f.elements[b.getAttribute('data-browse')],line=f.querySelector('.save-line');function say(t){if(line)line.textContent=t;}\
+var body=new URLSearchParams();body.append('action','browse');body.append('start',box.value||box.placeholder);body.append('reply','json');\
+b.disabled=true;say('Choose a folder in the window GitHoot opened…');\
+fetch(f.getAttribute('action'),{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){if(j.path)box.value=j.path;say(j.line);\
+}).catch(function(){say('GitHoot did not answer. Is it still running?');}).finally(function(){b.disabled=false;});});});\
 })();";
 
 /// Every section `settings` is cut into, each its own form posting to `place` with its index.
@@ -257,6 +267,19 @@ pub fn sections(
     value: &dyn Fn(&Setting) -> String,
     flash: Option<&(usize, String)>,
 ) -> String {
+    sections_with(token, place, settings, value, flash, &|_| None)
+}
+
+/// [`sections`], with `trouble` saying what is wrong with a setting on this machine, if anything. That
+/// box is marked where it is drawn, with the reason under it.
+pub fn sections_with(
+    token: &str,
+    place: &Place,
+    settings: &'static [Setting],
+    value: &dyn Fn(&Setting) -> String,
+    flash: Option<&(usize, String)>,
+    trouble: &dyn Fn(&Setting) -> Option<String>,
+) -> String {
     crate::setting::groups(settings)
         .into_iter()
         .enumerate()
@@ -265,14 +288,14 @@ pub fn sections(
             let fields: String = if members.iter().all(|s| matches!(s.kind, Kind::Step { .. })) {
                 rule_line(title, &members, value)
             } else {
-                members.iter().map(|s| field(s, &value(s))).collect()
+                members.iter().map(|s| field(s, &value(s), trouble(s).as_deref())).collect()
             };
             let line = match flash {
                 Some((at, line)) if *at == i => esc(line),
                 _ => String::new(),
             };
             // No text box in it: the section saves as it changes, and the script hides its button.
-            let auto = if members.iter().any(|s| matches!(s.kind, Kind::Text { .. })) { "" } else { " data-autosave" };
+            let auto = if members.iter().any(|s| matches!(s.kind, Kind::Text { .. } | Kind::Folder { .. })) { "" } else { " data-autosave" };
             // The green bar's rules wear the bar itself in front of their title.
             let mark = if title == crate::config::GREEN_RULES_GROUP {
                 "<span class=\"bar-mark bar-merge\" aria-hidden=\"true\"></span>"
@@ -426,9 +449,25 @@ fn amber_line(green_form: &str, value: &dyn Fn(&str) -> String) -> String {
 }
 
 /// One declared setting as its control, showing `value`, with its help underneath.
-fn field(s: &Setting, value: &str) -> String {
+fn field(s: &Setting, value: &str, trouble: Option<&str>) -> String {
     let help = if s.help.is_empty() { String::new() } else { format!("<p class=\"sub help\">{}</p>", esc(s.help)) };
     let checked = |on: bool| if on { " checked" } else { "" };
+    let key = esc(s.key);
+    // What is wrong with it goes right under the box, ahead of the help, and the box points at it.
+    let (bad, invalid, why) = match trouble {
+        Some(why) => (
+            format!(" bad\" id=\"field-{key}"),
+            format!(" aria-invalid=\"true\" aria-describedby=\"why-{key}\""),
+            format!("<p class=\"sub why\" id=\"why-{key}\">{}</p>", esc(why)),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
+    match s.kind {
+        Kind::Text { .. } | Kind::Folder { .. } => {}
+        // Only text and folders can be wrong on this machine today. Anything else still says so.
+        _ if trouble.is_some() => return format!("<div id=\"field-{key}\">{}{why}</div>", field(s, value, None)),
+        _ => {}
+    }
     match s.kind {
         Kind::Flag { .. } | Kind::Step { .. } => format!(
             "<label class=\"row\"><input type=\"checkbox\" name=\"{}\" value=\"on\"{}> {}</label>{help}",
@@ -437,9 +476,16 @@ fn field(s: &Setting, value: &str) -> String {
             esc(s.label)
         ),
         Kind::Text { placeholder } => format!(
-            "<label class=\"path\"><span>{}</span><input type=\"text\" name=\"{}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"></label>{help}",
+            "<label class=\"path{bad}\"><span>{}</span><input type=\"text\" name=\"{key}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"{invalid}></label>{why}{help}",
             esc(s.label),
-            esc(s.key),
+            esc(value),
+            esc(placeholder)
+        ),
+        // Hidden until the script reveals it: without the script it could do nothing.
+        Kind::Folder { placeholder } => format!(
+            "<label class=\"path{bad}\"><span>{}</span><input type=\"text\" name=\"{key}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"{invalid}>\
+             <button class=\"small ghost\" type=\"button\" data-browse=\"{key}\" hidden>Browse…</button></label>{why}{help}",
+            esc(s.label),
             esc(value),
             esc(placeholder)
         ),
@@ -904,6 +950,33 @@ pub(crate) mod tests {
         assert!(html.contains(r#"<input type="radio" name="level" value="error"> Errors"#));
         assert!(html.contains(r#"<input type="checkbox" name="parts" value="Pages" checked> Pages"#));
         assert!(html.contains(r#"<input type="checkbox" name="parts" value="API"> API"#));
+    }
+
+    /// A folder is its text box plus a Browse button the script reveals: without the script the button
+    /// could do nothing, so it starts hidden and the box works as before. A folder section keeps its
+    /// Save, as text does: picking a folder fills the box, it does not write the file behind your back.
+    #[test]
+    fn a_folder_is_a_text_box_with_a_browse_button_the_script_reveals() {
+        static FOLDERS: [Setting; 1] =
+            [Setting { key: "root", label: "Root", kind: Kind::Folder { placeholder: "~/src" }, help: "", group: "G", live: true }];
+        let html = sections("tok", &Place::Integration("herdr"), &FOLDERS, &|_| r"D:\src".to_string(), None);
+        assert!(html.contains(r#"<input type="text" name="root" value="D:\src" placeholder="~/src" spellcheck="false">"#), "{html}");
+        assert!(html.contains(r#"<button class="small ghost" type="button" data-browse="root" hidden>Browse…</button>"#), "{html}");
+        assert!(!html.contains("data-autosave"), "{html}");
+        assert!(SITE_SCRIPT.contains("[data-browse]") && SITE_SCRIPT.contains("'action','browse'"));
+    }
+
+    /// A setting that is wrong on this machine is marked where you would fix it: the box, its label,
+    /// and the reason under it, tied together for a screen reader. The rest are drawn as always.
+    #[test]
+    fn a_setting_with_a_problem_is_marked_at_its_box() {
+        let trouble = |s: &Setting| (s.key == "root").then(|| "that folder does not exist".to_string());
+        let html = sections_with("tok", &Place::General, DECLARED, &values, None, &trouble);
+        assert!(html.contains(r#"<label class="path bad" id="field-root">"#), "{html}");
+        assert!(html.contains(r#"aria-invalid="true" aria-describedby="why-root""#), "{html}");
+        assert!(html.contains(r#"<p class="sub why" id="why-root">that folder does not exist</p>"#), "{html}");
+        assert_eq!(html.matches("aria-invalid").count(), 1, "only the one at fault");
+        assert_eq!(sections("tok", &Place::General, DECLARED, &values, None), sections_with("tok", &Place::General, DECLARED, &values, None, &|_| None));
     }
 
     #[test]

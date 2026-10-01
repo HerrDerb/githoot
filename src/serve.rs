@@ -1118,13 +1118,21 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
                     let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
                     // Only asked while installed: spawning processes to draw a list is waste.
                     let missing = if installed && info.unsupported.is_none() { i.missing() } else { Vec::new() };
+                    // Asked installed or not, as its page does: before Install is when a wrong folder is cheapest to fix.
+                    let problems = match (&cfg, info.unsupported) {
+                        (Some(c), None) => i.problems(&crate::integration::Context::new(&settings_path(), c, info.id)),
+                        _ => Vec::new(),
+                    };
+                    let tone = crate::ui::integrations::status_tone(installed, info.unsupported, &missing, problems.len());
                     crate::ui::integrations::IntegrationRow {
                         id: info.id,
                         name: info.name,
                         summary: info.summary,
-                        status: crate::ui::integrations::integration_status(installed, info.unsupported, &missing),
+                        status: crate::ui::integrations::integration_status(installed, info.unsupported, &missing, problems.len()),
+                        tone,
                         switch: crate::ui::integrations::integration_switch(installed, info.unsupported),
                         flash: crate::integration::take_flash(info.id),
+                        problems,
                     }
                 })
                 .collect();
@@ -1184,6 +1192,10 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
         Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
     };
     let form = parse_form(&body);
+    // Any page may hold a folder setting, so any page answers its Browse button.
+    if form.get("action").is_some_and(|a| a == "browse") {
+        return browse(stream, &form);
+    }
     match place {
         Place::General => save_core_section(stream, token, settings, place, crate::config::GENERAL, &form),
         Place::Advanced => save_core_section(stream, token, settings, place, crate::config::ADVANCED, &form),
@@ -1396,6 +1408,7 @@ fn integration_page(
     let ctx = crate::integration::Context::new(home, &cfg, info.id);
     let installed = cfg.integration_enabled(info.id);
     let missing = if installed && info.unsupported.is_none() { integration.missing() } else { Vec::new() };
+    let problems = integration.problems(&ctx);
     let header_flash = crate::integration::take_flash(info.id);
     let dry_run = crate::integration::last_dry_run(info.id);
     let place = crate::ui::Place::Integration(info.id);
@@ -1407,12 +1420,72 @@ fn integration_page(
         installed,
         unsupported: info.unsupported,
         missing: &missing,
+        problems: &problems,
         flash: header_flash.as_deref(),
         dry_run: &dry_run,
-        sections: crate::ui::sections(site.token, &place, info.settings, &value, flash),
+        // The box at fault is marked where it is drawn, as well as listed at the top.
+        sections: crate::ui::sections_with(site.token, &place, info.settings, &value, flash, &|s| {
+            problems.iter().find(|p| p.key == s.key).map(|p| p.text.clone())
+        }),
         body: integration.page(&ctx, site.token),
     };
     crate::ui::integrations::integration_page(site, &view)
+}
+
+/// Where a Browse button's picker opens: the folder the box names, or the nearest one above it that
+/// exists. `~` is `home`. `None` for nothing typed or a relative path, which leaves it to the picker.
+fn browse_start(typed: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let typed = typed.trim();
+    let path = match typed.strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches(['/', '\\'])),
+        None => std::path::PathBuf::from(typed),
+    };
+    if typed.is_empty() || !path.is_absolute() {
+        return None;
+    }
+    path.ancestors().find(|p| p.is_dir()).map(std::path::Path::to_path_buf)
+}
+
+/// What a Browse button hears back: `path` for the box, and the line to show beside it.
+fn browse_reply(picked: &crate::dialog::Picked) -> String {
+    use crate::dialog::Picked;
+    match picked {
+        Picked::Folder(path) => serde_json::json!({ "path": path.display().to_string(), "line": "Picked. Save to keep it." }),
+        Picked::Cancelled => serde_json::json!({ "path": null, "line": "" }),
+        Picked::Unavailable(why) => serde_json::json!({ "path": null, "line": format!("No folder picker: {why}. Type the path instead.") }),
+    }
+    .to_string()
+}
+
+/// One picker at a time: a second press while it is open would stack a second one behind it.
+static PICKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A Browse button: shows the folder picker and answers with what was chosen. Writes nothing, so the
+/// guards a write needs have already been passed by the caller and none are needed after.
+///
+/// The picker blocks until it is closed, and the page server answers one connection at a time, so
+/// the answer goes out from a thread of its own on a clone of the connection. Every other page keeps
+/// answering while the picker is open.
+fn browse(stream: &mut TcpStream, form: &Form) {
+    use std::sync::atomic::Ordering;
+    if PICKING.swap(true, Ordering::SeqCst) {
+        let body = serde_json::json!({ "path": null, "line": "A folder picker is already open." }).to_string();
+        return respond(stream, 200, "application/json", body.as_bytes(), true);
+    }
+    let Ok(mut answer) = stream.try_clone() else {
+        PICKING.store(false, Ordering::SeqCst);
+        return respond(stream, 500, "text/plain; charset=utf-8", b"", true);
+    };
+    let home = dirs::home_dir().unwrap_or_default();
+    let start = form.get("start").and_then(|typed| browse_start(typed, &home));
+    std::thread::spawn(move || {
+        let picked = crate::dialog::pick_folder("GitHoot: choose a folder", start.as_deref());
+        PICKING.store(false, Ordering::SeqCst);
+        if let crate::dialog::Picked::Unavailable(why) = &picked {
+            errorln!("no folder picker: {why}");
+        }
+        respond(&mut answer, 200, "application/json", browse_reply(&picked).as_bytes(), true);
+    });
 }
 
 /// GitHoot's own directory, the one holding `config.txt`.
@@ -1439,6 +1512,9 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         Err(status) => return respond(stream, status, "text/plain; charset=utf-8", b"", true),
     };
     let form = parse_form(&body);
+    if form.get("action").is_some_and(|a| a == "browse") {
+        return browse(stream, &form);
+    }
     // A section's Save: only the keys that section declared, each checked by `integration::set`. An
     // unticked box is off; a text box submitted empty is a deliberate clear, back to its default.
     if form.get("action").is_none() {
@@ -1462,13 +1538,15 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         // second source of truth for whether the thing is installed.
         "install" | "uninstall" => {
             infoln!("settings page asked to {action} {id}");
-            crate::integration::install(&home, integration, action == "install").map(|()| {
-                if action == "install" {
-                    "Installed. What is waiting now is taken as seen; the next pass starts from there."
+            crate::integration::install(&home, integration, action == "install").map(|problems| {
+                if action != "install" {
+                    "Uninstalled. Nothing further will be done.".to_string()
+                } else if problems.is_empty() {
+                    "Installed. What is waiting now is taken as seen; the next pass starts from there.".to_string()
                 } else {
-                    "Uninstalled. Nothing further will be done."
+                    let said: Vec<String> = problems.into_iter().map(|p| p.text).collect();
+                    format!("Installed, but check its settings first: {}.", said.join("; "))
                 }
-                .to_string()
             })
         }
         // Runs a real pass with every effect suppressed, against the lists GitHoot already holds.
@@ -1911,6 +1989,36 @@ mod tests {
     fn a_real_pr_page_answers_with_a_same_origin_policy() {
         let response = round_trip(&format!("GET /{TOKEN}/approved HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(response.contains("Referrer-Policy: same-origin"), "{response}");
+    }
+
+    // ── Browse for a folder ───────────────────────────────────────────────────
+
+    /// The picker opens where the box points, or as close to it as exists, so a root that is wrong
+    /// still opens somewhere near rather than nowhere. `~` is your home, as the placeholders say.
+    #[test]
+    fn the_picker_opens_at_the_nearest_folder_that_exists() {
+        let home = std::env::temp_dir();
+        let here = home.join(format!("githoot-browse-{}", std::process::id()));
+        std::fs::create_dir_all(&here).unwrap();
+        assert_eq!(browse_start(&here.join("gone").join("deeper").display().to_string(), &home), Some(here.clone()));
+        assert_eq!(browse_start(&here.display().to_string(), &home), Some(here.clone()));
+        assert_eq!(browse_start("~", &home), Some(home.clone()));
+        assert_eq!(browse_start("~/nothing-here-at-all", &home), Some(home.clone()));
+        assert_eq!(browse_start("  ", &home), None, "nothing typed: the picker's own default");
+        assert_eq!(browse_start("relative/thing", &home), None, "a relative path is relative to nothing useful");
+        let _ = std::fs::remove_dir_all(&here);
+    }
+
+    /// The page script reads `path` into the box, or shows `line`. A cancel says nothing at all.
+    #[test]
+    fn a_pick_answers_the_page_with_the_folder_or_a_line() {
+        let picked: serde_json::Value = serde_json::from_str(&browse_reply(&crate::dialog::Picked::Folder(r"D:\projects".into()))).unwrap();
+        assert_eq!(picked["path"], r"D:\projects");
+        assert_eq!(picked["line"], "Picked. Save to keep it.");
+        let cancelled: serde_json::Value = serde_json::from_str(&browse_reply(&crate::dialog::Picked::Cancelled)).unwrap();
+        assert!(cancelled["path"].is_null() && cancelled["line"] == "");
+        let none: serde_json::Value = serde_json::from_str(&browse_reply(&crate::dialog::Picked::Unavailable("no zenity".into()))).unwrap();
+        assert!(none["path"].is_null() && none["line"].as_str().unwrap().contains("no zenity"));
     }
 
     // ── Integration buttons ───────────────────────────────────────────────────

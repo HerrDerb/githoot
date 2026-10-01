@@ -36,7 +36,7 @@
 
 pub mod prompts;
 
-use super::{Batch, Context, Info, Integration, Kind, Said, Setting};
+use super::{Batch, Context, Info, Integration, Kind, Problem, Said, Setting};
 use crate::page::esc;
 use crate::portal::types::PrEntry;
 use crate::portal::PortalKind;
@@ -104,6 +104,8 @@ pub fn slug(repo: &str, number: u64) -> String {
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub clone_root: PathBuf,
+    /// Where `clone_root` came from, so a message about it can say which knob moves it.
+    pub clone_root_from: RootFrom,
     pub worktree_root: PathBuf,
     pub agent_kind: String,
     /// Says what it would do and touches nothing, including the state file. What the page's Dry run
@@ -118,6 +120,66 @@ impl Settings {
     pub fn clone_of(&self, repo: &str) -> PathBuf {
         self.clone_root.join(repo.rsplit('/').next().unwrap_or(repo))
     }
+}
+
+/// Which of the three places a root was taken from. See `settings_now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootFrom {
+    /// "Clones live in" on the page, `integration.herdr.cloneRoot` in the file.
+    Setting,
+    /// `GITHOOT_CLONE_ROOT`.
+    Env,
+    /// Neither, so `~/projects`.
+    Default,
+}
+
+/// The clone root, and how it came to be that.
+fn clone_root_said(settings: &Settings) -> String {
+    let root = settings.clone_root.display();
+    match settings.clone_root_from {
+        RootFrom::Setting => format!("\"{CLONE_ROOT_LABEL}\" is {root}"),
+        RootFrom::Env => format!("GITHOOT_CLONE_ROOT is {root}"),
+        RootFrom::Default => format!("\"{CLONE_ROOT_LABEL}\" is empty, so it looks in {root}"),
+    }
+}
+
+/// What to log when `repo` has no clone: where it looked, why there, and what to change.
+fn no_clone(settings: &Settings, repo: &str) -> String {
+    let fix = format!("set \"{CLONE_ROOT_LABEL}\" on the Herdr dispatcher's settings page");
+    if !settings.clone_root.is_dir() {
+        return format!("no clone of {repo}: {}, and that folder does not exist. To fix it, {fix}", clone_root_said(settings));
+    }
+    format!(
+        "no clone of {repo} at {}: {}, and that has no clone named {}. Clone it there, or {fix}",
+        settings.clone_of(repo).display(),
+        clone_root_said(settings),
+        repo.rsplit('/').next().unwrap_or(repo)
+    )
+}
+
+/// What is wrong with the folders before any pull request arrives. Empty when they look right.
+///
+/// Only what is certainly wrong: a clone root that is not there, or holds no clone at all, which is
+/// almost always the wrong folder. A worktree root that does not exist yet is fine, `git worktree add`
+/// creates it.
+pub fn setup_problems(settings: &Settings) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let clone_root = |text: String| Problem { key: "cloneRoot", text };
+    match std::fs::read_dir(&settings.clone_root) {
+        Err(_) => problems.push(clone_root(format!("{}, and that folder does not exist", clone_root_said(settings)))),
+        Ok(entries) => {
+            if !entries.flatten().any(|e| e.path().join(".git").exists()) {
+                problems.push(clone_root(format!("{}, and there is no git clone in it", clone_root_said(settings))));
+            }
+        }
+    }
+    if settings.worktree_root.exists() && !settings.worktree_root.is_dir() {
+        problems.push(Problem {
+            key: "worktreeRoot",
+            text: format!("\"{WORKTREE_ROOT_LABEL}\" is {}, which is not a folder", settings.worktree_root.display()),
+        });
+    }
+    problems
 }
 
 // ── Running things ───────────────────────────────────────────────────────────
@@ -420,7 +482,7 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<
     if !clone.join(".git").exists() {
         // Not recorded, so that correcting `integration.herdr.cloneRoot` takes effect on the next
         // pass rather than waiting for somebody to comment on the pull request again.
-        return Err(Trouble::Setup(format!("no clone at {}", clone.display())));
+        return Err(Trouble::Setup(no_clone(settings, &t.repo)));
     }
     let (refspec, base) = fetch_plan(t, slug)?;
 
@@ -588,6 +650,10 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
 
 pub struct Herdr;
 
+/// Named once, because the messages about a wrong root tell you which box to change.
+const CLONE_ROOT_LABEL: &str = "Clones live in";
+const WORKTREE_ROOT_LABEL: &str = "Worktrees go in";
+
 static INFO: Info = Info {
     id: "herdr",
     name: "Herdr dispatcher",
@@ -626,16 +692,16 @@ static INFO: Info = Info {
         },
         Setting {
             key: "cloneRoot",
-            label: "Clones live in",
-            kind: Kind::Text { placeholder: "~/projects" },
+            label: CLONE_ROOT_LABEL,
+            kind: Kind::Folder { placeholder: "~/projects" },
             help: "Where your clones live, one directory per repository name: owner/thing needs <this>/thing. Empty means ~/projects.",
             group: "Folders",
             live: true,
         },
         Setting {
             key: "worktreeRoot",
-            label: "Worktrees go in",
-            kind: Kind::Text { placeholder: "~/worktrees" },
+            label: WORKTREE_ROOT_LABEL,
+            kind: Kind::Folder { placeholder: "~/worktrees" },
             help: "Where the worktree for each pull request goes, named githoot/pr-<number>-<repo>. Empty means ~/worktrees.",
             group: "Folders",
             live: true,
@@ -663,6 +729,10 @@ impl Integration for Herdr {
 
     fn missing(&self) -> Vec<&'static str> {
         missing_tools()
+    }
+
+    fn problems(&self, ctx: &Context) -> Vec<Problem> {
+        setup_problems(&settings_now(ctx, true))
     }
 
     /// Install, or install again after Uninstall, is "from now on" for every bar.
@@ -824,13 +894,18 @@ fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
     let home = dirs::home_dir().unwrap_or_default();
     let pick = |set: &str, env: &str, fallback: PathBuf| {
         if !set.is_empty() {
-            return PathBuf::from(set);
+            return (PathBuf::from(set), RootFrom::Setting);
         }
-        std::env::var_os(env).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()).unwrap_or(fallback)
+        match std::env::var_os(env).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()) {
+            Some(path) => (path, RootFrom::Env),
+            None => (fallback, RootFrom::Default),
+        }
     };
+    let (clone_root, clone_root_from) = pick(ctx.setting("cloneRoot"), "GITHOOT_CLONE_ROOT", home.join("projects"));
     Settings {
-        clone_root: pick(ctx.setting("cloneRoot"), "GITHOOT_CLONE_ROOT", home.join("projects")),
-        worktree_root: pick(ctx.setting("worktreeRoot"), "GITHOOT_WORKTREE_ROOT", home.join("worktrees")),
+        clone_root,
+        clone_root_from,
+        worktree_root: pick(ctx.setting("worktreeRoot"), "GITHOOT_WORKTREE_ROOT", home.join("worktrees")).0,
         agent_kind: std::env::var("GITHOOT_AGENT_KIND").unwrap_or_else(|_| "claude".to_string()),
         dry_run,
     }
@@ -908,6 +983,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             clone_root: PathBuf::from("/d/projects"),
+            clone_root_from: RootFrom::Setting,
             worktree_root: PathBuf::from("/d/worktrees"),
             agent_kind: "claude".to_string(),
             dry_run: true,
@@ -1277,14 +1353,79 @@ mod tests {
     /// one clone. That is the same assumption the shipped script made and it is worth stating.
     #[test]
     fn a_clone_is_located_by_repo_name_under_the_clone_root() {
-        let settings = Settings {
-            clone_root: PathBuf::from("/d/projects"),
-            worktree_root: PathBuf::from("/d/worktrees"),
-            agent_kind: "claude".to_string(),
-            dry_run: true,
-        };
+        let settings = settings();
         assert_eq!(settings.clone_of("QUMEA/care-backend"), PathBuf::from("/d/projects/care-backend"));
         assert_eq!(settings.worktree("pr-1-x"), PathBuf::from("/d/worktrees/pr-1-x"));
+    }
+
+    /// A scratch folder per test, gone afterwards.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("githoot-herdr-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn rooted(clone_root: &Path, from: RootFrom, worktree_root: &Path) -> Settings {
+        Settings { clone_root: clone_root.to_path_buf(), clone_root_from: from, worktree_root: worktree_root.to_path_buf(), ..settings() }
+    }
+
+    /// "no clone at C:\Users\me\projects\thing" every thirty seconds was all a wrong clone root used
+    /// to say. It has to say where the root came from, that the folder is not there, and which
+    /// setting moves it, because an empty box quietly meaning ~/projects is what nobody guesses.
+    #[test]
+    fn no_clone_says_where_it_looked_why_there_and_what_to_change() {
+        let scratch = Scratch::new("noclone");
+        let gone = scratch.0.join("projects");
+        let said = no_clone(&rooted(&gone, RootFrom::Default, &scratch.0), "QUMEA/care-web-ui");
+        let root = gone.display().to_string();
+        assert!(said.contains("QUMEA/care-web-ui") && said.contains(&root), "{said}");
+        assert!(said.contains("\"Clones live in\" is empty") && said.contains("does not exist"), "{said}");
+
+        let said = no_clone(&rooted(&scratch.0, RootFrom::Setting, &scratch.0), "QUMEA/care-web-ui");
+        let clone = scratch.0.join("care-web-ui").display().to_string();
+        assert!(said.contains(&clone) && said.contains("\"Clones live in\" is"), "{said}");
+        assert!(!said.contains("does not exist") && !said.contains("empty"), "{said}");
+
+        let said = no_clone(&rooted(&scratch.0, RootFrom::Env, &scratch.0), "o/x");
+        assert!(said.contains("GITHOOT_CLONE_ROOT"), "{said}");
+    }
+
+    /// What is wrong with the folders before any pull request arrives: what Install and the page say,
+    /// so a wrong root is found while you are looking at it, not hours later in a log.
+    #[test]
+    fn setup_problems_catch_a_wrong_root_before_any_pull_request_does() {
+        let scratch = Scratch::new("problems");
+        let gone = scratch.0.join("nope");
+        let problems = setup_problems(&rooted(&gone, RootFrom::Default, &scratch.0));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].text.contains("does not exist") && problems[0].text.contains("empty"), "{problems:?}");
+        assert_eq!(problems[0].key, "cloneRoot", "it names the box to fix, so the page can mark it");
+
+        // There, but nothing in it is a clone: almost certainly the wrong folder.
+        let problems = setup_problems(&rooted(&scratch.0, RootFrom::Setting, &scratch.0));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].text.contains("no git clone") && problems[0].key == "cloneRoot", "{problems:?}");
+
+        std::fs::create_dir_all(scratch.0.join("thing").join(".git")).unwrap();
+        assert_eq!(setup_problems(&rooted(&scratch.0, RootFrom::Setting, &scratch.0)), []);
+
+        // A worktree root that does not exist yet is fine, git makes it. A file in its place is not.
+        let file = scratch.0.join("a-file");
+        std::fs::write(&file, "").unwrap();
+        let problems = setup_problems(&rooted(&scratch.0, RootFrom::Setting, &file));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].text.contains("Worktrees go in") && problems[0].text.contains("not a folder"), "{problems:?}");
+        assert_eq!(problems[0].key, "worktreeRoot");
+        assert!(setup_problems(&rooted(&scratch.0, RootFrom::Setting, &scratch.0.join("later"))).is_empty());
     }
 
 
