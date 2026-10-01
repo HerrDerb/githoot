@@ -195,6 +195,20 @@ same applies to any shell that chain-launches another, such as a PowerShell 5.1 
 GitHoot treats this as a setup failure, so the pull request is not recorded and the next pass picks
 it up once the config is fixed.
 
+### An agent that starts slowly
+
+> `timed out waiting for agent startup` or `agent … is blocked during startup and is not ready for prompts`
+
+Both mean Herdr stopped waiting, not that the agent stopped starting. Claude with a few MCP servers
+often takes longer than Herdr's default thirty seconds. GitHoot gives `agent start` two minutes, and
+when it still gives up, checks whether the agent is there anyway. If it is, GitHoot waits up to two
+more minutes for it to be ready and then sends the prompt. The prompt counts as delivered only once
+the agent is seen working on it.
+
+If the agent never becomes ready, it is usually asking something on screen, such as whether to trust
+the folder or allow an MCP server. The log names the pane. Answer the question there, then send the
+prompt with the `herdr agent prompt` command the log gives.
+
 ## Its files
 
 Everything it keeps is in `~/.githoot/integrations/herdr/`: one state file per bar, a `.armed` marker

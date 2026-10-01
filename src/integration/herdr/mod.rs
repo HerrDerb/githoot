@@ -563,33 +563,74 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<
     let pane = json_string(&panes, "pane_id")
         .ok_or_else(|| Trouble::Passing(format!("no pane in {workspace}")))?;
 
-    // `agent start` needs a pane already at its shell prompt; it never creates layout itself.
-    // The last hop, and the one most likely to fail for a reason outside GitHoot: Herdr refuses a
-    // pane it does not consider an available shell, and on Windows it refuses a Git Bash worktree
-    // pane outright (herdr 0.9.1, `agent_pane_busy`, immediate even with a long `--timeout`). The
-    // worktree and the branch are already made by this point and are left in place, so the message
-    // says what is ready and how to finish it by hand rather than only what broke.
-    output("herdr", &["agent", "start", slug, "--kind", &settings.agent_kind, "--pane", &pane])
-        .map_err(|e| {
-            // `agent_pane_busy` is Herdr saying the pane's shell has a descendant process, which
-            // is a *configuration* answer, not a transient one: the commonest cause is a shell
-            // that chain-launches another, such as Git for Windows' `bin\bash.exe` shim around
-            // `usr\bin\bash.exe`, or a PowerShell profile that execs pwsh. Correcting
-            // `[terminal] default_shell` fixes it, and the very next pass can then succeed, so
-            // recording the version here would hide the fix until GitHub happened to move the
-            // pull request. Matched on the code, which is part of Herdr's JSON error contract.
-            let kind = if e.contains("agent_pane_busy") { Trouble::Setup } else { Trouble::Passing };
-            kind(format!(
-                "worktree {worktree_str} is ready on {own}, but Herdr would not start the agent in {pane}: {e}. \
-                 Start it yourself there, or run: herdr agent start {slug} --kind {} --pane {pane}",
-                settings.agent_kind
-            ))
-        })?;
-    output("herdr", &["agent", "prompt", slug, &render_prompt(template, t, &own)])
-        .map_err(|e| Trouble::Passing(format!("agent started but the prompt did not arrive: {e}")))?;
+    let prompt = render_prompt(template, t, &own);
+    hand_over(slug, &settings.agent_kind, &pane, &prompt, &mut |args| output("herdr", args)).map_err(|e| match e {
+        Trouble::Setup(m) => Trouble::Setup(format!("worktree {worktree_str} is ready on {own}, but {m}")),
+        Trouble::Passing(m) => Trouble::Passing(format!("worktree {worktree_str} is ready on {own}, but {m}")),
+    })?;
 
     Ok(format!("started {slug} in {pane}, on branch {own}"))
 }
+
+/// The last hop: start the agent in `pane` and give it its prompt. `herdr` runs one `herdr` command
+/// and answers with its stdout or what it said, so the whole exchange can be replayed in a test.
+///
+/// The hop most likely to fail for a reason outside GitHoot: Herdr refuses a pane it does not consider
+/// an available shell, and on Windows it refuses a Git Bash worktree pane outright (herdr 0.9.1,
+/// `agent_pane_busy`, immediate even with a long `--timeout`). The worktree and the branch are
+/// already made by this point and are left in place, so every message says how to finish by hand.
+pub fn hand_over(
+    slug: &str,
+    kind: &str,
+    pane: &str,
+    prompt: &str,
+    herdr: &mut dyn FnMut(&[&str]) -> Result<String, String>,
+) -> Result<(), Trouble> {
+    let by_hand = format!("herdr agent prompt {slug} \"<the {slug} prompt>\"");
+    if let Err(e) = herdr(&["agent", "start", slug, "--kind", kind, "--pane", pane, "--timeout", START_WAIT_MS]) {
+        // `agent_pane_busy` is Herdr saying the pane's shell has a descendant process, which
+        // is a *configuration* answer, not a transient one: the commonest cause is a shell
+        // that chain-launches another, such as Git for Windows' `bin\bash.exe` shim around
+        // `usr\bin\bash.exe`, or a PowerShell profile that execs pwsh. Correcting
+        // `[terminal] default_shell` fixes it, and the very next pass can then succeed, so
+        // recording the version here would hide the fix until GitHub happened to move the
+        // pull request. Matched on the code, which is part of Herdr's JSON error contract.
+        // Nothing was launched, so there is nothing to wait for.
+        if e.contains("agent_pane_busy") {
+            return Err(Trouble::Setup(format!(
+                "Herdr would not start the agent in {pane}: {e}. Start it yourself there, or run: herdr agent start {slug} --kind {kind} --pane {pane}"
+            )));
+        }
+        // Anything else may have launched it anyway. `timeout` and `agent_not_ready` both mean
+        // Herdr stopped waiting, not that the agent stopped starting: it carries on, and a minute
+        // later sits at an empty prompt that nothing will ever fill, because the next pass finds
+        // an agent in the worktree and leaves it alone. So look before giving up.
+        if herdr(&["agent", "get", slug]).is_err() {
+            return Err(Trouble::Passing(format!(
+                "Herdr would not start the agent in {pane}: {e}. Start it yourself there, or run: herdr agent start {slug} --kind {kind} --pane {pane}"
+            )));
+        }
+        herdr(&["agent", "wait", slug, "--until", "idle", "--timeout", READY_WAIT_MS]).map_err(|_| {
+            Trouble::Passing(format!(
+                "the agent is running but never became ready ({e}), so its prompt was not sent. It is probably asking \
+                 something in {pane}: answer it there, then run {by_hand}"
+            ))
+        })?;
+    }
+    // Seen to arrive, not just sent: the agent must be seen working on it, or asking about it. Not
+    // waited on to the end of its turn, which can take as long as the work does.
+    herdr(&["agent", "prompt", slug, prompt, "--wait", "--until", "working", "--until", "blocked", "--timeout", PROMPT_WAIT_MS])
+        .map_err(|e| Trouble::Passing(format!("the agent started and the prompt did not arrive: {e}. Send it with {by_hand}")))?;
+    Ok(())
+}
+
+/// How long `agent start` waits for the agent to be ready. Herdr's own default is thirty seconds,
+/// which Claude with a few MCP servers routinely overruns; its ceiling is five minutes.
+const START_WAIT_MS: &str = "120000";
+/// How much longer to wait for an agent Herdr stopped waiting for, before saying how to finish by hand.
+const READY_WAIT_MS: &str = "120000";
+/// How long a prompt has to be taken up.
+const PROMPT_WAIT_MS: &str = "30000";
 
 /// One pass over one bar. `targets` has already had the muted ones removed by the caller, because
 /// what counts as muted is `mute`'s business and not this module's.
@@ -1429,6 +1470,95 @@ mod tests {
     }
 
 
+
+    // ── Handing over to the agent ────────────────────────────────────────────
+
+    const NOT_READY: &str = r#"{"error":{"code":"agent_not_ready","message":"agent pr-1-x is blocked during startup and is not ready for prompts"},"id":"cli:agent:start"}"#;
+    const TIMED_OUT: &str = r#"{"error":{"code":"timeout","message":"timed out waiting for agent startup"},"id":"cli:agent:start"}"#;
+    const PANE_BUSY: &str = r#"{"error":{"code":"agent_pane_busy","message":"agent target pane w1:p1 is not an available shell"},"id":"cli:agent:start"}"#;
+    const NOT_FOUND: &str = r#"{"error":{"code":"agent_not_found","message":"no agent named pr-1-x"},"id":"cli:agent:get"}"#;
+    const WAIT_TIMED_OUT: &str = r#"{"error":{"code":"timeout","message":"timed out waiting for agent state"},"id":"cli:agent:wait"}"#;
+
+    /// Replays `answer` for every `herdr` command `hand_over` runs, and hands back what it ran.
+    fn replay(answer: &dyn Fn(&str) -> Result<String, String>) -> (Result<(), Trouble>, Vec<String>) {
+        let mut ran = Vec::new();
+        let out = hand_over("pr-1-x", "claude", "w1:p1", "Review it", &mut |args: &[&str]| {
+            let line = args.join(" ");
+            ran.push(line.clone());
+            answer(&line)
+        });
+        (out, ran)
+    }
+
+    fn prompted(ran: &[String]) -> bool {
+        ran.iter().any(|l| l.starts_with("agent prompt pr-1-x Review it"))
+    }
+
+    /// The agent Herdr gave up on is still starting, and in a minute is sitting at an empty prompt.
+    /// pr-4797 was left exactly so: `agent start` said `agent_not_ready`, and the prompt never went.
+    #[test]
+    fn an_agent_slower_to_start_than_herdr_waits_still_gets_its_prompt() {
+        for failed_start in [NOT_READY, TIMED_OUT] {
+            let (out, ran) = replay(&|line| match line {
+                l if l.starts_with("agent start") => Err(failed_start.to_string()),
+                l if l.starts_with("agent get") => Ok(r#"{"result":{"agent":{"name":"pr-1-x","agent_status":"blocked"}}}"#.to_string()),
+                l if l.starts_with("agent wait") => Ok(r#"{"result":{"agent_status":"idle"}}"#.to_string()),
+                _ => Ok(String::new()),
+            });
+            assert_eq!(out, Ok(()), "{failed_start}: {ran:?}");
+            assert!(prompted(&ran), "{failed_start}: the prompt must still go: {ran:?}");
+            let wait = ran.iter().position(|l| l.starts_with("agent wait pr-1-x")).expect("waits for it to be ready");
+            assert!(wait < ran.iter().position(|l| l.starts_with("agent prompt")).unwrap(), "{ran:?}");
+        }
+    }
+
+    /// Thirty seconds is Herdr's default, and Claude with a few MCP servers takes longer than that.
+    /// The prompt waits to see the agent take it up, so "sent" means "arrived".
+    #[test]
+    fn the_start_waits_long_enough_and_the_prompt_is_seen_to_arrive() {
+        let (out, ran) = replay(&|_| Ok(String::new()));
+        assert_eq!(out, Ok(()));
+        assert!(ran[0].starts_with("agent start pr-1-x --kind claude --pane w1:p1 --timeout "), "{ran:?}");
+        let ms: u64 = ran[0].rsplit(' ').next().unwrap().parse().unwrap();
+        assert!((90_000..=300_000).contains(&ms), "Herdr's own ceiling is 300000: {ms}");
+        assert!(ran.iter().any(|l| l.starts_with("agent prompt pr-1-x Review it --wait")), "{ran:?}");
+    }
+
+    /// No agent behind the failed start: nothing to prompt, and the line says how to start one.
+    #[test]
+    fn a_start_that_left_no_agent_behind_prompts_nothing() {
+        let (out, ran) = replay(&|line| match line {
+            l if l.starts_with("agent start") => Err(TIMED_OUT.to_string()),
+            l if l.starts_with("agent get") => Err(NOT_FOUND.to_string()),
+            _ => Ok(String::new()),
+        });
+        let Err(Trouble::Passing(said)) = out else { panic!("{out:?}") };
+        assert!(said.contains("herdr agent start pr-1-x --kind claude --pane w1:p1"), "{said}");
+        assert!(!prompted(&ran), "{ran:?}");
+    }
+
+    /// An agent that never comes ready is usually asking something on screen. Say that, and give the
+    /// command that sends the prompt once it has been answered.
+    #[test]
+    fn an_agent_that_never_comes_ready_says_how_to_send_the_prompt_by_hand() {
+        let (out, ran) = replay(&|line| match line {
+            l if l.starts_with("agent start") => Err(NOT_READY.to_string()),
+            l if l.starts_with("agent get") => Ok(r#"{"result":{"agent":{"name":"pr-1-x"}}}"#.to_string()),
+            l if l.starts_with("agent wait") => Err(WAIT_TIMED_OUT.to_string()),
+            _ => Ok(String::new()),
+        });
+        let Err(Trouble::Passing(said)) = out else { panic!("{out:?}") };
+        assert!(said.contains("is running but never became ready") && said.contains("herdr agent prompt pr-1-x"), "{said}");
+        assert!(!prompted(&ran), "{ran:?}");
+    }
+
+    /// A busy pane is still a setup answer, tried again next pass, and nothing is waited on.
+    #[test]
+    fn a_busy_pane_is_still_setup_and_nothing_is_waited_on() {
+        let (out, ran) = replay(&|line| if line.starts_with("agent start") { Err(PANE_BUSY.to_string()) } else { Ok(String::new()) });
+        assert!(matches!(out, Err(Trouble::Setup(_))), "{out:?}");
+        assert_eq!(ran.len(), 1, "{ran:?}");
+    }
 
     /// The bug that cost the whole Windows detour, now unable to come back: Herdr answers in the
     /// platform's own path shape, and a mismatch reads as "nobody home", which starts a second
