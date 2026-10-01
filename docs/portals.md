@@ -25,8 +25,12 @@ hoot ledger, the tray wording, the PR page, the poll loop — speaks one vocabul
   rules (see below).
 - `portal::oauth` is the device flow (RFC 8628) both adapters sign in with: the credential file, the
   polling loop and the refresh grant. A portal hands it its endpoints, client id, scope and file.
-- `portal::statuspage` reads an Atlassian Statuspage. GitHub runs one; **GitLab does not** (its status
-  page is on status.io), so the GitLab portal publishes no status.
+- **Each portal brings its own status reader**, chosen in its `health()`. Two exist:
+  - `portal::statuspage` reads an Atlassian Statuspage. GitHub runs one, at githubstatus.com.
+  - `portal::statusio` reads status.io, where GitLab.com's page is (status.gitlab.com). status.io's
+    codes from 300 (Degraded Performance) up raise the mark; maintenance and unknown codes do not.
+  A self-managed GitLab or a GitHub Enterprise instance has no public status page, so it publishes no
+  status at all rather than gitlab.com's or github.com's, which would say nothing about it.
 - `portal::fake` is a test double that imports nothing from `portal::github`. It compiles only if
   the trait can be implemented without a single GitHub type, which is the whole promise of the seam.
 
@@ -148,11 +152,12 @@ Adding the second adapter was also a test of the seam. What it found:
   it. It is `portal::oauth` now, and each portal supplies only what differs.
 - **The vocabulary still named GitHub** in one place: a rejected token was logged as "token rejected by
   GitHub" whoever rejected it.
-- **"Every forge runs Atlassian Statuspage" was wrong.** GitLab's status page is status.io. A GitLab
-  portal has none until a status.io reader exists.
-- **Still GitHub-shaped, not yet fixed:** the tray's status menu entry opens githubstatus.com directly
-  rather than the degraded portal's page (harmless while GitHub is the only portal with one); the
-  menu's "Open PR inbox" fallback opens the first portal's inbox only; the settings pages write only
+- **"Every forge runs Atlassian Statuspage" was wrong.** GitLab's status page is status.io, which
+  `portal::statusio` reads now.
+- **The status menu entry opened githubstatus.com** whoever was down. It now names and opens the
+  portal that is degraded (see `overview::status_menu`); two down at once share one entry that opens
+  both pages.
+- **Still GitHub-shaped, not yet fixed:** the menu's "Open PR inbox" fallback opens the first portal's inbox only; the settings pages write only
   `type` and `enabled` of a `portal.` section, so `url` and `clientId` are still by hand; per-portal
   `interval` is not read; and only one GitHub portal may be named, because the shipped App and its
   credential file are singular.

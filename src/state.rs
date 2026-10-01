@@ -205,12 +205,13 @@ const PR_NEEDS_AUTH_TOOLTIP: &str = "PR status: not authorized yet. Use the menu
 /// icon can only say *that* something is available, so the number goes where there is room for it.
 pub const UPDATE_MENU_LABEL: &str = "Install update";
 
-/// Text of the tray menu item that opens GitHub's status page.
+/// Text of the tray's status entry until a tray update names the portal that is actually down (see
+/// `overview::status_label`). GitHub's sentence, because GitHub was the first portal with a status.
 ///
 /// Shown only while `PollState::status_degraded` holds. The wording is the author's, and it is doing a
 /// job: the icon shows the same exclamation as a missing credential, so this entry is what tells the two
 /// apart at a glance.
-pub const STATUS_MENU_LABEL: &str = "GitHub is githubing again, check status";
+pub const STATUS_MENU_LABEL: &str = "The Octocat (GitHub) is having a rough day, check status";
 
 /// Text of the tray's Settings submenu.
 ///
@@ -226,8 +227,8 @@ pub const SETTINGS_MENU_LABEL: &str = "Settings";
 ///
 /// Named after the app rather than "Open repository", which inside a tool full of GitHub links would
 /// read as one of *your* repositories. The URL itself is `update::REPOSITORY_URL`, next to the
-/// repository the updater installs from — the same split as [`STATUS_MENU_LABEL`] and
-/// `github_status::STATUS_PAGE_URL`.
+/// repository the updater installs from — the same split as [`STATUS_MENU_LABEL`] and the GitHub
+/// portal's own status page URL.
 pub const REPOSITORY_MENU_LABEL: &str = "Open GitHoot on GitHub";
 
 /// Text of the Settings entry that opens the configuration page.
@@ -2608,7 +2609,8 @@ mod tests {
     #[test]
     fn golden_menu_constants() {
         assert_eq!(authenticate_menu_label("GitHub"), "Authenticate GitHub PR Status");
-        assert_eq!(STATUS_MENU_LABEL, "GitHub is githubing again, check status");
+        assert_eq!(STATUS_MENU_LABEL, "The Octocat (GitHub) is having a rough day, check status");
+        assert_eq!(STATUS_MENU_LABEL, crate::overview::status_label(&[("Octocat", "GitHub")]), "the same sentence as a tray update gives");
         assert_eq!(PR_INBOX_MENU_LABEL, "Open PR inbox");
         assert_eq!(REVIEWS_MENU_LABEL, "Open Requested Reviews");
         assert_eq!(REPOSITORY_MENU_LABEL, "Open GitHoot on GitHub");

@@ -29,6 +29,7 @@ pub mod github;
 pub mod gitlab;
 pub mod oauth;
 pub mod statuspage;
+pub mod statusio;
 pub mod types;
 
 #[cfg(test)]
@@ -135,8 +136,9 @@ pub struct Capabilities {
 pub struct StatusPage {
     /// Where a click sends the user. The page, not the JSON endpoint.
     pub url: String,
-    /// The menu entry shown while the portal is degraded.
-    pub menu_label: String,
+    /// Who the menu entry names while the portal is degraded: "Octocat", "Tanuki". The sentence around
+    /// it is `overview::status_label`'s, the same for every portal.
+    pub mascot: String,
 }
 
 /// Everything the UI and the page need to know about a portal without holding the portal itself.

@@ -33,12 +33,17 @@ use super::oauth::{DeviceFlowConfig, TokenStore};
 use super::types::{PollResponse, PollResult};
 use super::{
     AuthError, CredentialState, HealthReport, PollOutcome, Portal, PortalId,
-    PortalInfo, PortalKind, SignInProgress,
+    PortalInfo, PortalKind, SignInProgress, StatusPage,
 };
 use crate::errorln;
 use crate::state::PrAxis;
 
 pub const DEFAULT_BASE_URL: &str = "https://gitlab.com";
+
+/// gitlab.com's status page, where a click on the menu entry goes.
+const STATUS_PAGE: &str = "https://status.gitlab.com";
+/// The same page on status.io's API. The id is in status.gitlab.com's own markup.
+pub(super) const STATUSIO_PAGE_ID: &str = "5b36dc6502d06804c08349f7";
 
 /// The shared GitHoot application on gitlab.com: non-confidential, `read_api`, device flow. Public by
 /// design, like GitHub's client id; see the module doc comment. gitlab.com only.
@@ -125,9 +130,12 @@ impl GitLabPortal {
             display_name: "GitLab".to_string(),
             link_prefix: format!("{base}/"),
             inbox_url: format!("{base}/dashboard/merge_requests"),
-            // status.gitlab.com runs on status.io, not Atlassian Statuspage, so `statuspage` cannot
-            // read it; and a self-managed instance has none. No entry rather than a wrong one.
-            status_page: None,
+            // gitlab.com's health is on status.io, read by `statusio`. A self-managed instance has no
+            // public page, and gitlab.com's would say nothing about it: no entry rather than a wrong one.
+            status_page: (base == DEFAULT_BASE_URL).then(|| StatusPage {
+                url: STATUS_PAGE.to_string(),
+                mascot: "Tanuki".to_string(),
+            }),
             capabilities: PortalKind::GitLab.capabilities(),
             min_poll_interval: crate::state::MIN_POLL_INTERVAL,
         };
@@ -203,7 +211,8 @@ impl Portal for GitLabPortal {
     }
 
     fn health(&mut self) -> Option<Result<HealthReport, String>> {
-        None
+        self.info.status_page.as_ref()?;
+        Some(super::statusio::check(&self.http, STATUSIO_PAGE_ID))
     }
 }
 
@@ -244,6 +253,19 @@ mod tests {
         assert!(!info.capabilities.team_reviewers, "GitLab has no team reviewers");
         assert!(info.capabilities.conflict_state && info.capabilities.rereview_pending);
         assert_eq!(info.capabilities.bot_reviewer, None);
+    }
+
+    /// gitlab.com publishes its health on status.io; a self-managed instance publishes none, and gets
+    /// no entry rather than gitlab.com's, which would say nothing about the instance in use.
+    #[test]
+    fn gitlab_com_has_a_status_page_and_a_self_managed_instance_has_none() {
+        let com = portal(DEFAULT_BASE_URL, Some("abc"));
+        let page = com.info().status_page.clone().expect("gitlab.com publishes one");
+        assert_eq!(page.url, "https://status.gitlab.com");
+        assert_eq!(page.mascot, "Tanuki");
+        let mut own = portal("https://git.example.com", Some("abc"));
+        assert!(own.info().status_page.is_none());
+        assert!(own.health().is_none(), "nothing to ask, so nothing is asked");
     }
 
     #[test]
@@ -317,10 +339,5 @@ mod tests {
         assert!(!dir.join("gitlab_token.txt").exists());
         assert!(dir.join("pr_token.txt").exists(), "GitHub's credential is not GitLab's to delete");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn gitlab_publishes_no_status_this_app_can_read() {
-        assert!(portal(DEFAULT_BASE_URL, Some("abc")).health().is_none());
     }
 }

@@ -18,6 +18,45 @@ use crate::state::{IconState, PollState, PrAxis, Presence, UPDATE_MENU_LABEL};
 pub struct PortalView<'a> {
     pub name: &'a str,
     pub state: &'a PollState,
+    /// Where its status page is, when it publishes one. See [`status_menu`].
+    pub status_page: Option<&'a crate::portal::StatusPage>,
+}
+
+/// The tray's status entry while some portal is degraded: what it says, and the pages a click opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusMenu {
+    pub label: String,
+    pub urls: Vec<String>,
+}
+
+/// The status entry, from the portals that are degraded. `None` while none is.
+///
+/// One portal down speaks in its own words and opens its own page. Several down share the one entry:
+/// it names them all and a click opens each page, in portal order. A portal with no status page cannot
+/// be degraded, since it never had a status to report.
+pub fn status_menu(views: &[PortalView]) -> Option<StatusMenu> {
+    let down: Vec<(&str, &crate::portal::StatusPage)> = views
+        .iter()
+        .filter(|v| v.state.icon().status_degraded)
+        .filter_map(|v| v.status_page.map(|page| (v.name, page)))
+        .collect();
+    if down.is_empty() {
+        return None;
+    }
+    let who: Vec<(&str, &str)> = down.iter().map(|(name, page)| (page.mascot.as_str(), *name)).collect();
+    Some(StatusMenu { label: status_label(&who), urls: down.iter().map(|(_, page)| page.url.clone()).collect() })
+}
+
+/// The status entry's sentence, naming each degraded portal by its mascot with its name in brackets:
+/// `(mascot, portal)`. One shape for all, so a new portal brings a mascot and no wording of its own.
+pub fn status_label(who: &[(&str, &str)]) -> String {
+    let named: Vec<String> = who.iter().map(|(mascot, portal)| format!("{mascot} ({portal})")).collect();
+    let who = match named.as_slice() {
+        [] => "A portal is".to_string(),
+        [one] => format!("The {one} is"),
+        [rest @ .., last] => format!("The {} and the {last} are", rest.join(", the ")),
+    };
+    format!("{who} having a rough day, check status")
 }
 
 /// The icon, merged.
@@ -145,7 +184,62 @@ mod tests {
     }
 
     fn view<'a>(name: &'a str, state: &'a PollState) -> PortalView<'a> {
-        PortalView { name, state }
+        PortalView { name, state, status_page: None }
+    }
+
+    fn page(url: &str, mascot: &str) -> crate::portal::StatusPage {
+        crate::portal::StatusPage { url: url.to_string(), mascot: mascot.to_string() }
+    }
+
+    fn degraded(why: &str) -> PollState {
+        let mut state = PollState::for_portal("x", [true; 3]);
+        state.set_status_degraded(Some(why.to_string()));
+        state
+    }
+
+    /// The entry belongs to the portal that is down: its words, its page. It used to be GitHub's
+    /// label and githubstatus.com whoever raised the mark.
+    #[test]
+    fn the_status_entry_names_the_degraded_portal_and_opens_its_page() {
+        let (well, down) = (PollState::for_portal("GitHub", [true; 3]), degraded("Partial Service Disruption: CI/CD"));
+        let (hub, lab) = (page("https://www.githubstatus.com", "Octocat"), page("https://status.gitlab.com", "Tanuki"));
+        let views = [
+            PortalView { name: "GitHub", state: &well, status_page: Some(&hub) },
+            PortalView { name: "GitLab", state: &down, status_page: Some(&lab) },
+        ];
+        let entry = status_menu(&views).expect("GitLab is down");
+        assert_eq!(entry.label, "The Tanuki (GitLab) is having a rough day, check status");
+        assert_eq!(entry.urls, ["https://status.gitlab.com"]);
+        assert!(status_menu(&[PortalView { name: "GitHub", state: &well, status_page: Some(&hub) }]).is_none(), "nobody down, no entry");
+    }
+
+    /// One sentence for every portal: its mascot, and its name in brackets for anyone who does not
+    /// know whose mascot that is. More than two read as a list.
+    #[test]
+    fn the_status_label_is_one_sentence_with_each_mascot_and_its_portal() {
+        assert_eq!(status_label(&[("Octocat", "GitHub")]), "The Octocat (GitHub) is having a rough day, check status");
+        assert_eq!(
+            status_label(&[("Octocat", "GitHub"), ("Tanuki", "GitLab")]),
+            "The Octocat (GitHub) and the Tanuki (GitLab) are having a rough day, check status"
+        );
+        assert_eq!(
+            status_label(&[("Octocat", "GitHub"), ("Tanuki", "GitLab"), ("Bucket", "Bitbucket")]),
+            "The Octocat (GitHub), the Tanuki (GitLab) and the Bucket (Bitbucket) are having a rough day, check status"
+        );
+    }
+
+    /// Two down at once share one entry that names both and opens both pages, in portal order.
+    #[test]
+    fn two_degraded_portals_share_one_entry_that_opens_both_pages() {
+        let (a, b) = (degraded("Wobbly"), degraded("Down"));
+        let (hub, lab) = (page("https://www.githubstatus.com", "Octocat"), page("https://status.gitlab.com", "Tanuki"));
+        let views = [
+            PortalView { name: "GitHub", state: &a, status_page: Some(&hub) },
+            PortalView { name: "GitLab", state: &b, status_page: Some(&lab) },
+        ];
+        let entry = status_menu(&views).unwrap();
+        assert_eq!(entry.label, "The Octocat (GitHub) and the Tanuki (GitLab) are having a rough day, check status");
+        assert_eq!(entry.urls, ["https://www.githubstatus.com", "https://status.gitlab.com"]);
     }
 
     // ─── One portal is the identity ─────────────────────────────────────────

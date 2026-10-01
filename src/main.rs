@@ -245,6 +245,20 @@ fn get_app_asset_path() -> Result<std::path::PathBuf, String> {
     Ok(assets_path)
 }
 
+/// The status entry was clicked: open the page of every portal that is down, as the last tray update
+/// named them. Shared by both platforms so the entry cannot open different pages on each.
+fn open_status_pages() {
+    let pages = scheduler::status_pages();
+    if pages.is_empty() {
+        errorln!("the status entry was clicked, but no portal has reported being down");
+    }
+    for page in pages {
+        if let Err(e) = open::that(&page) {
+            errorln!("failed to open the status page {page}: {e}");
+        }
+    }
+}
+
 // ─── Linux ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -490,11 +504,7 @@ fn main() {
     // Sibling of the Authenticate entry: conditional, and the counterpart of a mark on the icon. Since
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     let status_item = MenuItem::with_label(state::STATUS_MENU_LABEL);
-    status_item.connect_activate(move |_| {
-        if let Err(e) = open::that(portal::statuspage::STATUS_PAGE_URL) {
-            errorln!("failed to open the GitHub status page: {e}");
-        }
-    });
+    status_item.connect_activate(move |_| open_status_pages());
 
     let quit_item = MenuItem::with_label("Quit");
     quit_item.connect_activate(|_| gtk::main_quit());
@@ -809,6 +819,7 @@ fn main() {
         applied_update: Option<bool>,
         /// And for the install entry's text, which carries the version.
         applied_update_label: Option<String>,
+        applied_status_label: Option<String>,
         /// Likewise for the three PR menu items' text, indexed by `PrAxis::index`, so an
         /// unchanged count does not rewrite the item.
         applied_labels: [Option<String>; 3],
@@ -958,6 +969,7 @@ fn main() {
             applied_needs_auth: None,
             applied_update: None,
             applied_update_label: None,
+            applied_status_label: None,
             applied_labels: [None, None, None],
             // The menu was built with every conditional entry absent and only the inbox, Settings and
             // Quit present, and that much we did do, so it is recorded as such — the first `apply` then
@@ -1134,9 +1146,7 @@ fn main() {
                     errorln!("failed to open the repository: {e}");
                 }
             } else if *id == tray.status_item_id {
-                if let Err(e) = open::that(portal::statuspage::STATUS_PAGE_URL) {
-                    errorln!("failed to open the GitHub status page: {e}");
-                }
+                open_status_pages();
             } else if *id == tray.quit_item_id {
                 event_loop.exit();
             }
@@ -1454,6 +1464,13 @@ fn main() {
             {
                 self.update_item.set_text(label);
                 self.applied_update_label = Some(label.to_string());
+            }
+            // Names the portal that is down, so it changes when a different one goes down.
+            if let Some(label) = update.status.as_ref().map(|s| s.label.as_str())
+                && self.applied_status_label.as_deref() != Some(label)
+            {
+                self.status_item.set_text(label);
+                self.applied_status_label = Some(label.to_string());
             }
 
             if self.applied_menu != Some(shape) {

@@ -16,6 +16,10 @@
 *.md text eol=lf
 *.toml text eol=lf
 
+# Recorded answers from status pages, read by tests with `include_str!`. Kept byte for byte as they
+# came, so a test reads what the service really sent.
+*.json text eol=lf
+
 # The Task Scheduler definition is compiled in with `include_str!` and written back out as UTF-16
 # at install time, so what is in the working tree is what a user's machine gets. It is also the one
 # file here whose comment syntax forbids a stray character; keeping it LF keeps its diffs honest.

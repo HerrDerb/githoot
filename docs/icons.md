@@ -51,7 +51,7 @@ one. That is asserted, not hoped for.
 | Cause | What the menu offers |
 |---|---|
 | PR status is not authorized | **Authenticate GitHub PR Status** |
-| GitHub reports an incident | **GitHub is githubing again, check status** |
+| A portal reports an incident | An entry naming its mascot, such as **The Octocat (GitHub) is having a rough day, check status** |
 | A poll failed, so a signal is unknown | nothing to click — the tooltip names the axis |
 
 One mark for three causes is a deliberate trade: a second mark would need somewhere to live on an icon that

@@ -56,9 +56,6 @@ use serde::Deserialize;
 
 use super::{Health, HealthReport};
 
-/// The page people are sent to, rather than the JSON endpoint above.
-pub const STATUS_PAGE_URL: &str = "https://www.githubstatus.com";
-
 /// Indicators that raise the mark. Anything else — `none`, `maintenance`, or an indicator this version
 /// has never heard of — deliberately does not, so an unfamiliar value cannot invent an outage.
 const DEGRADED_INDICATORS: [&str; 3] = ["minor", "major", "critical"];
@@ -229,6 +226,10 @@ fn humanise(status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub's page, the one Statuspage instance these tests know. The adapter that uses it keeps its
+    /// own copy: which page a portal reads is the portal's business, not this reader's.
+    const STATUS_PAGE_URL: &str = "https://www.githubstatus.com";
 
     fn body(indicator: &str, description: &str) -> String {
         format!(

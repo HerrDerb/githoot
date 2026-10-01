@@ -5,7 +5,9 @@
 | Item | Shown when | Does |
 |---|---|---|
 | **Install update: X.Y.Z** | A newer release exists | Shows what changed, then verifies, installs and restarts |
-| **GitHub is githubing again, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
+| **The Octocat (GitHub) is having a rough day, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
+| **The Tanuki (GitLab) is having a rough day, check status** | GitLab.com reports an incident | Opens [status.gitlab.com](https://status.gitlab.com) |
+| **The Octocat (GitHub) and the Tanuki (GitLab) are having a rough day, check status** | Both at once | Opens both status pages |
 | *— separator —* | Something above **and** below it | |
 | **Authenticate GitHub PR Status** | PR status has no usable credential | Opens **Portals ▸ GitHub**, where the sign-in button is |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |

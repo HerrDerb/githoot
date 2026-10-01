@@ -322,6 +322,18 @@ pub struct Update {
     /// Text for the install-update entry, carrying the version. `None` when no update is available, in
     /// which case the entry is hidden and its label is irrelevant.
     pub update_label: Option<String>,
+    /// The status entry while a portal is degraded: its label, and the pages a click opens. `None`
+    /// while none is, when the entry is hidden.
+    pub status: Option<crate::overview::StatusMenu>,
+}
+
+/// The pages the status entry opens, as the last tray update named them. The click is handled on
+/// the UI thread and the update is built on the poll thread, so the answer waits here between them.
+static STATUS_PAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Every page the status entry should open now. Empty only before a degraded portal was ever seen.
+pub fn status_pages() -> Vec<String> {
+    STATUS_PAGES.lock().map(|p| p.clone()).unwrap_or_default()
 }
 
 /// Everything the poll loop needs that is not a channel or a UI handle.
@@ -628,13 +640,25 @@ fn sign_in_run(runs: &mut [PortalRun], i: usize) {
 /// What the tray is told: the icon, the tooltip, the three entries' labels and the update entry.
 /// One function so the loop can draw it again the moment an update check changes the answer.
 fn tray_update(runs: &[PortalRun], update_available: Option<&str>) -> Update {
-    let views: Vec<crate::overview::PortalView> =
-        runs.iter().map(|run| crate::overview::PortalView { name: run.name(), state: &run.state }).collect();
+    let views: Vec<crate::overview::PortalView> = runs
+        .iter()
+        .map(|run| crate::overview::PortalView {
+            name: run.name(),
+            state: &run.state,
+            status_page: run.portal.info().status_page.as_ref(),
+        })
+        .collect();
+    let status = crate::overview::status_menu(&views);
+    // Kept while nothing is degraded, so a click on an entry that is on its way out still lands.
+    if let (Some(menu), Ok(mut pages)) = (&status, STATUS_PAGES.lock()) {
+        pages.clone_from(&menu.urls);
+    }
     Update {
         icon: crate::overview::icon(&views, update_available.is_some()),
         tooltip: crate::overview::tooltip(&views, update_available),
         pr_labels: PrAxis::ALL.map(|axis| crate::overview::pr_menu_label(&views, axis)),
         update_label: crate::overview::update_menu_label(update_available),
+        status,
     }
 }
 
@@ -1322,6 +1346,7 @@ pub fn start_notification_scheduler(
     // four never touch, and it drives its own menu entry.
     let mut applied_update: Option<bool> = None;
     let mut applied_update_label: Option<String> = None;
+    let mut applied_status_label: Option<String> = None;
 
     glib::timeout_add_local(UI_DRAIN_INTERVAL, move || {
         while let Ok(update) = update_rx.try_recv() {
@@ -1441,6 +1466,13 @@ pub fn start_notification_scheduler(
             {
                 menu_items.update.set_label(label);
                 applied_update_label = Some(label.to_string());
+            }
+            // Names the portal that is down, so it changes when a different one goes down.
+            if let Some(label) = update.status.as_ref().map(|s| s.label.as_str())
+                && applied_status_label.as_deref() != Some(label)
+            {
+                menu_items.status.set_label(label);
+                applied_status_label = Some(label.to_string());
             }
 
             indicator.set_title(&update.tooltip);

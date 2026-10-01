@@ -239,7 +239,7 @@ impl GitHubPortal {
             inbox_url: format!("{base}/pulls/inbox"),
             status_page: (base == DEFAULT_BASE_URL).then(|| StatusPage {
                 url: STATUS_PAGE.to_string(),
-                menu_label: crate::state::STATUS_MENU_LABEL.to_string(),
+                mascot: "Octocat".to_string(),
             }),
             capabilities: PortalKind::GitHub.capabilities(),
             min_poll_interval: crate::state::MIN_POLL_INTERVAL,
@@ -429,10 +429,7 @@ mod tests {
         assert_eq!(info.display_name, "GitHub");
         assert_eq!(info.link_prefix, "https://github.com/", "trailing slash is load-bearing");
         assert_eq!(info.inbox_url, "https://github.com/pulls/inbox");
-        assert_eq!(
-            info.status_page.as_ref().map(|s| s.menu_label.as_str()),
-            Some(crate::state::STATUS_MENU_LABEL)
-        );
+        assert_eq!(info.status_page.as_ref().map(|s| s.mascot.as_str()), Some("Octocat"));
         assert_eq!(info.capabilities.auth_style, AuthStyle::DeviceFlow);
         assert_eq!(info.capabilities.bot_reviewer, Some("Copilot"));
         assert!(info.capabilities.conflict_state && info.capabilities.team_reviewers);
