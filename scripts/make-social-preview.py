@@ -172,16 +172,19 @@ def banner() -> None:
 
     d = ImageDraw.Draw(img)
     x = 560
-    d.text((x, 201), "GitHoot", font=font(SANS_BOLD, 88), fill=TITLE, anchor="ls")
-    d.text((x, 265), "The owl that watches your pull requests", font=font(SANS, 34), fill=MUTED, anchor="ls")
-    d.text((x, 313), "and hoots the moment one needs you.", font=font(SANS, 34), fill=MUTED, anchor="ls")
+    # The name small, the line big: on a 400px card the hook is what has to read, and the name is
+    # already in the repository title above it.
+    d.text((x, 168), "GitHoot", font=font(SANS_BOLD, 34), fill=BLUE, anchor="ls")
+    d.text((x, 248), "Heads down.", font=font(SANS_BOLD, 72), fill=TITLE, anchor="ls")
+    d.text((x, 328), "Hoots up.", font=font(SANS_BOLD, 72), fill=TITLE, anchor="ls")
+    d.text((x, 390), "On the lookout for your changes.", font=font(SANS, 32), fill=(201, 209, 217), anchor="ls")
 
     f = font(SANS_BOLD, 26)
     cx = x
-    for label, colour in (("Review", RED), ("Approved", GREEN), ("Changes", AMBER)):
-        cx = pill(d, cx, 373, label, colour, f) + 16
+    for label, colour in (("Review", RED), ("Approved", GREEN), ("Needs work", AMBER)):
+        cx = pill(d, cx, 432, label, colour, f) + 16
 
-    d.text((x, 495), "Linux  ·  Windows  ·  macOS  ·  Rust  ·  public domain", font=font(SANS, 24), fill=FAINT, anchor="ls")
+    d.text((x, 536), "Linux  ·  Windows  ·  macOS  ·  Rust  ·  public domain", font=font(SANS, 24), fill=FAINT, anchor="ls")
 
     img.convert("RGB").save(OUT_BANNER, optimize=True)
     print(f"wrote {OUT_BANNER.relative_to(ROOT)} ({img.width}x{img.height})")

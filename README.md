@@ -1,8 +1,11 @@
 <div align="center">
 
-<img src="docs/social-preview.png" alt="GitHoot — the owl that watches your pull requests" width="760">
+<img src="docs/social-preview.png" alt="GitHoot: heads down, hoots up" width="760">
 
-### A tray owl that watches your pull requests and hoots the moment one needs you.
+### Heads down. Hoots up.
+
+An owl in your system tray, on the lookout for your changes on GitHub and GitLab.<br>
+It lights up when something needs you, and hoots once when it is news.
 
 [![Release](https://img.shields.io/github/v/release/HerrDerb/githoot?label=release&color=1ac94a)](../../releases/latest)
 [![CI](https://github.com/HerrDerb/githoot/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
@@ -18,29 +21,27 @@
 
 ## Why
 
-- **In sync.** It asks GitHub itself, at least every 60 seconds. Email tells you once and then goes
-  stale; a bar here is true right now, and clears itself the moment you act.
-- **In view.** Always on screen, no tab to open and no inbox to sweep. One glance says whether a
-  teammate is waiting on you.
-- **It hoots.** A pull request you have not been told about makes a sound, so you react in minutes
-  instead of at the next sweep. It knows the difference between a new one and GitHub's search index
-  handing the same one back → [the hoot](docs/hoot.md).
+- **Stay in flow.** No tab to refresh, no inbox to sweep. The owl asks your forge itself, at least once
+  a minute, so you can keep your head down.
+- **Know at a glance.** Three coloured bars on one icon say whether anything is waiting on you. Act on
+  it and the bar clears itself.
+- **Hear only news.** One hoot when something new needs you, silence the rest of the time. It can tell
+  a new pull request from the same one handed back by a flaky search index → [the hoot](docs/hoot.md).
 
-Three things it watches:
+What it is on the lookout for:
 
 | | |
 |:---:|---|
 | <img src="docs/icons/tray_review.png" height="26"> | **somebody wants your review** |
-| <img src="docs/icons/tray_merge.png" height="26"> | **your pull request was approved** |
-| <img src="docs/icons/tray_changes.png" height="26"> | **your pull request needs work from you** |
+| <img src="docs/icons/tray_merge.png" height="26"> | **your change was approved** |
+| <img src="docs/icons/tray_changes.png" height="26"> | **your change needs work** |
 
-Every lit bar has a menu entry that takes you to it, with the count on the label. Clicking one opens
-**a page GitHoot renders itself**, listing exactly the pull requests that bar counted, with their check
-state and every reviewer's verdict — because no GitHub search URL can express what two of the three
-bars count → [the PR page](docs/pr-page.md).
+Every lit bar has a menu entry with its count. Clicking one opens **a page GitHoot renders itself**,
+listing exactly what that bar counted, with check states and every reviewer's verdict. No forge search
+URL can express what two of the three bars count → [the PR page](docs/pr-page.md).
 
-No `gh` CLI, no token to paste, nothing to register: sign-in is GitHub's own Device Flow, and the
-device code is already on your clipboard when the dialog appears.
+No CLI to install, no token to paste: you sign in with your forge's own device flow, and the code is
+already on your clipboard when the dialog appears.
 
 ## Get it
 
