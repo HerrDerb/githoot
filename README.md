@@ -21,8 +21,8 @@ It lights up when something needs you, and hoots once when it is news.
 
 ## Why
 
-- **Stay in flow.** No tab to refresh, no inbox to sweep. The owl asks your forge itself, at least once
-  a minute, so you can keep your head down.
+- **Stay in flow.** No tab to refresh, no inbox to sweep. The owl checks GitHub and GitLab for you, at
+  least once a minute, so you can keep your head down.
 - **Know at a glance.** Three coloured bars on one icon say whether anything is waiting on you. Act on
   it and the bar clears itself.
 - **Hear only news.** One hoot when something new needs you, silence the rest of the time. It can tell
