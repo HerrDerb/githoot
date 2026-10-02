@@ -170,6 +170,7 @@ reviewRequested=on          # the red bar
 readyToMerge=on             # the green bar (approved)
 changesRequested=on         # the amber bar
 sound=on                    # hoot when a count rises
+pigeon=off                  # a pigeon instead of the hoot
 updateCheck=on              # check for a newer release daily
 statusComponents=Pull Requests, Actions, API Requests   # which GitHub outages may raise the mark
 ```

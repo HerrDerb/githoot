@@ -33,6 +33,7 @@ const KEY_READY_TO_MERGE: &str = "readyToMerge";
 const KEY_CHANGES_REQUESTED: &str = "changesRequested";
 const KEY_LOG_LEVEL: &str = "logLevel";
 const KEY_SOUND: &str = "sound";
+const KEY_PIGEON: &str = "pigeon";
 const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 const KEY_RULE_CONFLICTS: &str = "ruleConflicts";
@@ -179,6 +180,9 @@ pub struct Config {
     /// Only the *sound* is switched off. The icon, the tooltip and the menu counts are untouched, so
     /// silencing this loses nothing but the noise, which is why it needs no more than one flag.
     pub sound: bool,
+    /// Whether the hoot is the pigeon instead of the owl. Off unless explicitly turned on: it picks
+    /// which clip plays, never whether one does, which is still `sound`'s call alone.
+    pub pigeon: bool,
     /// How much detail the log file carries. `Error` by default — only failures — so the file stays
     /// quiet and readable; set `logLevel=info` to add the lifecycle narration when diagnosing.
     pub log_level: Level,
@@ -345,6 +349,7 @@ pub const GENERAL: &[Setting] = &[
     flag_setting(KEY_READY_TO_MERGE, "Your pull request was approved", true, "The green bar, its menu entry and its search.", "Bars", false),
     flag_setting(KEY_CHANGES_REQUESTED, "Your pull request needs work", true, "The amber bar, its menu entry and its search.", "Bars", false),
     flag_setting(KEY_SOUND, "Hoot when a pull request needs you", true, "The same switch as the tray menu's Hoot.", "Hoot", true),
+    flag_setting(KEY_PIGEON, "Give me the settlers II pigeon", false, "A pigeon plays instead of the hoot. Only on this page, not in the tray menu.", "Hoot", true),
     // The red bar's rules, drawn as the path a review request walks to red (see `ui::rule_line`).
     red_step(KEY_RULE_TEAM_REQUESTS, "Team requests count", "A review asked of a team you are in counts, not only one naming you. Anyone on the team reviewing clears it."),
     red_step(KEY_RULE_SKIP_BOTS, "Not opened by a bot", "Pull requests from dependency updaters such as Dependabot and Renovate stay off the red bar."),
@@ -465,6 +470,7 @@ pub fn value_of(cfg: &Config, key: &str) -> String {
         KEY_RULE_SKIP_BOTS => flag(cfg.rule_skip_bots),
         KEY_LOCAL_API => flag(cfg.local_api),
         KEY_SOUND => flag(cfg.sound),
+        KEY_PIGEON => flag(cfg.pigeon),
         KEY_UPDATE_CHECK => flag(cfg.update_check),
         KEY_LOG_LEVEL => match cfg.log_level {
             Level::Info => "info".to_string(),
@@ -637,6 +643,9 @@ impl Config {
             // Default **on**, for the reason `update_check` is: a notification sound nobody knows
             // about does not notify. `is_off` rather than `!is_on`, so `sound=onn` stays on.
             sound: !values.get(KEY_SOUND).is_some_and(|v| is_off(v)),
+            // Default **off**: the hoot is what a fresh install plays. `is_on` rather than `!is_off`,
+            // so `pigeon=onn` keeps the hoot.
+            pigeon: values.get(KEY_PIGEON).is_some_and(|v| is_on(v)),
             // Unrecognised (or absent) falls back to the quiet default, the same way a typo'd bool
             // does — see `Level::parse`.
             log_level: values.get(KEY_LOG_LEVEL).and_then(|v| Level::parse(v)).unwrap_or(Level::Error),
@@ -875,6 +884,10 @@ fn default_config() -> String {
          # Play a short hoot whenever a pull-request count goes up. Only the sound is affected:\n\
          # the icon, tooltip and counts behave the same either way.\n\
          {KEY_SOUND}=on\n\
+         \n\
+         # Play a pigeon instead of the hoot. Only which sound plays changes; sound=off still\n\
+         # silences both.\n\
+         {KEY_PIGEON}=off\n\
          \n\
          # How much the log file records. \"error\" (the default) logs only failures; \"info\" adds\n\
          # the normal lifecycle detail (startup, sign-in, updates, each poll) for diagnosing.\n\
@@ -1154,7 +1167,7 @@ mod tests {
             declared().filter(|s| s.live).map(|s| s.key).collect();
         assert_eq!(
             live,
-            [KEY_SOUND, KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS, KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS]
+            [KEY_SOUND, KEY_PIGEON, KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS, KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS]
         );
         let live = |key: &str| declared().any(|s| s.key == key && s.live);
         assert!(live(KEY_SOUND) && !live(KEY_LOG_LEVEL));
@@ -1266,6 +1279,7 @@ mod tests {
         assert_eq!(values.get(KEY_UPDATE_CHECK), Some(&"on"));
         assert_eq!(values.get(KEY_LOG_LEVEL), Some(&"error"));
         assert_eq!(values.get(KEY_SOUND), Some(&"on"));
+        assert_eq!(values.get(KEY_PIGEON), Some(&"off"), "the hoot ships, the pigeon is opt-in");
         for axis in PrAxis::ALL {
             assert_eq!(values.get(pr_key(axis)), Some(&"on"), "{axis:?}");
         }
@@ -1280,7 +1294,7 @@ mod tests {
         // And nothing else, so a key added to the template without being read is caught. The
         // integration keys are held to the registry by their own test below.
         let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
-        assert_eq!(own, 14, "unexpected keys in the template: {values:?}");
+        assert_eq!(own, 15, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -1333,6 +1347,7 @@ mod tests {
             KEY_CHANGES_REQUESTED,
             KEY_LOG_LEVEL,
             KEY_SOUND,
+            KEY_PIGEON,
             KEY_STATUS_COMPONENTS,
             KEY_COPILOT_REVIEWS,
             KEY_RULE_CONFLICTS,
@@ -1403,6 +1418,19 @@ mod tests {
         for v in ["off", "Off", "FALSE", "0", "no"] {
             assert!(!values(&format!("sound={v}
 ")).sound, "sound={v} must silence it");
+        }
+    }
+
+    /// Default off: the pigeon is a joke you opt into, and the hoot stays what a fresh install plays.
+    /// `is_on` rather than `!is_off`, so a typo leaves the hoot standing.
+    #[test]
+    fn the_pigeon_is_off_unless_explicitly_turned_on() {
+        assert!(!values("").pigeon, "an empty config must keep the hoot");
+        for v in ["onn", "", "pigeon"] {
+            assert!(!values(&format!("pigeon={v}\n")).pigeon, "pigeon={v} must not swap the clip");
+        }
+        for v in ["on", "true", "1", "yes"] {
+            assert!(values(&format!("pigeon={v}\n")).pigeon, "pigeon={v} must swap the clip");
         }
     }
 

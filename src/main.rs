@@ -310,6 +310,7 @@ fn main() {
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
+    let pigeon = config::Switch::new(config.pigeon);
     // The green bar's rules, live: the portals read them every poll, the settings page sets them.
     let rules = config::RuleSwitches::new(&config);
     let build_portal = portal_builder(app_asset_path.clone(), rules.clone());
@@ -402,6 +403,7 @@ fn main() {
     let hoot_sound = sound.clone();
     let hoot_config_path = app_asset_path.clone();
     let hoot_reverting = reverting.clone();
+    let hoot_pigeon = pigeon.clone();
     hoot_item.connect_toggled(move |item| {
         if hoot_reverting.get() {
             return;
@@ -431,7 +433,7 @@ fn main() {
         // and a silent tick leaves you waiting for a pull request to find out. Nothing plays on the
         // way off, where the silence is the confirmation.
         if on {
-            sound::hoot();
+            sound::hoot(sound::Clip::chosen(hoot_pigeon.is_on()));
         }
     });
 
@@ -558,6 +560,7 @@ fn main() {
     serve::install(serve::Settings {
         app_asset_path: app_asset_path.clone(),
         sound: sound.clone(),
+        pigeon: pigeon.clone(),
         rules: rules.clone(),
         local_api: config.local_api,
         wake: std::sync::Mutex::new(wake_tx.clone()),
@@ -603,6 +606,7 @@ fn main() {
             // which bar a setting controls.
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
             sound: sound.clone(),
+            pigeon: pigeon.clone(),
         },
         wake_rx,
         restart_tx,
@@ -743,6 +747,7 @@ fn main() {
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.
     let sound = config::Switch::new(config.sound);
+    let pigeon = config::Switch::new(config.pigeon);
     // The green bar's rules, live: the portals read them every poll, the settings page sets them.
     let rules = config::RuleSwitches::new(&config);
     let build_portal = portal_builder(app_asset_path.clone(), rules.clone());
@@ -1064,6 +1069,7 @@ fn main() {
             // which bar a setting controls.
             pr_enabled: state::PrAxis::ALL.map(|axis| config.pr_enabled(axis)),
             sound: sound.clone(),
+            pigeon: pigeon.clone(),
         },
         wake_rx,
         proxy,
@@ -1086,6 +1092,8 @@ fn main() {
         app_asset_path: std::path::PathBuf,
         /// The menu's handle on the hoot switch. The poll loop holds the other one.
         sound: config::Switch,
+        /// Which clip the hoot plays. Only the settings page changes it.
+        pigeon: config::Switch,
     }
 
     impl App {
@@ -1182,7 +1190,7 @@ fn main() {
             }
             infoln!("hoot {}", if on { "on" } else { "off" });
             if on {
-                sound::hoot();
+                sound::hoot(sound::Clip::chosen(self.pigeon.is_on()));
             }
         }
 
@@ -1577,6 +1585,7 @@ fn main() {
     serve::install(serve::Settings {
         app_asset_path: app_asset_path.clone(),
         sound: sound.clone(),
+        pigeon: pigeon.clone(),
         rules: rules.clone(),
         local_api: config.local_api,
         wake: std::sync::Mutex::new(wake_tx.clone()),
@@ -1600,6 +1609,7 @@ fn main() {
         wake_tx,
         app_asset_path: app_asset_path.clone(),
         sound,
+        pigeon,
     };
 
     if let Err(e) = event_loop.run_app(&mut app) {

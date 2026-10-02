@@ -229,6 +229,7 @@ existed — the key is appended rather than the file regenerated.
 | `ruleTeamRequests` | `on` | A review asked of a team you are in lights the red bar, not only one naming you (GitHub) |
 | `ruleSkipBots` | `on` | Pull requests opened by bots (Dependabot, Renovate) stay off the red bar. Off lets them in |
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
+| `pigeon` | `off` | Play a pigeon instead of the hoot. Picks the clip only; `sound=off` still silences it |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
 | `localApi` | `off` | Serve the judged lists as JSON to local scripts, and bind the local port at startup — see [The local API](local-api.md). Off by default, and a typo leaves it shut rather than open |

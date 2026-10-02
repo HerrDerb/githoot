@@ -1,8 +1,8 @@
 # Icons
 
 Everything is composited at runtime, so `assets/` holds one image file and the variants cannot drift
-apart. (A second file lives there, `hoot.mp3` — the sound, not an icon, and the only bundled file that
-is not this project's own work: see [NOTICE](../NOTICE).) There used to be a blue owl beside it, for
+apart. (Two more live there, `hoot.mp3` and `pigeon.mp3`: the sounds, not icons. `hoot.mp3` is not this
+project's own work: see [NOTICE](../NOTICE).) There used to be a blue owl beside it, for
 unread notifications; that feature and its asset were removed in 2.0.0.
 
 The base glyph is an owl, drawn for this project: the thing that sits still and watches so you do

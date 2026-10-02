@@ -1,5 +1,9 @@
 //! The hoot: one short sound, played when the number of pull requests on an axis goes up.
 //!
+//! Two clips can be that sound: the owl's hoot, and the pigeon for whoever ticks "Give me the settlers
+//! II pigeon". Which one plays is the caller's choice ([`Clip::chosen`]); everything below treats them
+//! the same.
+//!
 //! ## Why an embedded file and a temp copy
 //!
 //! The clip ships inside the binary for the same reason the tray glyphs do (`icons`): a single file to
@@ -44,25 +48,56 @@ use crate::{errorln, infoln};
 /// A replacement clip needs the same lead-in.
 const HOOT: &[u8] = include_bytes!("../assets/hoot.mp3");
 
-/// Name of the temp copy. Deliberately fixed rather than unique per process: a second instance of the
-/// app would otherwise leave a second file behind on every launch, and the content is identical.
-const HOOT_FILE: &str = "githoot-hoot.mp3";
+/// The pigeon, the opt-in alternative to the hoot. Converted to MP3 from the WAV it arrived as, so the
+/// players below (several of which are picked for decoding MP3) see one format, and padded to the same
+/// one-second lead-in as the hoot, for the same Bluetooth reason.
+const PIGEON: &[u8] = include_bytes!("../assets/pigeon.mp3");
+
+/// Which sound a hoot plays.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Clip {
+    Hoot,
+    Pigeon,
+}
+
+impl Clip {
+    /// The clip the `pigeon` setting asks for.
+    pub fn chosen(pigeon: bool) -> Self {
+        if pigeon { Clip::Pigeon } else { Clip::Hoot }
+    }
+
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Clip::Hoot => HOOT,
+            Clip::Pigeon => PIGEON,
+        }
+    }
+
+    /// Name of the temp copy. Deliberately fixed rather than unique per process: a second instance of
+    /// the app would otherwise leave a second file behind on every launch, and the content is identical.
+    fn file_name(self) -> &'static str {
+        match self {
+            Clip::Hoot => "githoot-hoot.mp3",
+            Clip::Pigeon => "githoot-pigeon.mp3",
+        }
+    }
+}
 
 /// Whether a hoot is currently playing. See the module doc: overlapping hoots are dropped.
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
 
-/// Plays the hoot, returning immediately.
+/// Plays `clip`, returning immediately.
 ///
-/// A no-op when one is already playing, or when the clip cannot be unpacked. Never panics and never
-/// propagates an error: a notification sound is not worth failing a poll cycle over.
-pub fn hoot() {
+/// A no-op when a hoot (of either clip) is already playing, or when the clip cannot be unpacked. Never
+/// panics and never propagates an error: a notification sound is not worth failing a poll cycle over.
+pub fn hoot(clip: Clip) {
     // `Acquire`/`Release` rather than `Relaxed` only so the release below cannot be reordered ahead
     // of the playback it guards; the flag itself is the whole shared state.
     if PLAYING.swap(true, Ordering::Acquire) {
         return;
     }
-    let Some(path) = clip_path().cloned() else {
+    let Some(path) = clip_path(clip).cloned() else {
         PLAYING.store(false, Ordering::Release);
         return;
     };
@@ -77,27 +112,36 @@ pub fn hoot() {
     }
 }
 
-/// Path to the unpacked clip, written on first use.
+/// Path to the unpacked clip, written on first use of that clip.
 ///
 /// `None` if it could not be written, which is remembered rather than retried: the reason a temp file
 /// cannot be written (no permission, no space) does not usually clear inside one run, and retrying it
 /// on every arrival would put the same error in the log forever.
-fn clip_path() -> Option<&'static PathBuf> {
-    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let path = std::env::temp_dir().join(HOOT_FILE);
+fn clip_path(clip: Clip) -> Option<&'static PathBuf> {
+    static HOOT_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static PIGEON_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let cell = match clip {
+        Clip::Hoot => &HOOT_PATH,
+        Clip::Pigeon => &PIGEON_PATH,
+    };
+    cell.get_or_init(|| {
+        let bytes = clip.bytes();
+        let path = std::env::temp_dir().join(clip.file_name());
         // Only write when what is there is not already this clip. Length is enough: the bytes are
         // fixed at compile time, so a differing length is the only way a stale file can differ in
         // practice, and hashing 50KB on every launch to learn the same thing is not worth it.
         let current_len = std::fs::metadata(&path).ok().map(|m| m.len());
-        if current_len != Some(HOOT.len() as u64) {
-            if let Err(e) = std::fs::write(&path, HOOT) {
+        if current_len != Some(bytes.len() as u64) {
+            if let Err(e) = std::fs::write(&path, bytes) {
                 errorln!("could not unpack the hoot to {}: {e}", path.display());
                 return None;
             }
-            // Carries the attribution the clip's licence asks for into the app itself, not just the
+            // Carries the attribution the hoot's licence asks for into the app itself, not just the
             // repository, and costs one line in the log once per run. See `HOOT`.
-            infoln!("unpacked the hoot (sound effect by elevenlabs.io) to {}", path.display());
+            match clip {
+                Clip::Hoot => infoln!("unpacked the hoot (sound effect by elevenlabs.io) to {}", path.display()),
+                Clip::Pigeon => infoln!("unpacked the pigeon to {}", path.display()),
+            }
         }
         Some(path)
     })
@@ -205,38 +249,62 @@ fn spawn_player(candidates: &[(&str, &[&str])], path: &Path) {
 mod tests {
     use super::*;
 
-    /// The clip must actually be in the binary. An empty `include_bytes!` compiles fine and would
+    /// Every clip must actually be in the binary. An empty `include_bytes!` compiles fine and would
     /// leave every hoot silently playing nothing.
     #[test]
-    fn the_clip_is_embedded() {
-        assert!(HOOT.len() > 1_000, "the embedded hoot is suspiciously small: {} bytes", HOOT.len());
-        // The first frame of an MP3 is either an ID3 tag or a frame sync (`0xFF 0xEx`). Cheap proof
-        // that what got embedded is the audio file and not, say, a Git LFS pointer.
-        let looks_like_mp3 = HOOT.starts_with(b"ID3") || (HOOT[0] == 0xFF && HOOT[1] & 0xE0 == 0xE0);
-        assert!(looks_like_mp3, "the embedded hoot does not start like an MP3");
+    fn every_clip_is_embedded() {
+        for clip in [Clip::Hoot, Clip::Pigeon] {
+            let bytes = clip.bytes();
+            assert!(bytes.len() > 1_000, "{clip:?} is suspiciously small: {} bytes", bytes.len());
+            // The first frame of an MP3 is either an ID3 tag or a frame sync (`0xFF 0xEx`). Cheap
+            // proof that what got embedded is the audio file and not, say, a Git LFS pointer, and
+            // that the pigeon was converted rather than dropped in as the WAV it arrived as.
+            let looks_like_mp3 = bytes.starts_with(b"ID3") || (bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0);
+            assert!(looks_like_mp3, "{clip:?} does not start like an MP3");
+        }
+    }
+
+    /// The setting picks the clip, and off means the hoot.
+    #[test]
+    fn the_pigeon_setting_picks_the_clip() {
+        assert_eq!(Clip::chosen(false), Clip::Hoot);
+        assert_eq!(Clip::chosen(true), Clip::Pigeon);
     }
 
     /// Actually makes a noise. Ignored by default — a test suite that plays audio on every run is a
-    /// test suite people mute. Run it with `cargo test -- --ignored hoot_is_audible` when the clip or
-    /// a player command changes.
+    /// test suite people mute. Run it with `cargo test -- --ignored is_audible` when a clip or a
+    /// player command changes.
     #[test]
     #[ignore = "plays audio; run deliberately"]
     fn hoot_is_audible() {
-        hoot();
+        hoot(Clip::Hoot);
         // The play happens on a detached thread, so give it the length of the clip to be heard before
         // the test process exits and takes the thread with it.
         std::thread::sleep(std::time::Duration::from_secs(4));
     }
 
-    /// Unpacking must be idempotent: the second call writes nothing and answers the same path.
     #[test]
-    fn unpacking_is_idempotent_and_lands_the_whole_clip() {
-        let first = clip_path().expect("the clip must unpack");
-        let second = clip_path().expect("the clip must still be there");
-        assert_eq!(first, second);
-        assert_eq!(
-            std::fs::metadata(first).expect("unpacked file must exist").len(),
-            HOOT.len() as u64
-        );
+    #[ignore = "plays audio; run deliberately"]
+    fn pigeon_is_audible() {
+        hoot(Clip::Pigeon);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+
+    /// Unpacking must be idempotent: the second call writes nothing and answers the same path. And the
+    /// two clips must land in two files, or the second one played would overwrite the first.
+    #[test]
+    fn unpacking_is_idempotent_and_lands_each_whole_clip_in_its_own_file() {
+        let hoot = clip_path(Clip::Hoot).expect("the hoot must unpack");
+        let pigeon = clip_path(Clip::Pigeon).expect("the pigeon must unpack");
+        assert_ne!(hoot, pigeon);
+        for clip in [Clip::Hoot, Clip::Pigeon] {
+            let first = clip_path(clip).expect("the clip must unpack");
+            let second = clip_path(clip).expect("the clip must still be there");
+            assert_eq!(first, second);
+            assert_eq!(
+                std::fs::metadata(first).expect("unpacked file must exist").len(),
+                clip.bytes().len() as u64
+            );
+        }
     }
 }

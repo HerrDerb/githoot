@@ -534,6 +534,7 @@ fn random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
 pub struct Settings {
     pub app_asset_path: std::path::PathBuf,
     pub sound: crate::config::Switch,
+    pub pigeon: crate::config::Switch,
     /// The green bar's rules, set from the file after a save so the next poll obeys them.
     pub rules: crate::config::RuleSwitches,
     /// Whether `Route::Entries` is served and the listener binds at boot. A plain `bool`, not a
@@ -1304,6 +1305,7 @@ fn save_core_section(
         Ok(changed) => {
             let (cfg, _) = crate::config::Config::load(&settings.app_asset_path);
             settings.sound.set(cfg.sound);
+            settings.pigeon.set(cfg.pigeon);
             settings.rules.set_from(&cfg);
             if !changed.is_empty() {
                 infoln!("settings page wrote: {}", changed.join(", "));
@@ -1898,7 +1900,7 @@ mod tests {
     fn a_save_names_a_section_the_page_actually_has() {
         let form = |body: &str| parse_form(body);
         assert_eq!(section_of(crate::config::GENERAL, &form("section=0")).map(|(i, m)| (i, m.len())), Some((0, 3)));
-        assert_eq!(section_of(crate::config::GENERAL, &form("section=1")).map(|(i, m)| (i, m.len())), Some((1, 1)));
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=1")).map(|(i, m)| (i, m.len())), Some((1, 2)), "the hoot and the pigeon");
         assert_eq!(section_of(crate::config::GENERAL, &form("section=2")).map(|(i, m)| (i, m.len())), Some((2, 2)), "the red bar's line");
         assert_eq!(section_of(crate::config::GENERAL, &form("section=3")).map(|(i, m)| (i, m.len())), Some((3, 4)), "the green bar's line");
         for bad in ["section=4", "section=-1", "section=x", "", "section=01e3"] {
@@ -2620,6 +2622,7 @@ mod tests {
         install(Settings {
             app_asset_path: dir.clone(),
             sound: crate::config::Switch::new(false),
+            pigeon: crate::config::Switch::new(false),
             rules: crate::config::RuleSwitches::new(&crate::config::Config::from_text("")),
             local_api: true,
             wake: std::sync::Mutex::new(wake_tx),
@@ -2672,6 +2675,7 @@ mod tests {
         install(Settings {
             app_asset_path: dir.clone(),
             sound: crate::config::Switch::new(false),
+            pigeon: crate::config::Switch::new(false),
             rules: crate::config::RuleSwitches::new(&crate::config::Config::from_text("")),
             local_api: true,
             wake: std::sync::Mutex::new(wake_tx),
