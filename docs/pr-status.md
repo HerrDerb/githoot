@@ -131,10 +131,19 @@ so its Client ID is public and baked in rather than configured.
 Access to a private org is granted by **installing** the App there, not by a wider scope — an org owner
 approves once and every member benefits.
 
+Signing in and installing are two steps, and GitHub offers no API that takes the second for you. So
+whenever the App turns out to be installed nowhere, at startup or after a sign-in, a dialog explains
+the second step and **OK** opens
+[github.com/apps/githoot-tray-icon/installations/new](https://github.com/apps/githoot-tray-icon/installations/new).
+There is no "Not now": without an installation the app has nothing to show. Where no dialog can be
+shown (a Linux without `zenity` or `kdialog`), the page opens directly. The App's slug is still the
+old name: it was registered before the rename.
+
 If you have authorized but see nothing, check whether it is installed anywhere:
 [github.com/settings/installations](https://github.com/settings/installations). A confident "nothing to
 show" from a zero-installation App would be indistinguishable from genuinely having nothing, so the app
-checks once at startup and turns the bars off with an explanation instead of guessing.
+checks at startup and after each sign-in, and turns the bars off with an explanation instead of guessing.
+An install made later shows up on the next start or sign-in.
 
 The credential renews itself — proactively before expiry, and reactively if GitHub rejects it. Only when a
 renewal needs a browser does the exclamation come back.

@@ -65,8 +65,9 @@ cargo build --release          # -> target/release/githoot
 
 **The tray icon appears immediately** — it never blocks on a sign-in. If PR status has no credential
 yet, the owl wears a red exclamation and the menu offers **Authenticate GitHub PR Status**; pick it
-when it suits you. That works straight away for your own account and public repos. For a private
-org's repos, the GitHub App has to be [**installed** on that org](docs/pr-status.md#why-a-github-app).
+when it suits you. While the GitHub App is installed nowhere, a dialog explains why at every start
+and sign-in, then opens its [install page](https://github.com/apps/githoot-tray-icon/installations/new). For a private org's
+repos, it has to be [**installed** on that org](docs/pr-status.md#why-a-github-app).
 
 `~/.githoot/config.txt` is written on first run with every setting at its default.
 

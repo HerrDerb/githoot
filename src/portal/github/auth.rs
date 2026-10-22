@@ -49,6 +49,10 @@ const CLIENT_ID_ENV: &str = "GITHUB_APP_CLIENT_ID";
 /// against the live API (also see the doc comment) even though the ID itself is real now.
 const CLIENT_ID: &str = "Iv23lipB1miHw6m9SG6n";
 
+/// The same App's slug, the name in `github.com/apps/<slug>`. Its install page is the one step a
+/// sign-in cannot take for the user: GitHub has no API that installs an App on someone's behalf.
+pub const APP_SLUG: &str = "githoot-tray-icon";
+
 const PR_TOKEN_FILE: &str = "pr_token.txt";
 const AGENT: &str = "githoot";
 

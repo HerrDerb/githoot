@@ -31,7 +31,11 @@ const RETIRED: [&str; 6] = [
 const RETIRED_PREFIXES: [&str; 3] = ["GHT_", "ght/", "ght-dispatch"];
 
 /// `(file, retired name)` pairs where the old name is the subject of the line, not a leftover.
-const ALLOWED: [(&str, &str); 8] = [
+const ALLOWED: [(&str, &str); 11] = [
+    // The GitHub App was registered under the old name, and its slug is GitHub's to keep.
+    ("src/portal/github/auth.rs", "githoot-tray"),
+    ("docs/pr-status.md", "githoot-tray"),
+    ("docs/troubleshooting.md", "githoot-tray"),
     // Upgrade notes: where settings, the binary and the autostart entry used to be.
     ("README.md", "githoot-tray"),
     ("docs/menu-and-settings.md", "githoottray"),

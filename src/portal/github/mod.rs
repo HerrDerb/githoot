@@ -170,6 +170,8 @@ pub fn poll_axis(
 pub struct Endpoints {
     pub graphql: String,
     pub oauth: auth::OAuthEndpoints,
+    /// The App's install page, a browser page rather than an API.
+    pub install: String,
 }
 
 impl Endpoints {
@@ -192,6 +194,7 @@ impl Endpoints {
                 access_token: format!("{base}/login/oauth/access_token"),
                 installations: format!("{rest}/user/installations"),
             },
+            install: format!("{base}/apps/{}/installations/new", auth::APP_SLUG),
         }
     }
 
@@ -220,6 +223,8 @@ pub struct GitHubPortal {
     /// `None` until a credential is loaded or obtained.
     store: Option<auth::PrTokenStore>,
     options: GitHubOptions,
+    /// Shows the install prompt. A field so a test can watch it without a desktop.
+    offer_install: fn(&str),
 }
 
 impl GitHubPortal {
@@ -251,6 +256,7 @@ impl GitHubPortal {
             app_asset_path,
             store: None,
             options,
+            offer_install: crate::dialog::offer_app_install,
         }
     }
 
@@ -258,7 +264,14 @@ impl GitHubPortal {
     /// repositories at all, and another click cannot fix that, so the exclamation comes down and a
     /// stated reason replaces it. Not being able to *ask* is not the same as zero: start anyway.
     fn adopt(&mut self, store: auth::PrTokenStore) -> CredentialState {
-        let state = match store.installation_count() {
+        let count = store.installation_count();
+        self.store = Some(store);
+        self.judge_installations(count)
+    }
+
+    /// `adopt`'s verdict, split from the request so it can be asserted without a network.
+    fn judge_installations(&self, count: Result<u64, AuthError>) -> CredentialState {
+        let state = match count {
             Ok(0) => {
                 infoln!("{}", auth::PR_NOT_INSTALLED);
                 CredentialState::Off(auth::PR_NOT_INSTALLED.to_string())
@@ -269,8 +282,19 @@ impl GitHubPortal {
                 CredentialState::Ready
             }
         };
-        self.store = Some(store);
+        if let Some(page) = install_page(&state, &self.endpoints) {
+            (self.offer_install)(page);
+        }
         state
+    }
+}
+
+/// The page to offer once a credential is adopted, at startup or after a sign-in. Only the
+/// not-installed reason offers one: it is the one `Off` a click on GitHub fixes.
+fn install_page<'a>(state: &CredentialState, endpoints: &'a Endpoints) -> Option<&'a str> {
+    match state {
+        CredentialState::Off(reason) if reason == auth::PR_NOT_INSTALLED => Some(&endpoints.install),
+        _ => None,
     }
 }
 
@@ -410,6 +434,20 @@ mod tests {
         assert_eq!(e.oauth.device_code, "https://github.com/login/device/code");
         assert_eq!(e.oauth.access_token, "https://github.com/login/oauth/access_token");
         assert_eq!(e.oauth.installations, "https://api.github.com/user/installations");
+        assert_eq!(e.install, format!("https://github.com/apps/{}/installations/new", auth::APP_SLUG));
+    }
+
+    /// A sign-in that ends with the App installed nowhere opens the install page: authorizing alone
+    /// shows nothing, and the click on GitHub is the one step this app cannot take for the user.
+    /// Any other outcome, or any other reason to be off, opens nothing.
+    #[test]
+    fn a_sign_in_with_no_installation_opens_the_install_page() {
+        let e = Endpoints::github_com();
+        let not_installed = CredentialState::Off(auth::PR_NOT_INSTALLED.to_string());
+        assert_eq!(install_page(&not_installed, &e), Some(e.install.as_str()));
+        assert_eq!(install_page(&CredentialState::Ready, &e), None);
+        assert_eq!(install_page(&CredentialState::NeedsAuth, &e), None);
+        assert_eq!(install_page(&CredentialState::Off("something else".to_string()), &e), None);
     }
 
     /// An Enterprise Server serves everything under its own origin, REST under `/api/v3`.
@@ -443,6 +481,27 @@ mod tests {
         assert_eq!(p.info().inbox_url, "https://ghe.example.com/pulls/inbox");
         assert!(p.info().status_page.is_none());
         assert!(p.health().is_none(), "no status page means no check, not a failed one");
+    }
+
+    thread_local! {
+        static OFFERED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_offer(page: &str) {
+        OFFERED.with(|o| o.borrow_mut().push(page.to_string()));
+    }
+
+    /// The app shows nothing without an installation, so zero installations offers the install page
+    /// every time a credential is adopted: at startup as well as after a sign-in. Some installations,
+    /// or a check that could not be made, offer nothing.
+    #[test]
+    fn an_app_installed_nowhere_is_offered_on_every_adoption() {
+        let mut p = portal(DEFAULT_BASE_URL);
+        p.offer_install = record_offer;
+        assert_eq!(p.judge_installations(Ok(0)), CredentialState::Off(auth::PR_NOT_INSTALLED.to_string()));
+        assert_eq!(p.judge_installations(Ok(2)), CredentialState::Ready);
+        assert_eq!(p.judge_installations(Err(AuthError::Network("down".to_string()))), CredentialState::Ready);
+        OFFERED.with(|o| assert_eq!(*o.borrow(), vec![p.endpoints.install.clone()]));
     }
 
     /// Signing out deletes the file and forgets the store, and asks nothing of the network.
