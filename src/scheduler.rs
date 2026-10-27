@@ -368,8 +368,6 @@ pub struct PollInputs {
     /// A shared switch rather than the `bool` it was, because the tray's Hoot checkbox changes it while
     /// this loop is running — see `config::Switch`. Read once per cycle, at the moment it matters.
     pub sound: crate::config::Switch,
-    /// Whether that hoot is the pigeon. See `config::Config::pigeon`. Shared for the same reason.
-    pub pigeon: crate::config::Switch,
 }
 
 // ─── Shared polling core ──────────────────────────────────────────────────────
@@ -889,7 +887,6 @@ fn run_poll_loop(
         update_check: update_check_enabled,
         pr_enabled,
         sound: sound_enabled,
-        pigeon,
     } = inputs;
     let _ = BUILDER.set((build_portal.clone(), app_asset_path.clone()));
     // The release check's client. Each portal owns its own; this one talks to GitHub Releases
@@ -1027,7 +1024,7 @@ fn run_poll_loop(
                 .map(|axis| axis.menu_label())
                 .collect();
             infoln!("hooting: {}", axes.join(", "));
-            crate::sound::hoot(crate::sound::Clip::chosen(pigeon.is_on()));
+            crate::sound::hoot();
         }
 
         // ── Credential recovery ──────────────────────────────────────────────
