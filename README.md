@@ -233,14 +233,8 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 
 ## License
 
-[The Unlicense](LICENSE) — public domain, no restrictions. That covers the code and the icons, which
-were drawn for this project.
-
-One exception, listed in [NOTICE](NOTICE): `assets/hoot.mp3` is a sound effect by
-[elevenlabs.io](https://elevenlabs.io/sound-effects/free), used under their free plan, which requires
-attribution and permits non-commercial use only. This project is non-commercial, so that is the basis
-it is used on here — but a commercial use of GitHoot needs its own licence for that clip, or a
-replacement file. Nothing in the code cares which clip is at that path.
+[The Unlicense](LICENSE) — public domain, no restrictions. That covers the code, the icons, which
+were drawn for this project, and the hoot, which was synthesized for it (`scripts/make-hoot.py`).
 
 > **Built with AI assistance** — specifically Claude (Anthropic), driven through Claude Code, which
 > did the bulk of the hauling: most of the code, the tests, the release workflow and these docs. The

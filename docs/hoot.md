@@ -81,7 +81,5 @@ box plays one hoot, so you hear what you have just switched on. That switches of
 the tooltip and the menu counts behave identically either way, so silence costs no information. There is
 no volume setting; the system mixer is the only control over how loud it is.
 
-The clip is a sound effect by [elevenlabs.io](https://elevenlabs.io/sound-effects/free), used under
-their free plan: attribution required, non-commercial use only. It is the one file in this repository
-the public-domain dedication does not cover — see [NOTICE](../NOTICE) before using this app for anything
-commercial.
+The clip is synthesized for this project by `scripts/make-hoot.py`, so it is public domain under the
+[Unlicense](../LICENSE) like everything else here. Rerunning the script reproduces it.

@@ -31,13 +31,8 @@ use crate::{errorln, infoln};
 
 /// The clip itself. See `assets/` and the module doc for why it is embedded.
 ///
-/// **Not this project's own work, unlike every other bundled asset.** A sound effect by elevenlabs.io,
-/// from their free sound-effects library, used under a free plan that requires attribution to
-/// elevenlabs.io and permits non-commercial use only. `NOTICE` at the repository root is the full
-/// statement, and the reason `LICENSE`'s public-domain dedication does not reach this one file.
-///
-/// The path is all the code knows, so swapping in a differently-licensed clip is a one-file change
-/// with no code edit — which is what anyone wanting to use this app commercially has to do.
+/// Synthesized for this project by `scripts/make-hoot.py`, so it is covered by `LICENSE` like every
+/// other file here. The script is the record of that: rerunning it reproduces this clip.
 ///
 /// The first second is silence, on purpose. A Bluetooth headset wakes its audio link only when a
 /// stream starts, and swallowed the start of the hoot while it did. The silence is what it swallows now.
@@ -96,9 +91,7 @@ fn clip_path() -> Option<&'static PathBuf> {
                 errorln!("could not unpack the hoot to {}: {e}", path.display());
                 return None;
             }
-            // Carries the attribution the hoot's licence asks for into the app itself, not just the
-            // repository, and costs one line in the log once per run. See `HOOT`.
-            infoln!("unpacked the hoot (sound effect by elevenlabs.io) to {}", path.display());
+            infoln!("unpacked the hoot to {}", path.display());
         }
         Some(path)
     })
