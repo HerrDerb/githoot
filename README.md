@@ -231,6 +231,13 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 | [Troubleshooting](docs/troubleshooting.md) | Tooltip meanings, the log, the Defender verdict |
 | [Updates and releases](docs/updates-and-releases.md) | Verification, recovery, immutable releases, signing keys |
 
+## Network and privacy
+
+No telemetry, no analytics, no server of its own. GitHoot talks only to the GitHub or GitLab you sign
+in to, their public status pages, and GitHub Releases for the daily update check (`updateCheck=off`
+turns that off). Settings, tokens and the log stay in `~/.githoot` on your computer. The full
+[privacy policy](https://herrderb.github.io/githoot/privacy) lists every connection and every file.
+
 ## License
 
 [The Unlicense](LICENSE) — public domain, no restrictions. That covers the code, the icons, which
