@@ -1,7 +1,7 @@
 # Icons
 
 Everything is composited at runtime, so `assets/` holds one image file and the variants cannot drift
-apart. (Two more live there, `hoot.mp3` and `pigeon.mp3`: the sounds, not icons. `hoot.mp3` is not this
+apart. (One more lives there, `hoot.mp3`: the sound, not an icon. It is not this
 project's own work: see [NOTICE](../NOTICE).) There used to be a blue owl beside it, for
 unread notifications; that feature and its asset were removed in 2.0.0.
 
