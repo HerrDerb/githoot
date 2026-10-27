@@ -39,6 +39,26 @@ const ENTRY_LOCATION: &str = "~/Library/LaunchAgents";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const ENTRY_LOCATION: &str = "~/.config/autostart";
 
+/// The Settings page where Windows lets the user keep a tray icon on the taskbar.
+#[cfg(any(target_os = "windows", test))]
+const TASKBAR_SETTINGS: &str = "ms-settings:taskbar";
+
+/// What a first run on Windows says about the overflow flyout.
+///
+/// Windows 11 hides new tray icons behind the **^** arrow, and an owl nobody can see cannot do its one
+/// job. There is no supported call for an app to promote its own icon, so instead of writing the
+/// shell's `NotifyIconSettings` behind the user's back, this points them at the switch and lets them
+/// flip it.
+#[cfg(any(target_os = "windows", test))]
+fn tray_hint() -> String {
+    format!(
+        "Windows may hide the {ENTRY_NAME} owl behind the ^ arrow next to the clock.\n\n\
+         To keep it on the taskbar, turn {ENTRY_NAME} on under Settings › Personalisation › Taskbar › \
+         Other system tray icons.\n\n\
+         Open those settings now?"
+    )
+}
+
 /// Asks, on a first run only, whether to start with the user's session — and registers it if so.
 ///
 /// Returns immediately: the prompt runs on its own thread, the same way `dialog::show_device_code_prompt`
@@ -76,16 +96,32 @@ pub fn offer_on_first_run(first_run: FirstRun) {
 
         if !crate::dialog::confirm_autostart("githoot: start at sign-in", &body) {
             infoln!("not starting at sign-in (declined, or no dialog could be shown) — nothing was registered");
-            return;
+        } else {
+            match enable(&exe) {
+                Ok(()) => infoln!("registered to start at sign-in: {}", exe.display()),
+                // Not fatal and not worth a second dialog: the app is running, and the only thing lost
+                // is a convenience the user can set up with their OS's own startup tool.
+                Err(e) => errorln!("could not register to start at sign-in ({e}) — add it by hand under {ENTRY_LOCATION}"),
+            }
         }
 
-        match enable(&exe) {
-            Ok(()) => infoln!("registered to start at sign-in: {}", exe.display()),
-            // Not fatal and not worth a second dialog: the app is running, and the only thing lost is a
-            // convenience the user can set up with their OS's own startup tool.
-            Err(e) => errorln!("could not register to start at sign-in ({e}) — add it by hand under {ENTRY_LOCATION}"),
-        }
+        // After the startup question rather than before, so the two dialogs never stack. macOS has no
+        // overflow flyout and Linux trays differ too much to name one switch.
+        #[cfg(target_os = "windows")]
+        offer_taskbar_settings();
     });
+}
+
+/// Points the user at the taskbar settings, once, on a first run.
+#[cfg(target_os = "windows")]
+fn offer_taskbar_settings() {
+    if !crate::dialog::confirm_taskbar_settings("githoot: keep the owl visible", &tray_hint()) {
+        infoln!("not opening the taskbar settings, so the owl may sit behind the ^ arrow");
+        return;
+    }
+    if let Err(e) = open::that(TASKBAR_SETTINGS) {
+        errorln!("could not open {TASKBAR_SETTINGS} ({e})");
+    }
 }
 
 /// Registers or unregisters the startup entry, for the tray's Start-at-sign-in checkbox.
@@ -137,11 +173,8 @@ impl Drop for Key {
 impl Key {
     /// Opens an **existing** key under `HKCU`, failing if it is not there.
     ///
-    /// Used for `NotifyIconSettings`, where absence is information rather than an obstacle: it is how
-    /// Windows 10 and older are detected, since the key simply does not exist there. Creating it would
-    /// be worse than useless — the subkeys that matter are hashes only the shell can compute.
-    ///
-    /// Not used for the `Run` key. See [`Key::create`].
+    /// Used to read or clear the `Run` key, where absence is the answer rather than an obstacle.
+    /// Writing goes through [`Key::create`], since a fresh profile has no `Run` key at all.
     fn open(path: &str, access: u32) -> Result<Self, String> {
         use std::ptr::null_mut;
         use winapi::um::winreg::{HKEY_CURRENT_USER, RegOpenKeyExW};
@@ -249,24 +282,6 @@ impl Key {
         Some(String::from_utf16_lossy(&chars))
     }
 
-    /// Whether a value exists at all, whatever its type.
-    ///
-    /// The distinction the icon promotion turns on: an absent `IsPromoted` means nobody has ever
-    /// decided, while a present one — `0` or `1` — is a decision, and decisions are not overwritten.
-    fn has_value(&self, name: &str) -> bool {
-        use std::ptr::null_mut;
-        use winapi::shared::minwindef::DWORD;
-        use winapi::um::winreg::RegQueryValueExW;
-
-        let name_w = wide(name);
-        let mut bytes: DWORD = 0;
-        // SAFETY: the size-query form again, with the type discarded — only presence matters here.
-        let status = unsafe {
-            RegQueryValueExW(self.0, name_w.as_ptr(), null_mut(), null_mut(), null_mut(), &mut bytes)
-        };
-        status == 0
-    }
-
     fn set_string(&self, name: &str, value: &str) -> Result<(), String> {
         use winapi::um::winnt::REG_SZ;
         use winapi::um::winreg::RegSetValueExW;
@@ -281,66 +296,6 @@ impl Key {
             RegSetValueExW(self.0, name_w.as_ptr(), 0, REG_SZ, value_w.as_ptr().cast(), bytes)
         };
         if status == 0 { Ok(()) } else { Err(format!("could not write {name} ({status})")) }
-    }
-
-    fn set_dword(&self, name: &str, value: u32) -> Result<(), String> {
-        use winapi::um::winnt::REG_DWORD;
-        use winapi::um::winreg::RegSetValueExW;
-
-        let name_w = wide(name);
-        // SAFETY: `value` is a live `u32` for the duration of the call, and 4 is its true size.
-        let status = unsafe {
-            RegSetValueExW(
-                self.0,
-                name_w.as_ptr(),
-                0,
-                REG_DWORD,
-                std::ptr::from_ref(&value).cast(),
-                std::mem::size_of::<u32>() as u32,
-            )
-        };
-        if status == 0 { Ok(()) } else { Err(format!("could not write {name} ({status})")) }
-    }
-
-    /// The names of this key's immediate subkeys.
-    ///
-    /// Collected rather than streamed: the caller reopens each one to read from it, and holding an
-    /// enumeration open across those opens is the shape that goes wrong if the shell adds an entry
-    /// mid-walk. A name that cannot be read ends the walk rather than failing the whole call — a
-    /// partial list is still useful, and the caller retries anyway.
-    fn subkeys(&self) -> Vec<String> {
-        use std::ptr::null_mut;
-        use winapi::shared::minwindef::DWORD;
-        use winapi::um::winreg::RegEnumKeyExW;
-
-        // 255 is the documented maximum key-name length, plus one for the terminator.
-        const MAX_KEY_NAME: usize = 256;
-
-        let mut names = Vec::new();
-        for index in 0.. {
-            let mut buffer = [0u16; MAX_KEY_NAME];
-            // In characters and not counting the terminator, in and out.
-            let mut length = (MAX_KEY_NAME - 1) as DWORD;
-            // SAFETY: `buffer` holds `MAX_KEY_NAME` characters and `length` says so; every optional
-            // out-parameter is passed as null, which this call permits.
-            let status = unsafe {
-                RegEnumKeyExW(
-                    self.0,
-                    index,
-                    buffer.as_mut_ptr(),
-                    &mut length,
-                    null_mut(),
-                    null_mut(),
-                    null_mut(),
-                    null_mut(),
-                )
-            };
-            if status != 0 {
-                break;
-            }
-            names.push(String::from_utf16_lossy(&buffer[..length as usize]));
-        }
-        names
     }
 
     /// Removes a value.
@@ -481,199 +436,6 @@ fn disable_in(run_key: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn run_command(exe: &Path) -> String {
     format!("\"{}\"", exe.display())
-}
-
-// ─── Windows: keeping the icon out of the overflow flyout ─────────────────────
-
-/// Where Windows 11 records, per tray icon, whether it sits on the taskbar or in the overflow flyout.
-///
-/// **Undocumented, and there is no supported alternative.** Microsoft deliberately provides no Win32
-/// call for an app to promote its own icon — it is meant to be the user's choice, and this app is only
-/// making that choice once, on the way in, for an icon whose entire purpose is to be looked at. The
-/// key was verified by hand on Windows 11 (build 26200): each subkey is an opaque hash carrying
-/// `ExecutablePath`, `UID`, `InitialTooltip` and, once anything has decided, `IsPromoted`.
-///
-/// Windows 10 has no such key. There the same setting lives in `TrayNotify\IconStreams`, an
-/// undocumented, obfuscated binary blob that cannot be edited without restarting `explorer.exe`. That
-/// is not worth doing to a user's machine, so on Windows 10 this feature simply does not apply and
-/// says so in the log.
-#[cfg(target_os = "windows")]
-const NOTIFY_ICON_SETTINGS: &str = r"Control Panel\NotifyIconSettings";
-
-/// The value naming the program an entry belongs to.
-#[cfg(target_os = "windows")]
-const EXECUTABLE_PATH: &str = "ExecutablePath";
-
-/// `1` puts the icon on the taskbar, `0` in the overflow flyout, absent means nobody has decided.
-#[cfg(target_os = "windows")]
-const IS_PROMOTED: &str = "IsPromoted";
-
-/// How many times to look for our entry, and how long to wait between looks.
-///
-/// The entry is created by the shell when it first receives our icon, which is a moment or two after
-/// the tray is built, so the first look usually finds nothing. Five seconds all told: long enough for
-/// a slow shell, short enough that a thread is not left sitting around on a machine where the key will
-/// never appear at all.
-#[cfg(target_os = "windows")]
-const PROMOTION_ATTEMPTS: u32 = 10;
-#[cfg(target_os = "windows")]
-const PROMOTION_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// What one sweep of `NotifyIconSettings` concluded.
-#[cfg(target_os = "windows")]
-#[derive(Debug, PartialEq, Eq)]
-enum Promotion {
-    /// Set `IsPromoted` on this many entries.
-    Promoted(usize),
-    /// Our entry is there and already carries an `IsPromoted` — ours from a previous start, or the
-    /// user's own choice. Either way it is left exactly as it is.
-    AlreadyDecided,
-    /// No entry names this executable yet. The shell has not registered the icon; worth another look.
-    NotListedYet,
-    Failed(String),
-}
-
-/// Asks Windows to keep this app's tray icon on the taskbar rather than in the overflow flyout.
-///
-/// Returns immediately; the work happens on a background thread, because it has to wait for the shell
-/// to notice the icon and nothing in startup should wait for that.
-///
-/// **Why this is not gated on a first run**, unlike [`offer_on_first_run`]: it is gated on
-/// `IsPromoted` being *absent*, which is a stronger version of the same idea. Absent means nobody has
-/// ever decided, so setting it takes nothing away from anyone. A value that is present is a decision —
-/// `0` because the user hid the icon in Settings, `1` because an earlier start did this — and is never
-/// touched, so this can never fight someone who wants the icon hidden. Running every start also makes
-/// it self-healing: a first run that raced the shell and found nothing simply succeeds on the next one,
-/// where a first-run-only version would have missed its single chance for good.
-///
-/// Deliberately not asked about in a dialog. It is cosmetic, it is undone in two clicks under
-/// Settings › Personalisation › Taskbar › Other system tray icons, and an owl hidden inside a flyout
-/// cannot do the one job this app has. A second prompt on a first run would cost more attention than
-/// the decision is worth.
-#[cfg(target_os = "windows")]
-pub fn promote_tray_icon() {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(e) => {
-            errorln!("not promoting the tray icon: could not locate this executable ({e})");
-            return;
-        }
-    };
-
-    std::thread::spawn(move || {
-        for attempt in 1..=PROMOTION_ATTEMPTS {
-            match promote_once(&exe) {
-                Promotion::Promoted(count) => {
-                    infoln!(
-                        "tray icon set to always show ({count} matching entr{} under \
-                         {NOTIFY_ICON_SETTINGS}); Windows may only apply it from the next sign-in",
-                        if count == 1 { "y" } else { "ies" }
-                    );
-                    return;
-                }
-                Promotion::AlreadyDecided => {
-                    infoln!("leaving the tray icon's visibility alone — it has already been decided");
-                    return;
-                }
-                // Only worth saying once the waiting is over: on a normal start the first few sweeps
-                // find nothing at all, which is not news.
-                Promotion::NotListedYet if attempt == PROMOTION_ATTEMPTS => {
-                    infoln!(
-                        "the tray icon never appeared under {NOTIFY_ICON_SETTINGS} — leaving its \
-                         visibility to Windows"
-                    );
-                }
-                Promotion::NotListedYet => std::thread::sleep(PROMOTION_RETRY),
-                // Includes Windows 10 and older, where the key does not exist. Not an error the user
-                // can act on, and nothing is broken by it.
-                Promotion::Failed(e) => {
-                    infoln!("not promoting the tray icon: {e}");
-                    return;
-                }
-            }
-        }
-    });
-}
-
-/// One sweep of `NotifyIconSettings`.
-#[cfg(target_os = "windows")]
-fn promote_once(exe: &Path) -> Promotion {
-    use winapi::um::winnt::{KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE};
-
-    let root = match Key::open(NOTIFY_ICON_SETTINGS, KEY_READ) {
-        Ok(root) => root,
-        Err(e) => return Promotion::Failed(e),
-    };
-
-    let mut matched = 0usize;
-    let mut promoted = 0usize;
-    for name in root.subkeys() {
-        // Opened for reading and writing up front, so a match needs no second open, and so a key this
-        // account cannot write is skipped before anything is read from it.
-        let Ok(entry) = Key::open(
-            &format!("{NOTIFY_ICON_SETTINGS}\\{name}"),
-            KEY_QUERY_VALUE | KEY_SET_VALUE,
-        ) else {
-            continue;
-        };
-        if !entry.string(EXECUTABLE_PATH).is_some_and(|recorded| refers_to(&recorded, exe)) {
-            continue;
-        }
-
-        matched += 1;
-        // The whole restraint of this feature, in one branch: a decision that already exists stands.
-        if entry.has_value(IS_PROMOTED) {
-            continue;
-        }
-        // Every matching entry, not just the first: the shell keeps one per icon UID, and a stale
-        // entry from an earlier run would otherwise be the one left in the flyout.
-        if let Err(e) = entry.set_dword(IS_PROMOTED, 1) {
-            return Promotion::Failed(e);
-        }
-        promoted += 1;
-    }
-
-    if promoted > 0 {
-        Promotion::Promoted(promoted)
-    } else if matched > 0 {
-        Promotion::AlreadyDecided
-    } else {
-        Promotion::NotListedYet
-    }
-}
-
-/// Whether a recorded `ExecutablePath` names `exe`.
-///
-/// Two forms, both seen in a real `NotifyIconSettings`. Most entries hold a literal path — including,
-/// usefully, everything under `%LOCALAPPDATA%\Programs`, which is where this app installs. Programs
-/// under a handful of shell folders instead get a `{KNOWNFOLDERID}\rest\of\path` token, so
-/// `Program Files` appears as `{6D809377-6AF0-444B-8957-A3773F02200E}\…`.
-///
-/// The token form is resolved by matching the tail rather than by looking the GUID up, which needs no
-/// `SHGetKnownFolderPath` and no table of GUIDs to keep current. The trade is that a program of the
-/// same name in a different root would also match — reachable only for token-form entries, and the
-/// worst case is promoting an icon that was going to be visible anyway, so it is not worth a
-/// known-folder lookup to avoid.
-///
-/// Folded with `to_lowercase` rather than `eq_ignore_ascii_case`, because Windows paths are
-/// case-insensitive past ASCII too and a user name with an umlaut in it is not exotic.
-#[cfg(target_os = "windows")]
-fn refers_to(recorded: &str, exe: &Path) -> bool {
-    let exe = exe.display().to_string().to_lowercase();
-    let recorded = recorded.to_lowercase();
-
-    if recorded == exe {
-        return true;
-    }
-    // `{GUID}\rest\of\path` becomes `rest\of\path`, matched as a tail on a separator boundary so that
-    // a recorded `…\bar.exe` cannot be satisfied by an actual `…\foobar.exe`.
-    match recorded.strip_prefix('{').and_then(|rest| rest.split_once('}')) {
-        Some((_, tail)) => {
-            let tail = tail.trim_start_matches('\\');
-            !tail.is_empty() && exe.ends_with(&format!("\\{tail}"))
-        }
-        None => false,
-    }
 }
 
 /// Deletes a file, treating "it was not there" as success.
@@ -911,6 +673,21 @@ fn exec_escape(s: &str) -> String {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
+mod tray_hint_tests {
+    use super::*;
+
+    /// The hint replaces writing `IsPromoted` ourselves, so it has to name the switch the user flips
+    /// and the page the button opens.
+    #[test]
+    fn the_tray_hint_names_the_switch_and_the_settings_page() {
+        assert_eq!(TASKBAR_SETTINGS, "ms-settings:taskbar");
+        let hint = tray_hint();
+        assert!(hint.contains("Other system tray icons"), "{hint}");
+        assert!(hint.contains(ENTRY_NAME), "{hint}");
+    }
+}
+
 #[cfg(all(test, target_os = "windows"))]
 mod windows_tests {
     use super::*;
@@ -996,11 +773,9 @@ mod windows_tests {
 
         let read_back = key.string(ENTRY_NAME).expect("the value just written must read back");
         assert_eq!(read_back, command, "what comes out must be what went in");
-        assert!(key.has_value(ENTRY_NAME), "a written value must report as present");
 
         key.delete_value(ENTRY_NAME).expect("a value this test wrote must be removable");
         assert_eq!(key.string(ENTRY_NAME), None, "a removed value must read back as absent");
-        assert!(!key.has_value(ENTRY_NAME), "a removed value must not report as present");
     }
 
     /// A path long enough to force the two-pass read to allocate properly, and non-ASCII so the
@@ -1016,97 +791,12 @@ mod windows_tests {
         assert_eq!(key.string(ENTRY_NAME).as_deref(), Some(command.as_str()));
     }
 
-    /// `has_value` is the whole basis of the icon promotion's restraint — a decision that already
-    /// exists is never overwritten — so it has to notice a value of a type `string` deliberately
-    /// refuses to return. A `DWORD` read as a string is `None`, but it is emphatically *present*.
-    #[test]
-    fn a_dword_is_present_even_though_it_is_not_a_string() {
-        let (key, _cleanup) = fresh_test_key("dword", &[]);
-
-        key.set_dword(IS_PROMOTED, 1).expect("the test key must be writable");
-
-        assert!(key.has_value(IS_PROMOTED), "a DWORD that was just written must report as present");
-        assert_eq!(key.string(IS_PROMOTED), None, "a DWORD is not a string and must not be read as one");
-    }
-
     /// Absent is not an error: it is the ordinary state, and the read has to say so plainly rather
     /// than by failing, or nothing could tell deletion from a broken read.
     #[test]
     fn a_value_that_was_never_written_reads_back_as_absent() {
         let (key, _cleanup) = fresh_test_key("absent", &[]);
         assert_eq!(key.string("never-written"), None);
-        assert!(!key.has_value("never-written"));
-    }
-
-    /// `NotifyIconSettings` is enumerated to find our own entry among everything else on the machine,
-    /// so the walk has to return every name and cut each at its terminator. Asserted against a tree
-    /// this test built, so the expectation is exact rather than whatever the machine happens to run.
-    #[test]
-    fn subkeys_returns_exactly_the_children_that_are_there() {
-        let (key, _cleanup) = fresh_test_key("subkeys", &["first", "second-with-a-much-longer-name"]);
-
-        let mut names = key.subkeys();
-        names.sort();
-        assert_eq!(names, vec!["first".to_string(), "second-with-a-much-longer-name".to_string()]);
-        assert!(
-            names.iter().all(|n| !n.contains('\0')),
-            "a name must be cut at its terminator, not padded with NULs: {names:?}"
-        );
-    }
-
-    #[test]
-    fn subkeys_of_a_key_with_no_children_is_empty() {
-        let (key, _cleanup) = fresh_test_key("no-children", &[]);
-        assert_eq!(key.subkeys(), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_literal_executable_path_matches_whatever_its_case() {
-        let exe = Path::new(r"C:\Users\me\AppData\Local\Programs\GitHoot\githoot.exe");
-        assert!(refers_to(r"C:\Users\me\AppData\Local\Programs\GitHoot\githoot.exe", exe));
-        assert!(refers_to(r"c:\users\me\appdata\local\programs\githoot\GITHOOT.EXE", exe));
-    }
-
-    /// The form Windows uses for anything under a shell folder: `{FOLDERID_ProgramFilesX64}\…`.
-    #[test]
-    fn a_known_folder_token_matches_by_its_tail() {
-        let exe = Path::new(r"C:\Program Files\GitHoot\githoot.exe");
-        assert!(refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\GitHoot\githoot.exe", exe));
-    }
-
-    /// The tail has to match on a separator, or `…\tray.exe` would be satisfied by `…\githoot.exe`
-    /// and this app would promote a different program's icon.
-    #[test]
-    fn a_tail_that_is_not_on_a_separator_boundary_does_not_match() {
-        let exe = Path::new(r"C:\Program Files\GitHoot\githoot.exe");
-        assert!(!refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\GitHoot\tray.exe", exe));
-    }
-
-    #[test]
-    fn another_program_does_not_match() {
-        let exe = Path::new(r"C:\Program Files\GitHoot\githoot.exe");
-        assert!(!refers_to(r"C:\Program Files\Docker\Docker Desktop.exe", exe));
-        assert!(!refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\Docker\Docker Desktop.exe", exe));
-        // A token with nothing after it names no program at all and must never match everything.
-        assert!(!refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}", exe));
-        assert!(!refers_to(r"{6D809377-6AF0-444B-8957-A3773F02200E}\", exe));
-        assert!(!refers_to("", exe));
-    }
-
-    /// A sweep against the real `NotifyIconSettings` for an executable that is certainly not in it. It
-    /// must come back `NotListedYet` — the outcome that makes the caller wait and try again — and must
-    /// not write anything. On a CI runner, and on Windows 10, the key is absent entirely, which is
-    /// `Failed` and is equally correct: that is how this feature detects it does not apply.
-    #[test]
-    fn a_sweep_for_an_unlisted_executable_writes_nothing() {
-        let nowhere = Path::new(r"C:\definitely\not\a\tray\app\nothing-here.exe");
-        match promote_once(nowhere) {
-            Promotion::NotListedYet => {}
-            Promotion::Failed(e) => {
-                assert!(e.contains(NOTIFY_ICON_SETTINGS), "unexpected failure: {e}");
-            }
-            other => panic!("an executable with no tray icon must not be promoted: {other:?}"),
-        }
     }
 
     /// The one path no automated test may take: `enable` writes a **real** startup entry for the

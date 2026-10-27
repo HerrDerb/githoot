@@ -927,15 +927,6 @@ fn main() {
             .build()
             .map_err(|e| format!("Failed to create tray icon: {e}"))?;
 
-        // Here rather than at either call site, because this is the exact moment the shell has been
-        // handed an icon — which is what has to have happened before Windows will have a visibility
-        // setting for it to read. Returns immediately; it waits for the shell on its own thread.
-        //
-        // Windows only. macOS has no overflow flyout: a status item is either in the menu bar or it
-        // does not exist, so there is nothing to promote.
-        #[cfg(target_os = "windows")]
-        crate::autostart::promote_tray_icon();
-
         Ok(Tray {
             tray_icon,
             icons,

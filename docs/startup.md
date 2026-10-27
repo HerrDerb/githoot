@@ -50,37 +50,19 @@ used the tray's own **Quit**.
 
 ## Windows only: keeping the icon out of the overflow flyout
 
-Windows 11 hides new tray icons in the **^** flyout by default. An owl nobody can see cannot do the one
-job this app has, so on Windows GitHoot asks the shell to keep its icon on the taskbar.
+Windows 11 hides new tray icons behind the **^** arrow by default, and an owl nobody can see cannot do
+the one job this app has. So right after the startup question, a first run on Windows says so and offers
+to open the taskbar settings (`ms-settings:taskbar`). There you turn GitHoot on under **Settings ›
+Personalisation › Taskbar › Other system tray icons**. On Windows 10 the same page has **Select which
+icons appear on the taskbar**.
 
-This is **not** part of the prompt above and is never asked about. It is cosmetic, it is undone in two
-clicks, and a second dialog on a first run would cost more attention than the decision is worth.
+**GitHoot does not change this setting itself.** Microsoft provides no supported call for an app to
+promote its own icon, because it is meant to be your choice. Earlier versions wrote the undocumented
+`HKCU\Control Panel\NotifyIconSettings` key directly. That was dropped: quietly editing the shell's
+settings is the kind of behaviour antivirus models score as suspicious, and the switch is two clicks
+away.
 
-**How it works.** Windows 11 records per-icon visibility under
-`HKCU\Control Panel\NotifyIconSettings\<hash>`. Each subkey holds an `ExecutablePath` naming the
-program, and — once anything has decided — an `IsPromoted` DWORD: `1` on the taskbar, `0` in the
-flyout. GitHoot finds the subkey whose `ExecutablePath` is its own and sets `IsPromoted=1`.
-
-**It only ever fills in a blank.** If `IsPromoted` already exists, whatever its value, it is left
-alone. So hiding the icon yourself sticks (that writes `0`), and this can never fight a choice you have
-made. To change it: **Settings › Personalisation › Taskbar › Other system tray icons**.
-
-**Three honest limitations:**
-
-- **It is undocumented.** Microsoft provides no Win32 call for an app to promote its own icon — it is
-  meant to be your choice. This key was verified by hand on Windows 11 build 26200, and a future
-  Windows could move or rename it. If it does, the log says the key could not be opened and nothing
-  else changes.
-- **It may not apply until your next sign-in.** The shell reads the setting when it builds the tray, so
-  the icon can stay in the flyout for the rest of the current session.
-- **Windows 10 and older are not supported for this.** There the same setting lives in
-  `TrayNotify\IconStreams`, an undocumented obfuscated blob that cannot be edited without killing
-  `explorer.exe`. That is not worth doing to anyone's machine, so on Windows 10 the icon stays wherever
-  Windows puts it and the log says the key is absent.
-
-Because it fills in blanks rather than tracking a first run, this runs on every start, not just the
-first. That makes it self-healing: the subkey is created by the shell a moment *after* the icon appears,
-so a first run that got there too early simply succeeds on the next one.
+Declining, or a dialog that cannot be shown, opens nothing, and nothing asks again.
 
 ## What the log says
 
@@ -90,7 +72,5 @@ fail in a way that stops the app.
 ```
 registered to start at sign-in: C:\Users\you\AppData\Local\Programs\GitHoot\githoot.exe
 not starting at sign-in (declined, or no dialog could be shown) — nothing was registered
-tray icon set to always show (1 matching entry under Control Panel\NotifyIconSettings); Windows may only apply it from the next sign-in
-leaving the tray icon's visibility alone — it has already been decided
-not promoting the tray icon: could not open HKCU\Control Panel\NotifyIconSettings (2)
+not opening the taskbar settings, so the owl may sit behind the ^ arrow
 ```

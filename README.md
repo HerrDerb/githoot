@@ -74,9 +74,8 @@ repos, it has to be [**installed** on that org](docs/pr-status.md#why-a-github-a
 **A first run also asks once whether to start GitHoot when you sign in** — Windows `Run` value, XDG
 autostart entry or macOS Launch Agent, for your account only, removable with your OS's own startup
 tool. Declining writes nothing and nothing asks again; a prompt that cannot be shown counts as no. On
-Windows the icon is also asked to stay on the taskbar rather than in the **^** overflow flyout, which
-only ever fills in a blank and never overrides a choice you have made →
-[the whole thing](docs/startup.md).
+Windows it then offers to open the taskbar settings, where you keep the owl out of the **^** overflow
+flyout yourself → [the whole thing](docs/startup.md).
 
 **macOS:** the bundle is ad-hoc signed, not notarized, so clear the quarantine flag once —
 `xattr -dr com.apple.quarantine githoot.app`. The bare binary takes a Dock icon, so use

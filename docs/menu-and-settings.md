@@ -254,7 +254,7 @@ means that setting's default.
 
 **Two things are deliberately not keys here:** whether GitHoot starts when you sign in, and whether its
 icon sits on the Windows taskbar or in the overflow flyout. Both are stored by the operating system
-already — a registry value, an autostart entry, a Launch Agent — so a copy in this file would be a
+already — a registry value, an autostart entry, a Launch Agent, the taskbar settings — so a copy in this file would be a
 second source of truth to keep in step with reality. That is why **Start at sign-in** is a checkbox and
 not a key: it reads the OS entry every time the menu opens and writes the same one when you click, so
 there is still exactly one record of the answer. The startup question is also asked once, on a first run

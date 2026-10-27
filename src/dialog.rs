@@ -374,6 +374,16 @@ pub fn confirm_autostart(title: &str, msg: &str) -> bool {
     confirm(title, msg, "Start automatically", "Leave it off", false)
 }
 
+/// Asks whether to open the taskbar settings, so the user can keep the tray icon out of the overflow
+/// flyout themselves.
+///
+/// `on_unavailable: false`: opening a Settings window nobody asked for is worse than leaving the hint
+/// in the log. Windows only, since that is the only place with a flyout to escape.
+#[cfg(target_os = "windows")]
+pub fn confirm_taskbar_settings(title: &str, msg: &str) -> bool {
+    confirm(title, msg, "Open taskbar settings", "Not now", false)
+}
+
 /// Reports an update outcome the user should see, without ever blocking on stdin.
 ///
 /// A blocking dialog's Linux arm waits on `stdin().read_line`, which on a machine launched from a
