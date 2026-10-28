@@ -588,10 +588,13 @@ pub fn advanced_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(u
 /// One row of the muted page: a live mute, and the pull request it names if a bar still holds it.
 pub struct MutedRow<'a> {
     pub key: &'a str,
-    pub until: u64,
+    pub mute: &'a crate::mute::Mute,
     /// The bar it was found in, the entry, and that portal's link prefix. `None` when no bar holds it
     /// any more, typically because it was merged or closed while muted.
     pub found: Option<(crate::state::PrAxis, &'a crate::portal::types::PrEntry, &'a str)>,
+    /// The link prefix of the portal the mute names, so a row no bar holds can still link its title.
+    /// `None` when the mute names no portal, or one that is no longer configured.
+    pub gone_prefix: Option<&'a str>,
 }
 
 /// Every muted pull request in one place, across all three bars, each with Unmute.
@@ -625,18 +628,34 @@ pub fn muted_page(site: &Site, rows: &[MutedRow], now_unix: u64) -> String {
         h.push_str(&format!("<h2 class=\"section\">{}</h2>\n", esc(crate::page::heading(axis))));
         for r in here {
             let (_, e, prefix) = r.found.expect("filtered to found rows");
-            h.push_str(&crate::page::card(e, prefix, now_unix, &unmute(r.key, r.until)));
+            h.push_str(&crate::page::card(e, prefix, now_unix, &unmute(r.key, r.mute.until)));
         }
     }
     let gone: Vec<_> = rows.iter().filter(|r| r.found.is_none()).collect();
     if !gone.is_empty() {
         h.push_str("<h2 class=\"section\">No longer in any bar</h2>\n");
         h.push_str(
-            "<p class=\"sub\">Merged, closed, or simply not waiting on you right now. The mute ends by itself; \
-             unmute it to have it count as new the next time it turns up.</p>\n",
+            "<p class=\"sub\">Merged, closed, or simply not waiting on you right now. Each is removed a week after \
+             it left, or when its mute ends; unmute it to have it count as new the next time it turns up.</p>\n",
         );
         for r in gone {
-            h.push_str(&format!("<div class=\"card\"><h2><code>{}</code></h2>{}</div>\n", esc(r.key), unmute(r.key, r.until)));
+            let m = r.mute;
+            // A URL that is not the portal's own is shown but not offered as a link, as on every card.
+            let link = m.url.as_deref().zip(r.gone_prefix).and_then(|(url, prefix)| crate::page::safe_url(url, prefix));
+            let headline = match (m.title.as_deref(), link) {
+                (Some(title), Some(url)) => format!("<a href=\"{}\" rel=\"noreferrer\">{}</a>", esc(url), esc(title)),
+                (Some(title), None) => esc(title),
+                (None, Some(url)) => format!("<a href=\"{}\" rel=\"noreferrer\">{}</a>", esc(url), esc(url)),
+                (None, None) => format!("<code>{}</code>", esc(r.key)),
+            };
+            let meta = match m.removed_at() {
+                Some(at) => format!(
+                    "<div class=\"meta\"><span>Gone from your bars</span><span>removed in {}</span></div>",
+                    esc(&crate::mute::remaining(at, now_unix))
+                ),
+                None => String::new(),
+            };
+            h.push_str(&format!("<div class=\"card\"><h2>{headline}</h2>{meta}{}</div>\n", unmute(r.key, m.until)));
         }
     }
     layout(site, &Place::Muted, "Muted pull requests", None, &h)
@@ -670,6 +689,41 @@ pub(crate) mod tests {
 
     pub fn site() -> Site<'static> {
         Site { token: "tok", nonce: "", portals: vec![("github".into(), "GitHub".into(), true)], installed: vec!["herdr"], muted: 2, update: None }
+    }
+
+    /// A muted pull request that left every bar keeps the title and link it had when it was muted,
+    /// says it is gone, and says when it will be dropped. Unmute still names it by key.
+    #[test]
+    fn a_gone_mute_keeps_its_title_and_link_and_says_when_it_goes() {
+        let now = 1_758_499_200;
+        let about = crate::mute::About {
+            portal: "github".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            title: Some("Teach the owl to <hoot>".into()),
+        };
+        let mut mute = crate::mute::Mute::new(now + 30 * 86_400, Some(about));
+        mute.gone_since = Some(now - 86_400);
+        let rows = [MutedRow { key: "PR_kwDOx", mute: &mute, found: None, gone_prefix: Some("https://github.com/") }];
+
+        let html = muted_page(&site(), &rows, now);
+        assert!(
+            html.contains(r#"<a href="https://github.com/o/r/pull/7" rel="noreferrer">Teach the owl to &lt;hoot&gt;</a>"#),
+            "{html}"
+        );
+        assert!(html.contains("Gone from your bars"), "{html}");
+        assert!(html.contains("removed in 6 days"), "{html}");
+        assert!(!html.contains("<code>PR_kwDOx</code>"), "the bare key is only the fallback: {html}");
+        assert!(html.contains(r#"name="key" value="PR_kwDOx""#), "Unmute still names it: {html}");
+    }
+
+    /// A line from an older version has no title to show, so the key stays the headline.
+    #[test]
+    fn a_gone_mute_without_a_title_still_shows_its_key() {
+        let now = 1_758_499_200;
+        let mute = crate::mute::Mute::new(now + 86_400, None);
+        let rows = [MutedRow { key: "PR_old", mute: &mute, found: None, gone_prefix: None }];
+        let html = muted_page(&site(), &rows, now);
+        assert!(html.contains("<code>PR_old</code>"), "{html}");
     }
 
     /// A section of checkboxes and choices saves as it changes: the form says so, its Save button is

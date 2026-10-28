@@ -138,17 +138,23 @@ offering **Unmute**.
 
 **Every muted pull request is on one page too**, `/<token>/muted`, the **Muted** tab on every one of
 GitHoot's own pages, and linked from the Muted heading of any bar. It is the only way to
-a muted pull request whose bar is otherwise empty, because an empty bar's menu entry is hidden. Pull
-requests no bar holds any more, merged or closed while muted, are listed by id so they can still be
-unmuted; their mute ends by itself otherwise.
+a muted pull request whose bar is otherwise empty, because an empty bar's menu entry is hidden.
+
+**A muted pull request that leaves every bar keeps its title and link.** Merged, closed or simply no
+longer waiting on you, it is listed under **No longer in any bar** as it was when you muted it, marked
+**Gone from your bars**, with how long until it is removed. It is removed **7 days after it left**, or
+when its mute ends if that is sooner. It is only marked gone after a poll in which every bar of its
+portal answered, so a failed poll never counts as leaving, and if it comes back first it is simply
+muted again. Mutes from before this change have no title and are still listed by id.
 
 **It comes back as a new pull request.** When the mute ends, by the link or by time, the pull request
 arrives as if never seen: the bar lights and the owl hoots. A mute is a snooze, and a snooze that
 ended in silence would be a way to lose a review.
 
 **Mutes are kept on disk**, in `~/.githoot/muted.txt`, one pull request per line, because a mute
-measured in days has to survive the restarts a self-update causes. Expired lines are dropped whenever
-the file is read or written. The links are forms, not links, so a mute is a `POST` behind the same
+measured in days has to survive the restarts a self-update causes. A line is the key, when the mute
+ends, when it left every bar, its portal, its link and its title, separated by tabs. Only the first two
+are required. Expired lines are dropped whenever the file is read or written. The links are forms, not links, so a mute is a `POST` behind the same
 `Origin` check as the settings pages, and it accepts only the three offered durations and only a pull
 request that is on the page right now. The icon catches up within seconds, because a mute wakes the
 poll loop.
