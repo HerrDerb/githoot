@@ -460,6 +460,21 @@ impl PortalRun {
         }
     }
 
+    /// Every pull request key in this portal's bars, muted ones included, or `None` unless every bar
+    /// in play has a confirmed list. What `mute::observe` needs to tell "left" from "could not ask".
+    fn confirmed_keys(&self) -> Option<std::collections::HashSet<String>> {
+        let axes: Vec<PrAxis> = PrAxis::ALL.into_iter().filter(|&a| self.state.pr_in_play(a)).collect();
+        if !self.live || axes.is_empty() {
+            return None;
+        }
+        let mut keys = std::collections::HashSet::new();
+        for axis in axes {
+            let list = self.state.pr_entries(axis)?;
+            keys.extend(list.iter().chain(self.state.pr_muted(axis)).map(|e| e.key().to_string()));
+        }
+        Some(keys)
+    }
+
     /// One cycle's worth of asking this portal: the axes in play, then, every few minutes, its
     /// own view of its health.
     fn cycle(&mut self) {
@@ -979,6 +994,10 @@ fn run_poll_loop(
 
         for run in &mut runs {
             run.cycle();
+            // Muted pull requests that left every bar start their week's countdown here. See `mute`.
+            if let Some(present) = run.confirmed_keys() {
+                crate::mute::observe(&run.portal.info().id.0, &present, unix_now());
+            }
         }
 
         // Published before `emit` for the same reason the outage check is: the menu entries the URLs
@@ -1944,5 +1963,30 @@ mod tests {
         assert_eq!(snapshot[0].axes[0].as_ref().map(Vec::len), Some(1));
         assert_eq!(snapshot[1].axes[0].as_ref().map(Vec::len), Some(2));
         assert!(snapshot[1].axes[1].is_none(), "nobody answered this axis yet");
+    }
+
+    /// A muted pull request is only marked gone on a complete answer: every bar in play confirmed.
+    /// One bar still unanswered could be holding it, so the run says nothing at all.
+    #[test]
+    fn confirmed_keys_need_every_bar_in_play_to_have_answered() {
+        use crate::portal::types::PrEntry;
+        let listed = |urls: &[&str]| {
+            response(PollResult::Fresh {
+                present: !urls.is_empty(),
+                count: Some(urls.len() as u32),
+                prs: Some(urls.iter().map(|u| PrEntry::stub(u)).collect()),
+            })
+        };
+        let fake = FakePortal::default()
+            .script(PollOutcome { axes: [Some(listed(&["https://a.example/1"])), None, None] })
+            .script(PollOutcome { axes: [Some(listed(&["https://a.example/1"])), Some(listed(&["https://a.example/2"])), None] });
+        let mut run = ready(fake, [true, true, false]);
+
+        assert_eq!(run.confirmed_keys(), None, "nothing asked yet");
+        run.cycle();
+        assert_eq!(run.confirmed_keys(), None, "the second bar has not answered");
+        run.cycle();
+        let keys = run.confirmed_keys().expect("both bars in play answered");
+        assert_eq!(keys, ["https://a.example/1".to_string(), "https://a.example/2".to_string()].into());
     }
 }

@@ -1150,13 +1150,16 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
             let snapshots: Vec<_> = PrAxis::ALL.map(|a| (a, scheduler::pr_snapshot(a))).into_iter().collect();
             let rows: Vec<crate::ui::MutedRow> = mutes
                 .iter()
-                .map(|(key, until)| crate::ui::MutedRow {
+                .map(|(key, mute)| crate::ui::MutedRow {
                     key,
-                    until: *until,
+                    mute,
                     found: snapshots.iter().find_map(|(axis, snap)| {
                         snap.groups.iter().find_map(|(info, list)| {
                             list.as_ref()?.iter().find(|e| e.key() == key).map(|e| (*axis, e, info.link_prefix.as_str()))
                         })
+                    }),
+                    gone_prefix: snapshots.iter().flat_map(|(_, snap)| &snap.groups).find_map(|(info, _)| {
+                        (Some(info.id.0.as_str()) == mute.portal.as_deref()).then_some(info.link_prefix.as_str())
                     }),
                 })
                 .collect();
@@ -1607,16 +1610,15 @@ fn mute_action(stream: &mut TcpStream, head: &str, request: &Request, token: &st
     let Some(key) = form.get("key").map(|k| k.to_string()) else {
         return respond(stream, 400, "text/plain; charset=utf-8", b"No pull request", true);
     };
-    let on_page = scheduler::pr_snapshot(axis)
-        .groups
-        .iter()
-        .filter_map(|(_, list)| list.as_ref())
-        .flatten()
-        .any(|e| e.key() == key);
-    if !on_page {
+    // What the mute remembers comes from the entry on the page, never from the form.
+    let about = scheduler::pr_snapshot(axis).groups.iter().find_map(|(info, list)| {
+        let e = list.as_ref()?.iter().find(|e| e.key() == key)?;
+        Some(crate::mute::About { portal: info.id.0.clone(), url: e.url.clone(), title: e.title.clone() })
+    });
+    let Some(about) = about else {
         return respond(stream, 404, "text/plain; charset=utf-8", b"Not on this page", true);
-    }
-    match crate::mute::set(&key, days, unix_now()) {
+    };
+    match crate::mute::set(&key, days, unix_now(), Some(about)) {
         Ok(()) => {
             infoln!("{} {} on {}", if days == 0 { "unmuted" } else { "muted" }, key, axis.slug());
             if let Some(wake) = SETTINGS.get().and_then(|s| s.wake.lock().ok()) {
@@ -1647,7 +1649,7 @@ fn unmute_action(stream: &mut TcpStream, head: &str, request: &Request, token: &
     if !crate::mute::all(now).iter().any(|(k, _)| *k == key) {
         return respond(stream, 404, "text/plain; charset=utf-8", b"Not muted", true);
     }
-    match crate::mute::set(&key, 0, now) {
+    match crate::mute::set(&key, 0, now, None) {
         Ok(()) => {
             infoln!("unmuted {key} from the muted page");
             if let Some(wake) = SETTINGS.get().and_then(|s| s.wake.lock().ok()) {
