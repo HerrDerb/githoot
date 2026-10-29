@@ -1090,9 +1090,12 @@ pub(crate) mod tests {
     #[test]
     fn a_settings_page_ends_with_the_owl_and_the_repository() {
         let html = layout(&site(), &Place::General, "General", None, "");
-        assert!(html.contains(r#"<div class="brand"><img src="/tok/owl.png""#), "{html}");
-        assert!(html.contains(r#"<a href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#), "{html}");
-        assert!(html.ends_with("</div>\n</main>\n</body>\n</html>\n"), "{html}");
+        assert!(html.ends_with(concat!(
+            r#"<footer><a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
+            r#"<img src="/tok/owl.png" alt="" width="14" height="14">GitHoot</a></footer>"#,
+            "\n</main>\n</body>\n</html>\n",
+        )), "{html}");
+        assert!(!html.contains("class=\"brand\""), "the old two-part line is gone: {html}");
     }
 
     #[test]

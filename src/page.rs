@@ -218,9 +218,6 @@ vertical-align:baseline}\
 text-align:center;color:var(--dim)}\
 footer{margin-top:2rem;color:var(--dim);font-size:.78rem;text-align:center}\
 footer a,.empty a{color:var(--dim)}\
-.brand{display:flex;justify-content:center;align-items:center;gap:.45rem;margin-top:.9rem;\
-font-size:.78rem;color:var(--dim)}.brand img{border-radius:4px}\
-.brand a{color:var(--dim);text-decoration:none}.brand a:hover{color:var(--ink);text-decoration:underline}\
 .owl-link{white-space:nowrap}.owl-link img{vertical-align:-.2em;margin-right:.25em;border-radius:3px}\
 .section{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
 margin:1.5rem 0 .5rem;font-weight:600}\
@@ -599,11 +596,8 @@ pub fn axis_page(
         .collect();
     // The footer already names GitHoot, so the name is the link to where it lives; see `page_end`.
     h.push_str(&format!(
-        "<footer>Rendered locally by <a class=\"owl-link\" href=\"{}\" rel=\"noreferrer\">\
-         <img src=\"/{}/owl.png\" alt=\"\" width=\"14\" height=\"14\">GitHoot</a> from its last poll, \
-         and kept current without a reload.",
-        crate::update::REPOSITORY_URL,
-        esc(token)
+        "<footer>Rendered locally by {} from its last poll, and kept current without a reload.",
+        owl_link(token)
     ));
     for inbox in inboxes {
         h.push_str(&format!(" · {inbox}"));
@@ -660,16 +654,21 @@ pub fn settings_unavailable(token: &str) -> String {
 /// The tags `shell_with` opened.
 const PAGE_CLOSE: &str = "</main>\n</body>\n</html>\n";
 
-/// How a page without a footer of its own ends: the owl and where GitHoot lives, so a page found in
-/// a tab days later says what made it. The PR pages say it in their footer instead.
-pub(crate) fn page_end(token: &str) -> String {
+/// The owl and the name, linked to where GitHoot lives, so a page found in a tab days later says
+/// what made it. One link for every page, so every footer wears it the same way.
+fn owl_link(token: &str) -> String {
     format!(
-        "<div class=\"brand\"><img src=\"/{}/owl.png\" alt=\"\" width=\"16\" height=\"16\">\
-         <a href=\"{url}\" rel=\"noreferrer\">GitHoot · {}</a></div>\n{PAGE_CLOSE}",
-        esc(token),
-        crate::update::REPOSITORY_URL.trim_start_matches("https://"),
-        url = crate::update::REPOSITORY_URL,
+        "<a class=\"owl-link\" href=\"{}\" rel=\"noreferrer\">\
+         <img src=\"/{}/owl.png\" alt=\"\" width=\"14\" height=\"14\">GitHoot</a>",
+        crate::update::REPOSITORY_URL,
+        esc(token)
     )
+}
+
+/// How a page without a footer of its own ends: one holding only the owl link. The PR pages carry
+/// it in their own footer instead.
+pub(crate) fn page_end(token: &str) -> String {
+    format!("<footer>{}</footer>\n{PAGE_CLOSE}", owl_link(token))
 }
 
 /// Everything both kinds of page share: head, stylesheet, owl and heading.
@@ -1285,9 +1284,14 @@ mod tests {
         assert!(html.ends_with("</script>\n</main>\n</body>\n</html>\n"), "got: {html}");
     }
 
+    /// The same owl link as the PR page's footer, in a footer of its own: one line, one style.
     #[test]
     fn the_settings_unavailable_page_ends_with_the_owl_too() {
-        assert!(settings_unavailable("deadbeef").contains(r#"<div class="brand"><img src="/deadbeef/owl.png""#));
+        assert!(settings_unavailable("deadbeef").ends_with(concat!(
+            r#"<footer><a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
+            r#"<img src="/deadbeef/owl.png" alt="" width="14" height="14">GitHoot</a></footer>"#,
+            "\n</main>\n</body>\n</html>\n",
+        )));
     }
 
     // ── Live refresh ──────────────────────────────────────────────────────────
