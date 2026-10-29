@@ -213,7 +213,7 @@ pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, bod
     if !site.nonce.is_empty() {
         h.push_str(&format!("<script nonce=\"{}\">{SITE_SCRIPT}</script>\n", esc(site.nonce)));
     }
-    h.push_str("</main>\n</body>\n</html>\n");
+    h.push_str(&crate::page::page_end(site.token));
     h
 }
 
@@ -1085,6 +1085,14 @@ pub(crate) mod tests {
         assert!(html.contains(r#"<h1 class="crumbs"><a href="/tok/general">Settings</a><span class="sep" aria-hidden="true">›</span><span>General</span></h1>"#), "{html}");
         let html = layout(&site(), &Place::Portal("github".into()), "<GitHub>", None, "");
         assert!(html.contains(r#"<a href="/tok/portals">Portals</a><span class="sep" aria-hidden="true">›</span><span>&lt;GitHub&gt;</span>"#), "escaped: {html}");
+    }
+
+    #[test]
+    fn a_settings_page_ends_with_the_owl_and_the_repository() {
+        let html = layout(&site(), &Place::General, "General", None, "");
+        assert!(html.contains(r#"<div class="brand"><img src="/tok/owl.png""#), "{html}");
+        assert!(html.contains(r#"<a href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#), "{html}");
+        assert!(html.ends_with("</div>\n</main>\n</body>\n</html>\n"), "{html}");
     }
 
     #[test]
