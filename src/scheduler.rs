@@ -293,6 +293,9 @@ pub enum Wake {
     /// The settings page's Uninstall: `config.txt` already has the section switched off; drop the
     /// run. The saved credential stays on disk for a reinstall.
     PortalRemoved(PortalId),
+    /// Onboarding is waiting for the App to be installed: ask the portal again, quietly, and bring its
+    /// bars up if it can see now. Sent by each reload of the page, so an install shows without a restart.
+    RecheckInstall(PortalId),
     /// The user picked the Settings item, which has already opened `config.txt` in whatever handles it.
     ///
     /// Routed through here rather than started in the click handler because the watcher needs the same
@@ -679,6 +682,20 @@ fn tray_update(runs: &[PortalRun], update_available: Option<&str>) -> Update {
 
 /// Puts a run where the run for the same portal stood, or at the end. Never two runs for one id,
 /// which would poll the same thing twice and hoot twice for it.
+/// Whether to open onboarding at startup: some portal is waiting for a sign-in and none is signed in.
+///
+/// A GitHub sign-in without the App counts as signed in: its own install step opens onboarding, and
+/// counting it here too would open it twice. A portal switched off in `config.txt` waits for nothing,
+/// and with no portal at all there is nothing to sign in to.
+pub(crate) fn needs_onboarding(credentials: &[CredentialState]) -> bool {
+    let signed_in = |c: &CredentialState| match c {
+        CredentialState::Ready => true,
+        CredentialState::Off(reason) => reason == crate::portal::github::auth::PR_NOT_INSTALLED,
+        CredentialState::NeedsAuth => false,
+    };
+    credentials.contains(&CredentialState::NeedsAuth) && !credentials.iter().any(signed_in)
+}
+
 fn put_run(runs: &mut Vec<PortalRun>, run: PortalRun) {
     match runs.iter().position(|r| r.portal.info().id == run.portal.info().id) {
         Some(i) => runs[i] = run,
@@ -918,6 +935,11 @@ fn run_poll_loop(
         .into_iter()
         .map(|(portal, credential)| PortalRun::new(portal, credential, pr_enabled))
         .collect();
+    // Nobody signed in anywhere: a first start, or a sign-out that was never followed by another. The
+    // owl alone cannot explain what to do about that; onboarding can.
+    if needs_onboarding(&runs.iter().map(|run| run.credential.clone()).collect::<Vec<_>>()) {
+        crate::serve::open_onboarding();
+    }
 
     // Published once before the first cycle, with no lists yet, so a page opened or a menu clicked
     // in the first second already knows which portals exist and where their inboxes are. `polled_at`
@@ -1184,6 +1206,19 @@ fn run_poll_loop(
                                         PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
                                     }
                                 }
+                            }
+                        }
+                        Wake::RecheckInstall(id) => {
+                            let not_installed =
+                                CredentialState::Off(crate::portal::github::auth::PR_NOT_INSTALLED.to_string());
+                            if let Some(i) = runs.iter().position(|run| run.portal.info().id == id && run.credential == not_installed)
+                                && runs[i].portal.recheck_install() == Some(CredentialState::Ready)
+                            {
+                                infoln!("{}: the App is installed now", id.0);
+                                // In its own place: the order of `runs` is the order the page lists portals in.
+                                let run = runs.remove(i);
+                                runs.insert(i, PortalRun::new(run.portal, CredentialState::Ready, pr_enabled));
+                                PR_URLS.lock().expect("PR-URLs lock poisoned").portals = snapshot_of(&runs);
                             }
                         }
                         Wake::PortalRemoved(id) => {
@@ -1554,6 +1589,21 @@ mod tests {
     use super::*;
 
     const STEADY: Duration = Duration::from_secs(60);
+
+    /// Onboarding opens when no portal is signed in. A GitHub sign-in without the App is signed in:
+    /// its own step opens onboarding anyway, so it must not be counted twice. Nothing configured is
+    /// nothing to sign in to.
+    #[test]
+    fn onboarding_opens_when_no_portal_is_signed_in() {
+        let not_installed = CredentialState::Off(crate::portal::github::auth::PR_NOT_INSTALLED.to_string());
+        let off = CredentialState::Off("PR status off in config.txt".to_string());
+        assert!(needs_onboarding(&[CredentialState::NeedsAuth]));
+        assert!(needs_onboarding(&[CredentialState::NeedsAuth, off.clone()]));
+        assert!(!needs_onboarding(&[CredentialState::NeedsAuth, CredentialState::Ready]));
+        assert!(!needs_onboarding(&[not_installed]));
+        assert!(!needs_onboarding(&[off]));
+        assert!(!needs_onboarding(&[]));
+    }
 
     fn burst_of(secs: &[u64]) -> VecDeque<Duration> {
         secs.iter().map(|s| Duration::from_secs(*s)).collect()

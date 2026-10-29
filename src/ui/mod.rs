@@ -28,6 +28,7 @@
 //! the muted page, nothing else.
 
 pub mod integrations;
+pub mod welcome;
 pub mod portals;
 pub mod updates;
 
@@ -182,6 +183,12 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
 /// The title is a breadcrumb trail from Settings to `title`, the page's own name: every step a link
 /// but the last, so a page deep in a collection says where it is and how to get back.
 pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, body: &str) -> String {
+    layout_with_note(site, place, title, refresh, body, "")
+}
+
+/// `layout`, with a closing word of the page's own: `note` is HTML, already escaped, said on the
+/// footer's one line before the owl.
+pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option<u32>, body: &str, note: &str) -> String {
     let mut trail: Vec<(String, Option<String>)> = vec![("Settings".to_string(), Some(Place::General.path()))];
     if let Some(parent) = place.parent() {
         let label = match parent {
@@ -209,11 +216,20 @@ pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, bod
         "site-main",
         Some(&heading),
     );
-    h.push_str(&format!("<div class=\"site\">{}<div class=\"pane\">\n{body}</div></div>\n", sidebar(site, place)));
+    // The footer closes the content column, not the page: centred under sidebar and content together it
+    // belonged to neither. A sentence, like the PR pages' footer, because the owl alone read as a
+    // stray link. "To this machine only" because the listener is loopback-only, behind the token.
+    let note = if note.is_empty() { String::new() } else { format!("{note} · ") };
+    h.push_str(&format!(
+        "<div class=\"site\">{}<div class=\"pane\">\n{body}<footer>{note}Served locally by {}, to this machine \
+         only.</footer></div></div>\n",
+        sidebar(site, place),
+        crate::page::owl_link(site.token)
+    ));
     if !site.nonce.is_empty() {
         h.push_str(&format!("<script nonce=\"{}\">{SITE_SCRIPT}</script>\n", esc(site.nonce)));
     }
-    h.push_str(&crate::page::page_end(site.token));
+    h.push_str(crate::page::PAGE_CLOSE);
     h
 }
 
@@ -592,12 +608,12 @@ pub fn general_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(us
 pub fn advanced_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(usize, String)>) -> String {
     let value = |s: &Setting| crate::config::value_of(cfg, s.key);
     let body = format!(
-        "<p class=\"sub lead\">Settings you rarely need. Both take effect after a restart.</p>\n{}\
-         <footer>Written to <code>config.txt</code>, one line per changed setting — your comments and any \
-         keys this version has never heard of are left alone.</footer>\n",
+        "<p class=\"sub lead\">Settings you rarely need. Both take effect after a restart.</p>\n{}",
         sections(site.token, &Place::Advanced, crate::config::ADVANCED, &value, flash)
     );
-    layout(site, &Place::Advanced, "Advanced", None, &body)
+    let note = "Written to <code>config.txt</code>, one line per changed setting — your comments and any \
+                keys this version has never heard of are left alone.";
+    layout_with_note(site, &Place::Advanced, "Advanced", None, &body, note)
 }
 
 /// One row of the muted page: a live mute, and the pull request it names if a bar still holds it.
@@ -951,6 +967,7 @@ pub(crate) mod tests {
         }
         assert!(html.contains(r#"class="child""#), "items sit under their collection");
         assert!(html.contains(">Muted (2)<"));
+        assert!(!html.contains("welcome"), "the welcome page pops up once and is not a setting: {html}");
     }
 
     /// Where you are is marked twice: the page itself, and the collection it sits in.
@@ -1087,15 +1104,28 @@ pub(crate) mod tests {
         assert!(html.contains(r#"<a href="/tok/portals">Portals</a><span class="sep" aria-hidden="true">›</span><span>&lt;GitHub&gt;</span>"#), "escaped: {html}");
     }
 
+    /// In the content column, under what it closes, rather than centred under sidebar and content
+    /// together, where it belonged to neither and looked lost. A sentence, like the PR pages' footer:
+    /// the owl alone read as a stray link.
     #[test]
-    fn a_settings_page_ends_with_the_owl_and_the_repository() {
-        let html = layout(&site(), &Place::General, "General", None, "");
-        assert!(html.ends_with(concat!(
-            r#"<footer><a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
-            r#"<img src="/tok/owl.png" alt="" width="14" height="14">GitHoot</a></footer>"#,
-            "\n</main>\n</body>\n</html>\n",
+    fn a_settings_page_ends_its_content_with_the_owl_and_the_repository() {
+        let html = layout(&site(), &Place::General, "General", None, "<p>body</p>");
+        assert!(html.contains(concat!(
+            "<p>body</p>",
+            r#"<footer>Served locally by <a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
+            r#"<img src="/tok/owl.png" alt="" width="14" height="14">GitHoot</a>, to this machine only.</footer>"#,
+            "</div></div>\n",
         )), "{html}");
-        assert!(!html.contains("class=\"brand\""), "the old two-part line is gone: {html}");
+        assert!(html.ends_with("\n</main>\n</body>\n</html>\n"), "{html}");
+        assert_eq!(html.matches("<footer>").count(), 1, "{html}");
+    }
+
+    /// A page with a word of its own to close on says it in the same one line, before the owl.
+    #[test]
+    fn a_page_note_shares_the_owl_footer_line() {
+        let html = layout_with_note(&site(), &Place::Advanced, "Advanced", None, "<p>body</p>", "Written to <code>config.txt</code>.");
+        assert!(html.contains(r#"<footer>Written to <code>config.txt</code>. · Served locally by <a class="owl-link""#), "{html}");
+        assert_eq!(html.matches("<footer>").count(), 1, "{html}");
     }
 
     #[test]

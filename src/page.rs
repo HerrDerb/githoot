@@ -364,7 +364,41 @@ letter-spacing:.12em;font-variant-numeric:tabular-nums;user-select:all}\
 .sign-in-error{margin:.5rem 0 0;color:var(--bad);font-size:.9rem}\
 button:disabled{opacity:.45;cursor:default}\
 button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}\
-.portal{font-size:.85rem;font-weight:600;letter-spacing:.04em;opacity:.7;margin:1.4rem 0 .5rem}";
+.portal{font-size:.85rem;font-weight:600;letter-spacing:.04em;opacity:.7;margin:1.4rem 0 .5rem}\
+.intro{display:flex;gap:1rem;align-items:flex-start}.intro h3{font-size:1rem;margin:0;font-weight:600}\
+.intro p{margin:.1rem 0 0;color:var(--dim);font-size:.9rem}\
+.intro .mark,.how .big{flex:none;background:#1f1f1f}.intro .mark{padding:6px;border-radius:10px}\
+.intro-review{border-left-color:#F03E3E}.intro-merge{border-left-color:#1AC94A}\
+.intro-changes{border-left-color:#E08A00}\
+.act{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;margin-top:.55rem;font-size:.85rem}\
+.act b{font-weight:600;margin-right:.2rem}.act .s{color:var(--dim)}\
+.act .k{padding:.1rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);white-space:nowrap}\
+.how{display:flex;flex-wrap:wrap;gap:1.5rem;align-items:center;justify-content:center;padding:1.2rem}\
+.how .big{padding:10px;border-radius:16px}.how .arrow{font-size:1.6rem;color:var(--dim)}\
+.menu{min-width:15rem;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:.3rem 0;\
+box-shadow:0 6px 18px rgba(0,0,0,.18);font-size:.88rem}.menu div{padding:.3rem .9rem}\
+.menu hr{border:0;border-top:1px solid var(--line);margin:.3rem 0}\
+.menu .hi{background:color-mix(in srgb,#E08A00 18%,transparent)}\
+.how-text{flex:1 1 16rem;min-width:0}.how-text h2{margin:0 0 .3rem;font-size:1.05rem}\
+.how-text p{margin:0 0 .4rem;color:var(--dim);font-size:.9rem}\
+.steps{margin:0;padding-left:1.2rem;color:var(--dim);font-size:.9rem}.steps li{margin:.25rem 0}\
+.steps b{color:var(--ink)}.welcome-next{justify-content:center;margin-top:1.4rem}\
+.onboard-step{font-size:.8rem;color:var(--dim);margin:0 0 .3rem;letter-spacing:.04em;text-transform:uppercase}\
+.checks{list-style:none;margin:0;padding:0;display:grid;gap:.6rem}\
+.check{display:flex;gap:.8rem;align-items:flex-start;padding:.9rem 1rem;background:var(--card);\
+border:1px solid var(--line);border-radius:8px}\
+.check .st{flex:none;width:1.6rem;height:1.6rem;border-radius:50%;display:grid;place-items:center;\
+font-weight:700;color:#fff;margin-top:.1rem}\
+.check.ok .st{background:var(--ok)}.check.no .st{background:var(--bad)}\
+.check.wait .st{background:var(--line);color:var(--dim)}\
+.check.rec .st{background:transparent;border:2px solid var(--line);color:var(--dim)}\
+.check h3{margin:0;font-size:1rem}.check p{margin:.15rem 0 0;color:var(--dim);font-size:.9rem}\
+.check .body{flex:1;min-width:0}.check .do{margin-top:.6rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}\
+.rec-tag{font-size:.72rem;font-weight:600;color:var(--ok);background:color-mix(in srgb,var(--ok) 13%,transparent);\
+border-radius:999px;padding:.12rem .55rem;margin-right:.5rem;vertical-align:.1em}\
+.next{display:flex;justify-content:flex-end;align-items:center;gap:1rem;margin-top:1.2rem}\
+a.button{display:inline-block;background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;border-radius:8px;\
+padding:.6rem 1.4rem;font-weight:600;text-decoration:none}";
 
 /// One axis's whole page.
 ///
@@ -652,11 +686,11 @@ pub fn settings_unavailable(token: &str) -> String {
 }
 
 /// The tags `shell_with` opened.
-const PAGE_CLOSE: &str = "</main>\n</body>\n</html>\n";
+pub(crate) const PAGE_CLOSE: &str = "</main>\n</body>\n</html>\n";
 
 /// The owl and the name, linked to where GitHoot lives, so a page found in a tab days later says
 /// what made it. One link for every page, so every footer wears it the same way.
-fn owl_link(token: &str) -> String {
+pub(crate) fn owl_link(token: &str) -> String {
     format!(
         "<a class=\"owl-link\" href=\"{}\" rel=\"noreferrer\">\
          <img src=\"/{}/owl.png\" alt=\"\" width=\"14\" height=\"14\">GitHoot</a>",

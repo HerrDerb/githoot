@@ -65,9 +65,12 @@ cargo build --release          # -> target/release/githoot
 
 **The tray icon appears immediately** — it never blocks on a sign-in. If PR status has no credential
 yet, the owl wears a red exclamation and the menu offers **Authenticate GitHub PR Status**; pick it
-when it suits you. While the GitHub App is installed nowhere, a dialog explains why at every start
-and sign-in, then opens its [install page](https://github.com/apps/githoot-tray-icon/installations/new). For a private org's
-repos, it has to be [**installed** on that org](docs/pr-status.md#why-a-github-app).
+when it suits you. While no portal is signed in, or the GitHub App is installed nowhere, **onboarding**
+opens in your browser: sign in, install the [App](https://github.com/apps/githoot-tray-icon/installations/new)
+(it notices the install by itself), and on Windows keep the owl on the taskbar. Its Continue explains
+what each mark means and which menu entry acts on it. For a private org's repos, the App has to be
+[**installed** on that org](docs/pr-status.md#why-a-github-app). Onboarding covers the GitHub portal
+only for now; GitLab is in beta.
 
 `~/.githoot/config.txt` is written on first run with every setting at its default.
 

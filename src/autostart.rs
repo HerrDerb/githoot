@@ -49,6 +49,44 @@ const TASKBAR_SETTINGS: &str = "ms-settings:taskbar";
 /// job. There is no supported call for an app to promote its own icon, so instead of writing the
 /// shell's `NotifyIconSettings` behind the user's back, this points them at the switch and lets them
 /// flip it.
+/// Whether Windows keeps the owl on the taskbar rather than behind the ^ arrow, for onboarding's
+/// check. `None` when it cannot tell, and on every other system, where it is not a question.
+///
+/// **Read only.** The shell keeps one entry per program under `HKCU\Control Panel\NotifyIconSettings`,
+/// with its path and an `IsPromoted` flag. Reading it is how onboarding can show a tick; writing it is
+/// what GitHoot stopped doing (see [`tray_hint`]), so the page's button opens the taskbar settings and
+/// the user flips the switch. The key is undocumented: a layout this cannot read is `None`, never an
+/// error, and the page then offers the button as if the owl were hidden.
+#[cfg(target_os = "windows")]
+pub fn owl_on_taskbar() -> Option<bool> {
+    use winapi::um::winnt::KEY_READ;
+    const ROOT: &str = r"Control Panel\NotifyIconSettings";
+    let exe = std::env::current_exe().ok()?;
+    let root = Key::open(ROOT, KEY_READ).ok()?;
+    let entries: Vec<(String, Option<u32>)> = root
+        .subkeys()
+        .into_iter()
+        .filter_map(|name| {
+            let entry = Key::open(&format!("{ROOT}\\{name}"), KEY_READ).ok()?;
+            Some((entry.string("ExecutablePath")?, entry.dword("IsPromoted")))
+        })
+        .collect();
+    promoted(&entries, &exe.to_string_lossy())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn owl_on_taskbar() -> Option<bool> {
+    None
+}
+
+/// `owl_on_taskbar`'s verdict from the entries it read: the one for `exe`, compared as Windows compares
+/// paths, without regard to case. Promoted only when the flag is exactly 1; absent means never
+/// switched on. No entry of its own yet is `None`: the shell writes one only once the icon has shown.
+#[cfg(any(target_os = "windows", test))]
+fn promoted(entries: &[(String, Option<u32>)], exe: &str) -> Option<bool> {
+    entries.iter().find(|(path, _)| path.eq_ignore_ascii_case(exe)).map(|(_, flag)| *flag == Some(1))
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn tray_hint() -> String {
     format!(
@@ -280,6 +318,47 @@ impl Key {
         let chars: Vec<u16> =
             buffer.into_iter().take(size as usize / 2).take_while(|&c| c != 0).collect();
         Some(String::from_utf16_lossy(&chars))
+    }
+
+    /// A `REG_DWORD` value, or `None` if it is absent or of any other type.
+    fn dword(&self, name: &str) -> Option<u32> {
+        use std::ptr::null_mut;
+        use winapi::shared::minwindef::DWORD;
+        use winapi::um::winnt::REG_DWORD;
+        use winapi::um::winreg::RegQueryValueExW;
+
+        let name_w = wide(name);
+        let mut kind: DWORD = 0;
+        let mut value: DWORD = 0;
+        let mut size = std::mem::size_of::<DWORD>() as DWORD;
+        // SAFETY: `name_w` is NUL-terminated; `value` is a DWORD-sized buffer and `size` says so.
+        let status = unsafe {
+            RegQueryValueExW(self.0, name_w.as_ptr(), null_mut(), &mut kind, (&mut value as *mut DWORD).cast(), &mut size)
+        };
+        (status == 0 && kind == REG_DWORD).then_some(value)
+    }
+
+    /// The names of this key's direct subkeys, in the order the registry gives them.
+    fn subkeys(&self) -> Vec<String> {
+        use std::ptr::null_mut;
+        use winapi::shared::minwindef::DWORD;
+        use winapi::um::winreg::RegEnumKeyExW;
+
+        let mut names = Vec::new();
+        // A key name is at most 255 characters.
+        let mut buffer = [0u16; 256];
+        for index in 0.. {
+            let mut len = buffer.len() as DWORD;
+            // SAFETY: `buffer` holds `len` UTF-16 units; the class and time out-parameters are optional.
+            let status = unsafe {
+                RegEnumKeyExW(self.0, index, buffer.as_mut_ptr(), &mut len, null_mut(), null_mut(), null_mut(), null_mut())
+            };
+            if status != 0 {
+                break;
+            }
+            names.push(String::from_utf16_lossy(&buffer[..len as usize]));
+        }
+        names
     }
 
     fn set_string(&self, name: &str, value: &str) -> Result<(), String> {
@@ -676,6 +755,21 @@ fn exec_escape(s: &str) -> String {
 #[cfg(test)]
 mod tray_hint_tests {
     use super::*;
+
+    /// The shell keeps one entry per program that ever showed a tray icon. Only the entry for this
+    /// very executable answers, matched the way Windows compares paths: without regard to case.
+    #[test]
+    fn the_owl_is_visible_only_when_its_own_entry_is_promoted() {
+        let me = r"C:\Users\x\AppData\Local\Programs\GitHoot\githoot.exe";
+        let entries = [
+            (r"D:\dev\target\release\githoot.exe".to_string(), Some(1)),
+            (r"c:\users\x\appdata\local\programs\githoot\GITHOOT.EXE".to_string(), Some(1)),
+        ];
+        assert_eq!(promoted(&entries, me), Some(true));
+        assert_eq!(promoted(&[(me.to_string(), None)], me), Some(false), "never switched on");
+        assert_eq!(promoted(&[(me.to_string(), Some(0))], me), Some(false));
+        assert_eq!(promoted(&entries[..1], me), None, "no entry of its own yet");
+    }
 
     /// The hint replaces writing `IsPromoted` ourselves, so it has to name the switch the user flips
     /// and the page the button opens.
