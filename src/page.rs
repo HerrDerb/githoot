@@ -1224,7 +1224,8 @@ mod tests {
 
     /// The settings page's section headings are small uppercase labels. That style was added as a
     /// bare `h2` rule, and a PR title is also an `h2` — so every title on the PR pages rendered in
-    /// capitals, from 2.0.0 to 2.0.3. The rule is class-scoped now, and this pins the selector.
+    /// capitals, from 2.0.0 to 2.0.3. The rule is class-scoped now, and this pins the selectors: the
+    /// section headings, and onboarding's "Step 1 of 2" label.
     #[test]
     fn only_settings_section_headings_are_uppercased() {
         let uppercased: Vec<&str> = STYLESHEET
@@ -1232,7 +1233,7 @@ mod tests {
             .filter(|rule| rule.contains("text-transform:uppercase"))
             .map(|rule| rule.split('{').next().unwrap_or("").trim())
             .collect();
-        assert_eq!(uppercased, [".section"], "uppercase must be opt-in by class, never by element");
+        assert_eq!(uppercased, [".section", ".onboard-step"], "uppercase must be opt-in by class, never by element");
 
         let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
         assert!(html.contains("<h2><a "), "a PR title is a plain h2 with a link in it");
