@@ -221,10 +221,12 @@ pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option
         Some(&heading),
     );
     // The footer closes the content column, not the page: centred under sidebar and content together it
-    // belonged to neither.
+    // belonged to neither. A sentence, like the PR pages' footer, because the owl alone read as a
+    // stray link. "To this machine only" because the listener is loopback-only, behind the token.
     let note = if note.is_empty() { String::new() } else { format!("{note} · ") };
     h.push_str(&format!(
-        "<div class=\"site\">{}<div class=\"pane\">\n{body}<footer>{note}{}</footer></div></div>\n",
+        "<div class=\"site\">{}<div class=\"pane\">\n{body}<footer>{note}Served locally by {}, to this machine \
+         only.</footer></div></div>\n",
         sidebar(site, place),
         crate::page::owl_link(site.token)
     ));
@@ -1107,14 +1109,15 @@ pub(crate) mod tests {
     }
 
     /// In the content column, under what it closes, rather than centred under sidebar and content
-    /// together, where it belonged to neither and looked lost.
+    /// together, where it belonged to neither and looked lost. A sentence, like the PR pages' footer:
+    /// the owl alone read as a stray link.
     #[test]
     fn a_settings_page_ends_its_content_with_the_owl_and_the_repository() {
         let html = layout(&site(), &Place::General, "General", None, "<p>body</p>");
         assert!(html.contains(concat!(
             "<p>body</p>",
-            r#"<footer><a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
-            r#"<img src="/tok/owl.png" alt="" width="14" height="14">GitHoot</a></footer>"#,
+            r#"<footer>Served locally by <a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
+            r#"<img src="/tok/owl.png" alt="" width="14" height="14">GitHoot</a>, to this machine only.</footer>"#,
             "</div></div>\n",
         )), "{html}");
         assert!(html.ends_with("\n</main>\n</body>\n</html>\n"), "{html}");
@@ -1125,7 +1128,7 @@ pub(crate) mod tests {
     #[test]
     fn a_page_note_shares_the_owl_footer_line() {
         let html = layout_with_note(&site(), &Place::Advanced, "Advanced", None, "<p>body</p>", "Written to <code>config.txt</code>.");
-        assert!(html.contains(r#"<footer>Written to <code>config.txt</code>. · <a class="owl-link""#), "{html}");
+        assert!(html.contains(r#"<footer>Written to <code>config.txt</code>. · Served locally by <a class="owl-link""#), "{html}");
         assert_eq!(html.matches("<footer>").count(), 1, "{html}");
     }
 

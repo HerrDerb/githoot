@@ -175,6 +175,6 @@ mod tests {
     #[test]
     fn its_footer_says_where_to_find_it_again() {
         let html = page();
-        assert!(html.contains("<footer>This page opens once, on the first start. Find it again under Settings › Welcome. · <a class=\"owl-link\""), "{html}");
+        assert!(html.contains("<footer>This page opens once, on the first start. Find it again under Settings › Welcome. · Served locally by <a class=\"owl-link\""), "{html}");
     }
 }
