@@ -85,6 +85,10 @@ pub enum Route {
     /// A button or a section's Save on a page of the settings site, posted back to that page.
     SitePost(crate::ui::Place),
     Owl,
+    /// Onboarding's first step, get connected. Not part of the settings site.
+    Welcome,
+    /// Onboarding's second step: what every mark means. Behind the first step's Continue.
+    WelcomeMarks,
     /// One of the welcome page's icons, by its name in `icons::MARKS`.
     Mark(&'static str),
     /// The path exists but not for this method.
@@ -302,6 +306,13 @@ pub fn route_for(
     }
 
     // The three-segment routes: a page's own refresh fragment, its mute links and the local API.
+    if let (Some(tail), "welcome") = (tail, leaf) {
+        return match (tail, method) {
+            ("marks", Method::Post) => Route::MethodNotAllowed,
+            ("marks", _) => Route::WelcomeMarks,
+            _ => Route::NotFound,
+        };
+    }
     if let Some(tail) = tail {
         return match (PrAxis::from_slug(leaf), tail, method) {
             (Some(_), "items", Method::Post) => Route::MethodNotAllowed,
@@ -320,6 +331,8 @@ pub fn route_for(
     match (leaf, method) {
         ("owl.png", Method::Post) => Route::MethodNotAllowed,
         ("owl.png", _) => Route::Owl,
+        ("welcome", Method::Post) => Route::MethodNotAllowed,
+        ("welcome", _) => Route::Welcome,
         (leaf, method) if leaf.starts_with("mark-") => {
             let name = leaf.strip_prefix("mark-").and_then(|l| l.strip_suffix(".png"));
             match (crate::icons::MARKS.into_iter().find(|m| Some(*m) == name), method) {
@@ -704,10 +717,47 @@ pub fn open_settings_page() -> bool {
     open_site(&crate::ui::Place::General)
 }
 
-/// Opens the welcome page, on a first run only: what the marks mean and where to act on them, before
-/// the owl has shown any. `false` when it did not open: not a first run, or no listener.
-pub fn open_welcome_on_first_run(first_run: crate::config::FirstRun) -> bool {
-    first_run == crate::config::FirstRun::Yes && open_site(&crate::ui::Place::Welcome)
+/// Opens onboarding's first step, binding the listener if need be. `false` when there is no listener.
+///
+/// The poll loop calls it at startup when no portal is signed in; see `scheduler::needs_onboarding`.
+pub fn open_onboarding() -> bool {
+    open_path("welcome")
+}
+
+/// The GitHub portal's install offer: a sign-in found the App installed nowhere. Onboarding says what
+/// to do and notices the install by itself, so it replaced the dialog that used to stand here. With no
+/// listener to serve it, GitHub's install page opens instead, which is the one step left.
+pub fn offer_onboarding(install_url: &str) {
+    if !open_onboarding() {
+        open_url(install_url.to_string());
+    }
+}
+
+/// What onboarding's first step shows: GitHub's sign-in and install, and on Windows whether the owl
+/// is on the taskbar. While the App is missing, each call also asks the poll loop to check again,
+/// quietly, which is how an install made in another tab shows on the next reload.
+fn onboarding_view() -> crate::ui::welcome::Onboarding {
+    use crate::portal::github::auth::{APP_SLUG, PR_NOT_INSTALLED};
+    use crate::portal::{AuthStatus, PortalKind};
+    use crate::ui::welcome::{GitHubStep, Onboarding};
+
+    let github = scheduler::portal_statuses().into_iter().find(|p| p.info.kind == PortalKind::GitHub).and_then(|p| {
+        let page = crate::ui::Place::Portal(p.info.id.0.clone()).path();
+        Some(match p.auth {
+            AuthStatus::SignedIn => GitHubStep::Ready,
+            AuthStatus::NotSignedIn => GitHubStep::NotSignedIn { page },
+            AuthStatus::SigningIn(_) => GitHubStep::SigningIn { page },
+            AuthStatus::Off(reason) if reason == PR_NOT_INSTALLED => {
+                if let Some(wake) = SETTINGS.get().and_then(|s| s.wake.lock().ok()) {
+                    let _ = wake.send(scheduler::Wake::RecheckInstall(p.info.id.clone()));
+                }
+                GitHubStep::NotInstalled { install: format!("{}apps/{APP_SLUG}/installations/new", p.info.link_prefix) }
+            }
+            // Switched off in `config.txt`, or off for a reason no click here fixes: not onboarding's.
+            AuthStatus::Off(_) => return None,
+        })
+    });
+    Onboarding { github, owl_visible: crate::autostart::owl_on_taskbar() }
 }
 
 /// Opens the page where a sign-in is started: the first portal that is waiting for one, else the
@@ -724,9 +774,14 @@ pub fn open_accounts_page() -> bool {
 }
 
 fn open_site(place: &crate::ui::Place) -> bool {
+    open_path(&place.path())
+}
+
+/// Opens one of this server's pages by its path after the token, binding the listener if need be.
+fn open_path(path: &str) -> bool {
     match SERVER.get_or_init(start).as_ref() {
         Some(server) => {
-            open_url(format!("http://{PAGE_HOST}:{}/{}/{}", server.port, server.token, place.path()));
+            open_url(format!("http://{PAGE_HOST}:{}/{}/{path}", server.port, server.token));
             true
         }
         None => false,
@@ -848,6 +903,14 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             Some(png) => respond(&mut stream, 200, "image/png", &png, request.body_wanted),
             None => respond(&mut stream, 500, "text/plain; charset=utf-8", b"", request.body_wanted),
         },
+        Route::Welcome => {
+            let html = crate::ui::welcome::onboarding_page(token, &onboarding_view());
+            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::default())
+        }
+        Route::WelcomeMarks => {
+            let html = crate::ui::welcome::marks_page(token);
+            respond_as(&mut stream, 200, "text/html; charset=utf-8", html.as_bytes(), request.body_wanted, Head::default())
+        }
         Route::Owl => {
             respond(&mut stream, 200, "image/png", icons::TRAY_ICON, request.body_wanted)
         }
@@ -1080,7 +1143,6 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
     head.script_nonce = (!nonce.is_empty()).then_some(nonce.as_str());
     let unavailable = || page::settings_unavailable(token);
     let html = match place {
-        Place::Welcome => crate::ui::welcome::welcome_page(&site),
         Place::General => cfg.map(|c| crate::ui::general_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
         Place::Advanced => cfg.map(|c| crate::ui::advanced_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
         Place::Updates => match cfg {
@@ -1277,7 +1339,7 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
                 _ => respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
             }
         }
-        Place::Welcome | Place::Integrations | Place::Muted | Place::Integration(_) => {
+        Place::Integrations | Place::Muted | Place::Integration(_) => {
             respond(stream, 405, "text/plain; charset=utf-8", b"Method not allowed", true)
         }
     }
@@ -1914,16 +1976,17 @@ mod tests {
         }
         assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Post), Route::MethodNotAllowed);
         assert_eq!(route_get(&format!("/{TOKEN}/general"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
-        // Welcome only reads: it has nothing to save.
-        assert_eq!(route_write(&format!("/{TOKEN}/welcome"), Method::Get), Route::Site(Place::Welcome));
+        // The welcome page is not part of the settings site, and only reads.
+        assert_eq!(route_write(&format!("/{TOKEN}/welcome"), Method::Get), Route::Welcome);
         assert_eq!(route_write(&format!("/{TOKEN}/welcome"), Method::Post), Route::MethodNotAllowed);
     }
 
-    /// Only a first start opens the welcome page. Every later start leaves the browser alone and does
-    /// not bind the listener for it either.
+    /// Onboarding's two steps, outside the settings site. Both only read.
     #[test]
-    fn only_a_first_start_opens_the_welcome_page() {
-        assert!(!open_welcome_on_first_run(crate::config::FirstRun::No));
+    fn the_onboarding_steps_route_and_only_read() {
+        assert_eq!(route_write(&format!("/{TOKEN}/welcome/marks"), Method::Get), Route::WelcomeMarks);
+        assert_eq!(route_write(&format!("/{TOKEN}/welcome/marks"), Method::Post), Route::MethodNotAllowed);
+        assert_eq!(route_write(&format!("/{TOKEN}/welcome/other"), Method::Get), Route::NotFound);
     }
 
     /// The welcome page's icons, by name, behind the token like the owl. Only names it knows.

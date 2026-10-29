@@ -258,7 +258,7 @@ impl GitHubPortal {
             app_asset_path,
             store: None,
             options,
-            offer_install: crate::dialog::offer_app_install,
+            offer_install: crate::serve::offer_onboarding,
         }
     }
 
@@ -271,20 +271,34 @@ impl GitHubPortal {
         self.judge_installations(count)
     }
 
-    /// `adopt`'s verdict, split from the request so it can be asserted without a network.
-    fn judge_installations(&self, count: Result<u64, AuthError>) -> CredentialState {
-        let state = match count {
-            Ok(0) => {
-                infoln!("{}", auth::PR_NOT_INSTALLED);
-                CredentialState::Off(auth::PR_NOT_INSTALLED.to_string())
-            }
+    /// What an installation count means, and nothing else: no log line, no page. Zero installations
+    /// is off; not being able to *ask* is not the same as zero, so it starts anyway.
+    fn verdict(&self, count: Result<u64, AuthError>) -> CredentialState {
+        match count {
+            Ok(0) => CredentialState::Off(auth::PR_NOT_INSTALLED.to_string()),
             Ok(_) => CredentialState::Ready,
             Err(e) => {
                 errorln!("could not confirm GitHub App installations ({e}) — continuing anyway");
                 CredentialState::Ready
             }
-        };
+        }
+    }
+
+    /// Asks GitHub again whether the App is installed anywhere, for onboarding while it waits for an
+    /// install. Quiet on purpose: it offers no page, because onboarding is the page, and every reload
+    /// would otherwise open another tab. `None` with no credential to ask with, or when asking
+    /// failed: a failure here changes nothing, rather than starting anyway as `adopt` does.
+    fn recheck_install(&mut self) -> Option<CredentialState> {
+        let count = self.store.as_ref()?.installation_count().ok()?;
+        Some(self.verdict(Ok(count)))
+    }
+
+    /// `adopt`'s verdict, split from the request so it can be asserted without a network. Unlike
+    /// [`Self::verdict`] it says so in the log and offers the install, once per adoption.
+    fn judge_installations(&self, count: Result<u64, AuthError>) -> CredentialState {
+        let state = self.verdict(count);
         if let Some(page) = install_page(&state, &self.endpoints) {
+            infoln!("{}", auth::PR_NOT_INSTALLED);
             (self.offer_install)(page);
         }
         state
@@ -303,6 +317,10 @@ fn install_page<'a>(state: &CredentialState, endpoints: &'a Endpoints) -> Option
 impl Portal for GitHubPortal {
     fn info(&self) -> &PortalInfo {
         &self.info
+    }
+
+    fn recheck_install(&mut self) -> Option<CredentialState> {
+        GitHubPortal::recheck_install(self)
     }
 
     fn load_saved_credential(&mut self) -> Result<CredentialState, AuthError> {
@@ -526,6 +544,18 @@ mod tests {
         assert_eq!(p.judge_installations(Ok(2)), CredentialState::Ready);
         assert_eq!(p.judge_installations(Err(AuthError::Network("down".to_string()))), CredentialState::Ready);
         OFFERED.with(|o| assert_eq!(*o.borrow(), vec![p.endpoints.install.clone()]));
+    }
+
+    /// Onboarding asks again while it waits for an install. That asking must never offer the page
+    /// again, or every reload would open another tab.
+    #[test]
+    fn asking_again_judges_quietly() {
+        let mut p = portal(DEFAULT_BASE_URL);
+        p.offer_install = record_offer;
+        assert_eq!(p.verdict(Ok(0)), CredentialState::Off(auth::PR_NOT_INSTALLED.to_string()));
+        assert_eq!(p.verdict(Ok(1)), CredentialState::Ready);
+        OFFERED.with(|o| assert!(o.borrow().is_empty(), "offered: {:?}", o.borrow()));
+        assert_eq!(p.recheck_install(), None, "no credential, nothing to ask with");
     }
 
     /// Signing out deletes the file and forgets the store, and asks nothing of the network.

@@ -39,7 +39,6 @@ use std::collections::BTreeMap;
 /// A page of the site.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
-    Welcome,
     General,
     Portals,
     /// A portal by its id. Whether one by that id is configured is the handler's question; the shape
@@ -59,7 +58,6 @@ impl Place {
     pub fn parse(leaf: &str, tail: Option<&str>) -> Option<Place> {
         let word = |id: &str| !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         Some(match (leaf, tail) {
-            ("welcome", None) => Place::Welcome,
             ("general", None) => Place::General,
             ("portals", None) => Place::Portals,
             ("portals", Some(id)) if word(id) => Place::Portal(id.to_string()),
@@ -75,7 +73,6 @@ impl Place {
     /// The path after the token, as links and redirects use it.
     pub fn path(&self) -> String {
         match self {
-            Place::Welcome => "welcome".to_string(),
             Place::General => "general".to_string(),
             Place::Portals => "portals".to_string(),
             Place::Portal(id) => format!("portals/{id}"),
@@ -100,7 +97,7 @@ impl Place {
     /// post to the integration they are about, so a POST to it is the wrong method. The portals list
     /// takes one: Install is for a portal that has no page of its own yet.
     pub fn takes_posts(&self) -> bool {
-        !matches!(self, Place::Integrations | Place::Welcome)
+        !matches!(self, Place::Integrations)
     }
 }
 
@@ -151,8 +148,7 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
         // The label is already HTML where it carries a badge; every part of it was escaped on the way in.
         format!("<a{class}{aria} href=\"/{}/{}\">{up}{label}</a>", esc(site.token), place.path())
     };
-    let mut items =
-        vec![link(Place::Welcome, "Welcome", false), link(Place::General, "General", false), link(Place::Portals, "Portals", false)];
+    let mut items = vec![link(Place::General, "General", false), link(Place::Portals, "Portals", false)];
     for (id, name, signed_in) in &site.portals {
         let place = Place::Portal(id.clone());
         // Signed in, or the page you are on, for the same reason as the integrations below.
@@ -922,7 +918,6 @@ pub(crate) mod tests {
     #[test]
     fn every_page_has_one_path_and_parses_back_from_it() {
         let places = [
-            Place::Welcome,
             Place::General,
             Place::Portals,
             Place::Portal("github".into()),
@@ -964,7 +959,7 @@ pub(crate) mod tests {
     #[test]
     fn the_sidebar_lists_every_page_with_items_under_their_collection() {
         let html = sidebar(&site(), &Place::General);
-        let order = ["/tok/welcome\"", "/tok/general\"", "/tok/portals\"", "/tok/portals/github\"", "/tok/integrations\"", "/tok/integrations/herdr\"", "/tok/muted\"", "/tok/updates\"", "/tok/advanced\""];
+        let order = ["/tok/general\"", "/tok/portals\"", "/tok/portals/github\"", "/tok/integrations\"", "/tok/integrations/herdr\"", "/tok/muted\"", "/tok/updates\"", "/tok/advanced\""];
         let mut at = 0;
         for href in order {
             let found = html[at..].find(href).unwrap_or_else(|| panic!("{href} missing or out of order in {html}"));
@@ -972,6 +967,7 @@ pub(crate) mod tests {
         }
         assert!(html.contains(r#"class="child""#), "items sit under their collection");
         assert!(html.contains(">Muted (2)<"));
+        assert!(!html.contains("welcome"), "the welcome page pops up once and is not a setting: {html}");
     }
 
     /// Where you are is marked twice: the page itself, and the collection it sits in.

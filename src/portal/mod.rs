@@ -355,6 +355,13 @@ pub trait Portal: Send {
     /// shown; `Some(Err)` means we could not find out, which is not an outage. How often to ask is
     /// the scheduler's decision, not the portal's.
     fn health(&mut self) -> Option<Result<HealthReport, String>>;
+
+    /// Asks again whether a credential that is off for want of an installation can see anything now.
+    /// `None` means no answer: nothing to install on this portal, or asking failed. Onboarding calls it
+    /// while it waits, so it must never open anything itself.
+    fn recheck_install(&mut self) -> Option<CredentialState> {
+        None
+    }
 }
 
 #[cfg(test)]

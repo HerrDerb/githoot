@@ -93,7 +93,6 @@ same token and `Host` checks. It is organised by what you manage, with a sidebar
 
 | Page | Holds |
 |---|---|
-| **Welcome** | what every mark on the owl means and which menu entry acts on it, drawn by the tray's own compositor. Opens by itself once, on the first start |
 | **General** | what the tray shows and does: the three bars, the hoot, and what makes a pull request green |
 | **Portals ▸ GitHub** | where pull requests come from: the sign-in, which parts of GitHub count as an outage. The Portals list is also where GitLab is installed |
 | **Integrations ▸ Herdr dispatcher** | where pull requests go: Install, a dry run, its settings and prompts → [integrations](integrations.md) |

@@ -295,43 +295,6 @@ pub fn show_device_code_prompt(subject: &str, user_code: &str, verification_uri:
     });
 }
 
-/// The install prompt's body: why a second step exists, what to do on the page, and what happens to
-/// an organization the user does not own.
-fn install_prompt_body(install_url: &str) -> String {
-    format!(
-        "You are signed in, but the githoot GitHub App is installed nowhere yet, so there are no \
-         pull requests it may see.\n\n\
-         On the next page, pick your account and every organization whose pull requests you want, \
-         then click Install. The App is read-only: pull requests, checks and commit statuses.\n\n\
-         For an organization you do not own, GitHub asks its owner to approve.\n\n\
-         Afterwards, restart githoot or sign in again.\n\n\
-         OK opens the install page: {install_url}"
-    )
-}
-
-/// Explains why the GitHub App still needs installing, then opens its install page. A sign-in and an
-/// install are two separate steps on GitHub, and a browser page asking to install something nobody
-/// mentioned reads like a mistake, so the explanation comes first.
-///
-/// One button, no way to decline: without an installation this app has nothing to show, so there is
-/// no state a "Not now" could leave the user in that is worth having. Where no dialog can be shown, the
-/// page simply opens.
-///
-/// Runs on a background thread, for the same reason as `show_device_code_prompt`: the thread that
-/// adopted the credential still has polling or its sign-in outcome to get on with.
-pub fn offer_app_install(install_url: &str) {
-    crate::infoln!("GitHub App installed nowhere: install it at {install_url}");
-    let body = install_prompt_body(install_url);
-    let install_url = install_url.to_string();
-
-    std::thread::spawn(move || {
-        notice("GitHub: Install the App", &body);
-        if let Err(e) = open::that(&install_url) {
-            crate::errorln!("could not open browser automatically: {e}");
-        }
-    });
-}
-
 /// Asks whether to install a downloaded update, and **declines if it cannot ask**.
 ///
 /// That default is the point of this wrapper existing rather than callers using `confirm` directly.
@@ -615,17 +578,6 @@ mod confirm_tests {
             true,
         );
         assert!(accepted, "the accepting button must return true");
-    }
-
-    /// The install prompt is the user's only explanation of a step GitHub makes separate, so it has to
-    /// say why, what to click, what the App can do and that an org owner may have to approve.
-    #[test]
-    fn the_install_prompt_explains_the_step_before_the_page_opens() {
-        let url = "https://github.com/apps/example/installations/new";
-        let body = install_prompt_body(url);
-        for needle in [url, "installed nowhere", "Install", "read-only", "owner", "restart"] {
-            assert!(body.contains(needle), "{needle:?} missing from:\n{body}");
-        }
     }
 
     /// The picker itself, which only a person can drive. Run by hand with

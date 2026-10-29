@@ -14,7 +14,7 @@ memory and never write one to disk.
 | `N PR(s) approved` / `No approvals yet` | Confirmed |
 | `N PR(s) needing your work` / `Nothing needing your work` | Confirmed |
 | `PR status: not authorized yet` | No credential — use the menu entry |
-| `PR status off: install the GitHub App to see your PRs` | Authorized, but installed nowhere. [Install it](https://github.com/apps/githoot-tray-icon/installations/new), then restart or sign in again |
+| `PR status off: install the GitHub App to see your PRs` | Authorized, but installed nowhere. Onboarding opens with the [install link](https://github.com/apps/githoot-tray-icon/installations/new) and notices the install by itself; otherwise restart or sign in again |
 | `PR status off: setup failed` | No HTTP client could be built; clicking will not help |
 | `PR status off in config.txt` | All three signals switched off |
 | `... state unknown` | Several polls failed; that signal is no longer trustworthy, and the exclamation is up |

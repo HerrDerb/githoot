@@ -382,7 +382,23 @@ box-shadow:0 6px 18px rgba(0,0,0,.18);font-size:.88rem}.menu div{padding:.3rem .
 .how-text{flex:1 1 16rem;min-width:0}.how-text h2{margin:0 0 .3rem;font-size:1.05rem}\
 .how-text p{margin:0 0 .4rem;color:var(--dim);font-size:.9rem}\
 .steps{margin:0;padding-left:1.2rem;color:var(--dim);font-size:.9rem}.steps li{margin:.25rem 0}\
-.steps b{color:var(--ink)}.welcome-next{justify-content:center;margin-top:1.4rem}";
+.steps b{color:var(--ink)}.welcome-next{justify-content:center;margin-top:1.4rem}\
+.onboard-step{font-size:.8rem;color:var(--dim);margin:0 0 .3rem;letter-spacing:.04em;text-transform:uppercase}\
+.checks{list-style:none;margin:0;padding:0;display:grid;gap:.6rem}\
+.check{display:flex;gap:.8rem;align-items:flex-start;padding:.9rem 1rem;background:var(--card);\
+border:1px solid var(--line);border-radius:8px}\
+.check .st{flex:none;width:1.6rem;height:1.6rem;border-radius:50%;display:grid;place-items:center;\
+font-weight:700;color:#fff;margin-top:.1rem}\
+.check.ok .st{background:var(--ok)}.check.no .st{background:var(--bad)}\
+.check.wait .st{background:var(--line);color:var(--dim)}\
+.check.rec .st{background:transparent;border:2px solid var(--line);color:var(--dim)}\
+.check h3{margin:0;font-size:1rem}.check p{margin:.15rem 0 0;color:var(--dim);font-size:.9rem}\
+.check .body{flex:1;min-width:0}.check .do{margin-top:.6rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}\
+.rec-tag{font-size:.72rem;font-weight:600;color:var(--ok);background:color-mix(in srgb,var(--ok) 13%,transparent);\
+border-radius:999px;padding:.12rem .55rem;margin-right:.5rem;vertical-align:.1em}\
+.next{display:flex;justify-content:flex-end;align-items:center;gap:1rem;margin-top:1.2rem}\
+a.button{display:inline-block;background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;border-radius:8px;\
+padding:.6rem 1.4rem;font-weight:600;text-decoration:none}";
 
 /// One axis's whole page.
 ///
