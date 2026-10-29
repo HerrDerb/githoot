@@ -643,7 +643,7 @@ pub fn muted_page(site: &Site, rows: &[MutedRow], now_unix: u64) -> String {
         h.push_str(&format!("<h2 class=\"section\">{}</h2>\n", esc(crate::page::heading(axis))));
         for r in here {
             let (_, e, prefix) = r.found.expect("filtered to found rows");
-            h.push_str(&crate::page::card(e, prefix, now_unix, &unmute(r.key, r.mute.until)));
+            h.push_str(&crate::page::card(e, axis, prefix, now_unix, &unmute(r.key, r.mute.until)));
         }
     }
     let gone: Vec<_> = rows.iter().filter(|r| r.found.is_none()).collect();

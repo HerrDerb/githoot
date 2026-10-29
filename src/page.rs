@@ -437,19 +437,19 @@ fn age_text(polled: Option<Duration>) -> String {
 /// placed, and each its own empty state, so "nothing here" is said per portal rather than once for
 /// all of them. No groups at all — nothing configured, or nothing published yet — is the "not
 /// known" state with nowhere to send anyone.
-fn items(groups: &[PortalGroup], now_unix: u64, mutes: Option<&Mutes>) -> String {
+fn items(axis: PrAxis, groups: &[PortalGroup], now_unix: u64, mutes: Option<&Mutes>) -> String {
     match groups {
         [] => "<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has \
                no answer it still stands behind for this bar.</p></div>\n"
             .to_string(),
-        [one] => group_items(one, now_unix, mutes),
+        [one] => group_items(axis, one, now_unix, mutes),
         many => many
             .iter()
             .map(|g| {
                 format!(
                     "<h2 class=\"portal\">{}</h2>\n{}",
                     esc(&g.info.display_name),
-                    group_items(g, now_unix, mutes)
+                    group_items(axis, g, now_unix, mutes)
                 )
             })
             .collect(),
@@ -457,7 +457,7 @@ fn items(groups: &[PortalGroup], now_unix: u64, mutes: Option<&Mutes>) -> String
 }
 
 /// One portal's cards, or its empty state, with its own inbox as the way out.
-fn group_items(g: &PortalGroup, now_unix: u64, mutes: Option<&Mutes>) -> String {
+fn group_items(axis: PrAxis, g: &PortalGroup, now_unix: u64, mutes: Option<&Mutes>) -> String {
     let inbox = || {
         portal_link(
             &g.info.link_prefix,
@@ -478,7 +478,7 @@ fn group_items(g: &PortalGroup, now_unix: u64, mutes: Option<&Mutes>) -> String 
             let mut h = if active.is_empty() {
                 format!("<div class=\"empty\"><p>Nothing here right now.</p><p>{}</p></div>\n", inbox())
             } else {
-                active.iter().map(|e| card(e, &g.info.link_prefix, now_unix, &mute_links(mutes, e))).collect()
+                active.iter().map(|e| card(e, axis, &g.info.link_prefix, now_unix, &mute_links(mutes, e))).collect()
             };
             // At the bottom and under a heading of its own: still on the page, so nothing is hidden,
             // but out of the way of what actually needs you.
@@ -488,7 +488,7 @@ fn group_items(g: &PortalGroup, now_unix: u64, mutes: Option<&Mutes>) -> String 
                     esc(mutes.map_or("", |m| m.token))
                 ));
                 for e in held {
-                    h.push_str(&card(e, &g.info.link_prefix, now_unix, &mute_links(mutes, e)));
+                    h.push_str(&card(e, axis, &g.info.link_prefix, now_unix, &mute_links(mutes, e)));
                 }
             }
             h
@@ -531,13 +531,13 @@ fn mute_links(mutes: Option<&Mutes>, e: &PrEntry) -> String {
 /// JSON rather than a bare HTML fragment precisely so the two can travel separately. `serde_json`
 /// does the escaping, which is what makes it safe to build by hand from strings that already contain
 /// markup.
-pub fn items_json(groups: &[PortalGroup], polled: Option<Duration>, now_unix: u64, mutes: Option<&Mutes>) -> String {
+pub fn items_json(axis: PrAxis, groups: &[PortalGroup], polled: Option<Duration>, now_unix: u64, mutes: Option<&Mutes>) -> String {
     serde_json::json!({
         // How old the data was *at this instant*, not a rendered age. The page anchors its own clock
         // to it, so the line keeps counting between polls without asking again.
         "age": polled.map(|d| d.as_secs()),
         "count": count_text(groups, mutes),
-        "items": items(groups, now_unix, mutes),
+        "items": items(axis, groups, now_unix, mutes),
     })
     .to_string()
 }
@@ -581,7 +581,7 @@ pub fn axis_page(
         esc(&age_text(polled))
     ));
     h.push_str("<div class=\"gate\"></div>\n");
-    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(groups, now_unix, mutes)));
+    h.push_str(&format!("<div id=\"items\">{}</div>\n", items(axis, groups, now_unix, mutes)));
 
     // One link per portal, the first portal's first. With none there is nowhere to send anyone.
     let inboxes: Vec<String> = groups
@@ -750,7 +750,7 @@ fn portal_link(prefix: &str, url: &str, text: &str) -> String {
 }
 
 /// One pull request.
-pub(crate) fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str) -> String {
+pub(crate) fn card(e: &PrEntry, axis: PrAxis, link_prefix: &str, now_unix: u64, actions: &str) -> String {
     let title = e.title.as_deref().unwrap_or("(untitled)");
     // A URL that is not the portal's own is shown but not offered as a link — see `safe_url`.
     let headline = match safe_url(&e.url, link_prefix) {
@@ -820,8 +820,10 @@ pub(crate) fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str)
     let who = if who.is_empty() { String::new() } else { format!("<ul class=\"who\">{who}</ul>") };
 
     // The size goes on the title's row, right edge, so a list's sizes line up into one column. A long
-    // title wraps beside it. No size, no row: the card stays exactly what it was.
-    let head = match e.changes {
+    // title wraps beside it. No size, no row: the card stays exactly what it was. Only on the review
+    // list, where the size decides when to take a review on; your own pull requests you already know.
+    let size = e.changes.filter(|_| axis == PrAxis::ReviewRequested);
+    let head = match size {
         Some(c) => format!("<div class=\"hrow\"><h2>{headline}</h2>{}</div>", diff(c)),
         None => format!("<h2>{headline}</h2>"),
     };
@@ -1122,13 +1124,18 @@ mod tests {
         assert!(page(Some(&[e])).contains("1 unresolved Copilot comment<"));
     }
 
+    /// The review list, the only one that shows a change's size.
+    fn review_page(entries: Option<&[PrEntry]>) -> String {
+        axis_page(PrAxis::ReviewRequested, &[group(entries)], Some(Duration::from_secs(47)), "deadbeef", NOW, "cafebabe", None)
+    }
+
     /// How big a review is decides when to take it on, so the size sits on the title's row, right
     /// edge, where the sizes of a whole list line up into one column to scan.
     #[test]
     fn the_size_of_the_change_sits_beside_the_title() {
         let mut e = entry("https://github.com/o/r/pull/1");
         e.changes = Some(crate::portal::types::Changes { additions: 120, deletions: 30, files: 4 });
-        let html = page(Some(&[e]));
+        let html = review_page(Some(&[e]));
         assert!(
             html.contains(concat!(
                 r#"<div class="hrow"><h2><a href="https://github.com/o/r/pull/1" rel="noreferrer">Fix the bed-exit debounce</a></h2>"#,
@@ -1146,7 +1153,7 @@ mod tests {
     fn a_large_change_groups_its_thousands() {
         let mut e = entry("https://github.com/o/r/pull/1");
         e.changes = Some(crate::portal::types::Changes { additions: 1840, deletions: 1_234_567, files: 37 });
-        let html = page(Some(&[e]));
+        let html = review_page(Some(&[e]));
         assert!(html.contains("+1\u{2009}840<"), "got: {html}");
         assert!(html.contains("\u{2212}1\u{2009}234\u{2009}567<"), "got: {html}");
     }
@@ -1155,10 +1162,25 @@ mod tests {
     fn one_file_reads_as_one_and_an_unknown_size_says_nothing() {
         let mut e = entry("https://github.com/o/r/pull/1");
         e.changes = Some(crate::portal::types::Changes { additions: 1, deletions: 0, files: 1 });
-        assert!(page(Some(&[e])).contains("\u{b7} 1 file<"));
-        let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
+        assert!(review_page(Some(&[e])).contains("\u{b7} 1 file<"));
+        let html = review_page(Some(&[entry("https://github.com/o/r/pull/1")]));
         assert!(!html.contains("class=\"diff\""));
         assert!(html.contains("<div class=\"card\"><h2>"), "no size, no row to lay it out in");
+    }
+
+    /// Only the review list: the size decides when to take a review on, while on your own pull requests
+    /// it is something you already know and the card has no use for.
+    #[test]
+    fn only_the_review_list_shows_the_size() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.changes = Some(crate::portal::types::Changes { additions: 120, deletions: 30, files: 4 });
+        let list = [e];
+        for axis in [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] {
+            let html = axis_page(axis, &[group(Some(&list))], None, "deadbeef", NOW, "cafebabe", None);
+            assert!(!html.contains("class=\"diff\""), "{axis:?}: {html}");
+            assert!(!items_json(axis, &[group(Some(&list))], None, NOW, None).contains("class=\\\"diff\\\""), "{axis:?} fragment");
+        }
+        assert!(items_json(PrAxis::ReviewRequested, &[group(Some(&list))], None, NOW, None).contains("class=\\\"diff\\\""), "review fragment");
     }
 
     #[test]
@@ -1297,7 +1319,7 @@ mod tests {
     // ── Live refresh ──────────────────────────────────────────────────────────
 
     fn live(entries: Option<&[PrEntry]>) -> String {
-        items_json(&[group(entries)], Some(Duration::from_secs(47)), NOW, None)
+        items_json(PrAxis::ChangesRequested, &[group(entries)], Some(Duration::from_secs(47)), NOW, None)
     }
 
     /// The fragment must render the *same* cards the page does, or a refresh would quietly swap the
@@ -1340,7 +1362,7 @@ mod tests {
     /// A poll that never happened says so with a null rather than a zero age.
     #[test]
     fn an_unpolled_fragment_sends_a_null_age() {
-        let json = items_json(&[group(None)], None, NOW, None);
+        let json = items_json(PrAxis::ChangesRequested, &[group(None)], None, NOW, None);
         assert!(json.contains(r#""age":null"#), "got {json}");
     }
 
@@ -1509,21 +1531,21 @@ mod tests {
             crate::portal::types::Verdict { login: "bob".into(), state: ReviewState::ChangesRequested },
         ];
         e.pending = vec![Reviewer::User("carol".into()), Reviewer::Team("platform".into())];
-        let json = items_json(&[group(Some(&[e]))], Some(Duration::from_secs(47)), NOW, None);
+        let json = items_json(PrAxis::ChangesRequested, &[group(Some(&[e]))], Some(Duration::from_secs(47)), NOW, None);
         assert_eq!(json, r#"{"age":47,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2><a href=\"https://github.com/qumea/care-api/pull/2204\" rel=\"noreferrer\">Fix the bed-exit debounce</a></h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill draft\">Draft</span><span class=\"pill checks-failure\">Merge conflict</span><span class=\"pill checks-pending\">2 unresolved Copilot comments</span><span class=\"pill checks-failure\">Checks failing</span></div><ul class=\"who\"><li><span class=\"dot dot-ok\"></span>alice approved</li><li><span class=\"dot dot-no\"></span>bob requested changes</li><li><span class=\"dot dot-wait\"></span>carol re-review pending</li><li><span class=\"dot dot-wait\"></span>team platform re-review pending</li></ul></div>\n"}"#);
     }
 
     #[test]
     fn golden_items_json_for_both_empty_states() {
-        assert_eq!(items_json(&[group(None)], None, NOW, None), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
-        assert_eq!(items_json(&[group(Some(&[]))], Some(Duration::from_secs(5)), NOW, None), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(PrAxis::ChangesRequested, &[group(None)], None, NOW, None), r#"{"age":null,"count":"","items":"<div class=\"empty\"><p>This list is <strong>not known</strong> right now — GitHoot has no answer it still stands behind for this bar.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
+        assert_eq!(items_json(PrAxis::ChangesRequested, &[group(Some(&[]))], Some(Duration::from_secs(5)), NOW, None), r#"{"age":5,"count":"0 pull request(s) · ","items":"<div class=\"empty\"><p>Nothing here right now.</p><p><a href=\"https://github.com/pulls/inbox\" rel=\"noreferrer\">Open your pull requests on GitHub</a></p></div>\n"}"#);
     }
 
     #[test]
     fn golden_unsafe_url_is_text_not_link() {
         let mut e = entry("https://github.com.evil.com/x");
         e.title = Some("t".into());
-        let json = items_json(&[group(Some(&[e]))], None, NOW, None);
+        let json = items_json(PrAxis::ChangesRequested, &[group(Some(&[e]))], None, NOW, None);
         assert_eq!(json, r#"{"age":null,"count":"1 pull request(s) · ","items":"<div class=\"card\"><h2>t</h2><div class=\"meta\"><span>qumea/care-api #2204</span><span>octocat</span><span>updated just now</span><span class=\"pill checks-success\">Checks passing</span></div></div>\n"}"#);
     }
 
@@ -1557,9 +1579,9 @@ mod tests {
     fn the_groups_link_prefix_decides_what_becomes_a_link() {
         let mut mr = entry("https://gitlab.example/g/p/-/merge_requests/7");
         mr.title = Some("Widen the door".to_string());
-        let under_gitlab = items_json(&[PortalGroup { info: &GITLAB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW, None);
+        let under_gitlab = items_json(PrAxis::ChangesRequested, &[PortalGroup { info: &GITLAB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW, None);
         assert!(under_gitlab.contains("<a href=\\\"https://gitlab.example/g/p/-/merge_requests/7\\\""), "got {under_gitlab}");
-        let under_github = items_json(&[PortalGroup { info: &GITHUB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW, None);
+        let under_github = items_json(PrAxis::ChangesRequested, &[PortalGroup { info: &GITHUB, entries: Some(std::slice::from_ref(&mr)) }], None, NOW, None);
         assert!(!under_github.contains("href=\\\"https://gitlab.example"), "got {under_github}");
         assert!(under_github.contains("Widen the door"), "shown as text, not hidden");
     }
@@ -1568,7 +1590,7 @@ mod tests {
     /// known" state with nowhere to send anyone, and it must not claim a count.
     #[test]
     fn no_groups_at_all_is_not_known_with_no_link() {
-        let json = items_json(&[], None, NOW, None);
+        let json = items_json(PrAxis::ChangesRequested, &[], None, NOW, None);
         assert!(json.contains("not known"), "got {json}");
         assert!(!json.contains("href"), "no portal, no inbox to offer");
         assert!(json.contains("\"count\":\"\""), "no confirmed list, no number");
