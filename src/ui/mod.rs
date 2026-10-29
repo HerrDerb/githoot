@@ -28,6 +28,7 @@
 //! the muted page, nothing else.
 
 pub mod integrations;
+pub mod welcome;
 pub mod portals;
 pub mod updates;
 
@@ -38,6 +39,7 @@ use std::collections::BTreeMap;
 /// A page of the site.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
+    Welcome,
     General,
     Portals,
     /// A portal by its id. Whether one by that id is configured is the handler's question; the shape
@@ -57,6 +59,7 @@ impl Place {
     pub fn parse(leaf: &str, tail: Option<&str>) -> Option<Place> {
         let word = |id: &str| !id.is_empty() && id.len() <= 32 && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
         Some(match (leaf, tail) {
+            ("welcome", None) => Place::Welcome,
             ("general", None) => Place::General,
             ("portals", None) => Place::Portals,
             ("portals", Some(id)) if word(id) => Place::Portal(id.to_string()),
@@ -72,6 +75,7 @@ impl Place {
     /// The path after the token, as links and redirects use it.
     pub fn path(&self) -> String {
         match self {
+            Place::Welcome => "welcome".to_string(),
             Place::General => "general".to_string(),
             Place::Portals => "portals".to_string(),
             Place::Portal(id) => format!("portals/{id}"),
@@ -96,7 +100,7 @@ impl Place {
     /// post to the integration they are about, so a POST to it is the wrong method. The portals list
     /// takes one: Install is for a portal that has no page of its own yet.
     pub fn takes_posts(&self) -> bool {
-        !matches!(self, Place::Integrations)
+        !matches!(self, Place::Integrations | Place::Welcome)
     }
 }
 
@@ -147,7 +151,8 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
         // The label is already HTML where it carries a badge; every part of it was escaped on the way in.
         format!("<a{class}{aria} href=\"/{}/{}\">{up}{label}</a>", esc(site.token), place.path())
     };
-    let mut items = vec![link(Place::General, "General", false), link(Place::Portals, "Portals", false)];
+    let mut items =
+        vec![link(Place::Welcome, "Welcome", false), link(Place::General, "General", false), link(Place::Portals, "Portals", false)];
     for (id, name, signed_in) in &site.portals {
         let place = Place::Portal(id.clone());
         // Signed in, or the page you are on, for the same reason as the integrations below.
@@ -182,6 +187,12 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
 /// The title is a breadcrumb trail from Settings to `title`, the page's own name: every step a link
 /// but the last, so a page deep in a collection says where it is and how to get back.
 pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, body: &str) -> String {
+    layout_with_note(site, place, title, refresh, body, "")
+}
+
+/// `layout`, with a closing word of the page's own: `note` is HTML, already escaped, said on the
+/// footer's one line before the owl.
+pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option<u32>, body: &str, note: &str) -> String {
     let mut trail: Vec<(String, Option<String>)> = vec![("Settings".to_string(), Some(Place::General.path()))];
     if let Some(parent) = place.parent() {
         let label = match parent {
@@ -209,11 +220,18 @@ pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, bod
         "site-main",
         Some(&heading),
     );
-    h.push_str(&format!("<div class=\"site\">{}<div class=\"pane\">\n{body}</div></div>\n", sidebar(site, place)));
+    // The footer closes the content column, not the page: centred under sidebar and content together it
+    // belonged to neither.
+    let note = if note.is_empty() { String::new() } else { format!("{note} · ") };
+    h.push_str(&format!(
+        "<div class=\"site\">{}<div class=\"pane\">\n{body}<footer>{note}{}</footer></div></div>\n",
+        sidebar(site, place),
+        crate::page::owl_link(site.token)
+    ));
     if !site.nonce.is_empty() {
         h.push_str(&format!("<script nonce=\"{}\">{SITE_SCRIPT}</script>\n", esc(site.nonce)));
     }
-    h.push_str(&crate::page::page_end(site.token));
+    h.push_str(crate::page::PAGE_CLOSE);
     h
 }
 
@@ -592,12 +610,12 @@ pub fn general_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(us
 pub fn advanced_page(site: &Site, cfg: &crate::config::Config, flash: Option<&(usize, String)>) -> String {
     let value = |s: &Setting| crate::config::value_of(cfg, s.key);
     let body = format!(
-        "<p class=\"sub lead\">Settings you rarely need. Both take effect after a restart.</p>\n{}\
-         <footer>Written to <code>config.txt</code>, one line per changed setting — your comments and any \
-         keys this version has never heard of are left alone.</footer>\n",
+        "<p class=\"sub lead\">Settings you rarely need. Both take effect after a restart.</p>\n{}",
         sections(site.token, &Place::Advanced, crate::config::ADVANCED, &value, flash)
     );
-    layout(site, &Place::Advanced, "Advanced", None, &body)
+    let note = "Written to <code>config.txt</code>, one line per changed setting — your comments and any \
+                keys this version has never heard of are left alone.";
+    layout_with_note(site, &Place::Advanced, "Advanced", None, &body, note)
 }
 
 /// One row of the muted page: a live mute, and the pull request it names if a bar still holds it.
@@ -902,6 +920,7 @@ pub(crate) mod tests {
     #[test]
     fn every_page_has_one_path_and_parses_back_from_it() {
         let places = [
+            Place::Welcome,
             Place::General,
             Place::Portals,
             Place::Portal("github".into()),
@@ -943,7 +962,7 @@ pub(crate) mod tests {
     #[test]
     fn the_sidebar_lists_every_page_with_items_under_their_collection() {
         let html = sidebar(&site(), &Place::General);
-        let order = ["/tok/general\"", "/tok/portals\"", "/tok/portals/github\"", "/tok/integrations\"", "/tok/integrations/herdr\"", "/tok/muted\"", "/tok/updates\"", "/tok/advanced\""];
+        let order = ["/tok/welcome\"", "/tok/general\"", "/tok/portals\"", "/tok/portals/github\"", "/tok/integrations\"", "/tok/integrations/herdr\"", "/tok/muted\"", "/tok/updates\"", "/tok/advanced\""];
         let mut at = 0;
         for href in order {
             let found = html[at..].find(href).unwrap_or_else(|| panic!("{href} missing or out of order in {html}"));
@@ -1087,15 +1106,27 @@ pub(crate) mod tests {
         assert!(html.contains(r#"<a href="/tok/portals">Portals</a><span class="sep" aria-hidden="true">›</span><span>&lt;GitHub&gt;</span>"#), "escaped: {html}");
     }
 
+    /// In the content column, under what it closes, rather than centred under sidebar and content
+    /// together, where it belonged to neither and looked lost.
     #[test]
-    fn a_settings_page_ends_with_the_owl_and_the_repository() {
-        let html = layout(&site(), &Place::General, "General", None, "");
-        assert!(html.ends_with(concat!(
+    fn a_settings_page_ends_its_content_with_the_owl_and_the_repository() {
+        let html = layout(&site(), &Place::General, "General", None, "<p>body</p>");
+        assert!(html.contains(concat!(
+            "<p>body</p>",
             r#"<footer><a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
             r#"<img src="/tok/owl.png" alt="" width="14" height="14">GitHoot</a></footer>"#,
-            "\n</main>\n</body>\n</html>\n",
+            "</div></div>\n",
         )), "{html}");
-        assert!(!html.contains("class=\"brand\""), "the old two-part line is gone: {html}");
+        assert!(html.ends_with("\n</main>\n</body>\n</html>\n"), "{html}");
+        assert_eq!(html.matches("<footer>").count(), 1, "{html}");
+    }
+
+    /// A page with a word of its own to close on says it in the same one line, before the owl.
+    #[test]
+    fn a_page_note_shares_the_owl_footer_line() {
+        let html = layout_with_note(&site(), &Place::Advanced, "Advanced", None, "<p>body</p>", "Written to <code>config.txt</code>.");
+        assert!(html.contains(r#"<footer>Written to <code>config.txt</code>. · <a class="owl-link""#), "{html}");
+        assert_eq!(html.matches("<footer>").count(), 1, "{html}");
     }
 
     #[test]

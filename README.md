@@ -69,7 +69,9 @@ when it suits you. While the GitHub App is installed nowhere, a dialog explains 
 and sign-in, then opens its [install page](https://github.com/apps/githoot-tray-icon/installations/new). For a private org's
 repos, it has to be [**installed** on that org](docs/pr-status.md#why-a-github-app).
 
-`~/.githoot/config.txt` is written on first run with every setting at its default.
+`~/.githoot/config.txt` is written on first run with every setting at its default, and the **Welcome**
+page opens in your browser: what each mark means and which menu entry acts on it. It stays in the
+settings sidebar after that.
 
 **A first run also asks once whether to start GitHoot when you sign in** — Windows `Run` value, XDG
 autostart entry or macOS Launch Agent, for your account only, removable with your OS's own startup

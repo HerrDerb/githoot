@@ -16,7 +16,6 @@
 
 use image::{Rgba, RgbaImage};
 
-#[cfg(target_os = "linux")]
 use crate::errorln;
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -25,6 +24,29 @@ use std::path::Path;
 /// page's logo — the same file, not a second copy, so the page and the tray cannot show two
 /// different owls.
 pub(crate) const TRAY_ICON: &[u8] = include_bytes!("../assets/tray.png");
+
+/// The states the welcome page shows, by the name its URL carries: one per mark, and all of them.
+pub(crate) const MARKS: [&str; 6] = ["review", "merge", "changes", "update", "alert", "all"];
+
+/// One of [`MARKS`] as PNG, composited by the same code the tray uses, so the welcome page cannot show
+/// a mark the tray no longer draws. `None` for a name that is not a mark.
+///
+/// The variants are built once, on the first request, and kept: ~14ms, and only ever for someone who
+/// opened the page.
+pub(crate) fn mark_png(name: &str) -> Option<Vec<u8>> {
+    let (review, merge, changes, update, mark) = match name {
+        "review" => (true, false, false, false, false),
+        "merge" => (false, true, false, false, false),
+        "changes" => (false, false, true, false, false),
+        "update" => (false, false, false, true, false),
+        "alert" => (false, false, false, false, true),
+        "all" => (true, true, true, true, true),
+        _ => return None,
+    };
+    static SET: std::sync::OnceLock<Option<IconSet<RgbaImage>>> = std::sync::OnceLock::new();
+    let set = SET.get_or_init(|| build_variants().map_err(|e| errorln!("{e}")).ok()).as_ref()?;
+    encode_png(set.get(review, merge, changes, update, mark)).map_err(|e| errorln!("{e}")).ok()
+}
 
 // ── Indicator geometry ──────────────────────────────────────────────────────
 // One column of rounded bars down the right-hand side. Ratios rather than pixels so the layout
@@ -630,7 +652,6 @@ fn variant_filename(i: usize) -> String {
 // ─── Linux ────────────────────────────────────────────────────────────────────
 
 /// Encodes an RGBA image as PNG bytes.
-#[cfg(target_os = "linux")]
 fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder};
@@ -722,6 +743,26 @@ mod tests {
 
     fn base() -> RgbaImage {
         decode(TRAY_ICON).expect("embedded asset must decode")
+    }
+
+    /// The welcome page shows what the tray draws, not a picture of it: each mark is the very variant
+    /// the tray would show for that state.
+    #[test]
+    fn each_welcome_mark_is_the_variant_the_tray_draws() {
+        let set = build_variants().expect("variants must build");
+        for (name, (r, m, c, u, a)) in [
+            ("review", (true, false, false, false, false)),
+            ("merge", (false, true, false, false, false)),
+            ("changes", (false, false, true, false, false)),
+            ("update", (false, false, false, true, false)),
+            ("alert", (false, false, false, false, true)),
+            ("all", (true, true, true, true, true)),
+        ] {
+            let png = mark_png(name).unwrap_or_else(|| panic!("{name} should be a mark"));
+            assert_eq!(&decode(&png).expect("decodes"), set.get(r, m, c, u, a), "{name}");
+        }
+        assert_eq!(MARKS.len(), 6);
+        assert!(mark_png("nope").is_none());
     }
 
     /// Centre of slot `i`'s bar for a 98×96 source, mirroring `bar_slots` for test assertions.

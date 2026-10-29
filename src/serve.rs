@@ -85,6 +85,8 @@ pub enum Route {
     /// A button or a section's Save on a page of the settings site, posted back to that page.
     SitePost(crate::ui::Place),
     Owl,
+    /// One of the welcome page's icons, by its name in `icons::MARKS`.
+    Mark(&'static str),
     /// The path exists but not for this method.
     MethodNotAllowed,
     /// The path did not resolve. Also what a wrong token gets, so the answer does not confirm that
@@ -318,6 +320,14 @@ pub fn route_for(
     match (leaf, method) {
         ("owl.png", Method::Post) => Route::MethodNotAllowed,
         ("owl.png", _) => Route::Owl,
+        (leaf, method) if leaf.starts_with("mark-") => {
+            let name = leaf.strip_prefix("mark-").and_then(|l| l.strip_suffix(".png"));
+            match (crate::icons::MARKS.into_iter().find(|m| Some(*m) == name), method) {
+                (Some(_), Method::Post) => Route::MethodNotAllowed,
+                (Some(mark), _) => Route::Mark(mark),
+                (None, _) => Route::NotFound,
+            }
+        }
         // Everything else is a read, so a write to it is the wrong method rather than a miss — the
         // path is right and saying otherwise would be a lie in the status line.
         (slug, method) => match (PrAxis::from_slug(slug), method) {
@@ -694,6 +704,12 @@ pub fn open_settings_page() -> bool {
     open_site(&crate::ui::Place::General)
 }
 
+/// Opens the welcome page, on a first run only: what the marks mean and where to act on them, before
+/// the owl has shown any. `false` when it did not open: not a first run, or no listener.
+pub fn open_welcome_on_first_run(first_run: crate::config::FirstRun) -> bool {
+    first_run == crate::config::FirstRun::Yes && open_site(&crate::ui::Place::Welcome)
+}
+
 /// Opens the page where a sign-in is started: the first portal that is waiting for one, else the
 /// first portal. `false` when there is no listener, so the caller can fall back to the old dialog.
 pub fn open_accounts_page() -> bool {
@@ -828,6 +844,10 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
         Route::MethodNotAllowed => {
             respond(&mut stream, 405, "text/plain; charset=utf-8", b"Method not allowed", request.body_wanted)
         }
+        Route::Mark(name) => match icons::mark_png(name) {
+            Some(png) => respond(&mut stream, 200, "image/png", &png, request.body_wanted),
+            None => respond(&mut stream, 500, "text/plain; charset=utf-8", b"", request.body_wanted),
+        },
         Route::Owl => {
             respond(&mut stream, 200, "image/png", icons::TRAY_ICON, request.body_wanted)
         }
@@ -1060,6 +1080,7 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
     head.script_nonce = (!nonce.is_empty()).then_some(nonce.as_str());
     let unavailable = || page::settings_unavailable(token);
     let html = match place {
+        Place::Welcome => crate::ui::welcome::welcome_page(&site),
         Place::General => cfg.map(|c| crate::ui::general_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
         Place::Advanced => cfg.map(|c| crate::ui::advanced_page(&site, &c, flash.as_ref())).unwrap_or_else(unavailable),
         Place::Updates => match cfg {
@@ -1256,7 +1277,7 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
                 _ => respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
             }
         }
-        Place::Integrations | Place::Muted | Place::Integration(_) => {
+        Place::Welcome | Place::Integrations | Place::Muted | Place::Integration(_) => {
             respond(stream, 405, "text/plain; charset=utf-8", b"Method not allowed", true)
         }
     }
@@ -1893,6 +1914,27 @@ mod tests {
         }
         assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Post), Route::MethodNotAllowed);
         assert_eq!(route_get(&format!("/{TOKEN}/general"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
+        // Welcome only reads: it has nothing to save.
+        assert_eq!(route_write(&format!("/{TOKEN}/welcome"), Method::Get), Route::Site(Place::Welcome));
+        assert_eq!(route_write(&format!("/{TOKEN}/welcome"), Method::Post), Route::MethodNotAllowed);
+    }
+
+    /// Only a first start opens the welcome page. Every later start leaves the browser alone and does
+    /// not bind the listener for it either.
+    #[test]
+    fn only_a_first_start_opens_the_welcome_page() {
+        assert!(!open_welcome_on_first_run(crate::config::FirstRun::No));
+    }
+
+    /// The welcome page's icons, by name, behind the token like the owl. Only names it knows.
+    #[test]
+    fn the_marks_are_served_by_name_behind_the_token() {
+        for name in crate::icons::MARKS {
+            assert_eq!(route_write(&format!("/{TOKEN}/mark-{name}.png"), Method::Get), Route::Mark(name), "{name}");
+            assert_eq!(route_write(&format!("/{TOKEN}/mark-{name}.png"), Method::Post), Route::MethodNotAllowed, "{name}");
+        }
+        assert_eq!(route_write(&format!("/{TOKEN}/mark-nope.png"), Method::Get), Route::NotFound);
+        assert_eq!(route_get("/mark-review.png", Some(&ok_host()), TOKEN, PORT), Route::NotFound);
     }
 
     /// A section's Save names its section by index, and only an index the page has is one.
