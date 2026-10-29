@@ -223,8 +223,12 @@ existed — the key is appended rather than the file regenerated.
 | `readyToMerge` | `on` | The green bar (approved PRs; the key keeps its old name so existing `config.txt` files still work) |
 | `changesRequested` | `on` | The amber bar (work required; the key keeps its old name so existing `config.txt` files still work) |
 | `copilotReviews` | `on` | Count unresolved comments from GitHub's automatic reviewer as work, and keep the PR off green; see [PR status](pr-status.md) |
-| `ruleConflicts` | `on` | A merge conflict while somebody is reviewing: amber, not green. Off ignores conflicts on both bars |
-| `ruleFailedChecks` | `on` | Failed checks on an approved pull request: amber, not green. Off ignores them on both bars |
+| `ruleConflicts` | `on` | A merge conflict: amber, not green. Off ignores conflicts on both bars |
+| `ruleFailedChecks` | `on` | Failed checks: amber, and never green. Off ignores them on both bars |
+| `ruleAmberNeedReviewer` | `on` | A merge conflict and failed checks count on amber only while somebody reviews the pull request. Off counts them on any of yours. Amber only |
+| `ruleRedSkipDrafts` | `on` | Drafts stay off the red bar. Off counts a review asked on a draft |
+| `ruleGreenSkipDrafts` | `on` | Drafts stay off the green bar. Off lets an approved draft light it |
+| `ruleAmberSkipDrafts` | `on` | Drafts stay off the amber bar. Off judges a draft's objections, conflicts, checks and comments like any pull request's |
 | `ruleRunningChecks` | `on` | Checks still running keep an approved pull request off green until they finish. Off shows it at once |
 | `ruleTeamRequests` | `on` | A review asked of a team you are in lights the red bar, not only one naming you (GitHub) |
 | `ruleSkipBots` | `on` | Pull requests opened by bots (Dependabot, Renovate) stay off the red bar. Off lets them in |

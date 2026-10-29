@@ -106,13 +106,15 @@ fn review_query(rules: super::types::Rules) -> String {
     q
 }
 
-/// The search query behind `axis`'s dot.
+/// The search query behind `axis`'s dot. Each bar's own draft rule, switched off, drops `draft:false`
+/// from that bar's search alone, so drafts reach its ordinary rules and no other bar's.
 fn pr_query(axis: PrAxis, rules: super::types::Rules) -> String {
-    match axis {
-        PrAxis::ReviewRequested => review_query(rules),
-        PrAxis::ReadyToMerge => MERGE_QUERY.to_string(),
-        PrAxis::ChangesRequested => CHANGES_QUERY.to_string(),
-    }
+    let (query, skip_drafts) = match axis {
+        PrAxis::ReviewRequested => (review_query(rules), rules.skip_drafts_red),
+        PrAxis::ReadyToMerge => (MERGE_QUERY.to_string(), rules.skip_drafts_green),
+        PrAxis::ChangesRequested => (CHANGES_QUERY.to_string(), rules.skip_drafts_amber),
+    };
+    if skip_drafts { query } else { query.replace(" draft:false", "") }
 }
 
 /// Which rule decides whether a search hit counts for an axis.
@@ -410,6 +412,28 @@ mod tests {
         let with_bots = review_query(Rules { skip_bots: false, ..Rules::ALL });
         assert!(!with_bots.contains("dependabot") && !with_bots.contains("-label:dependencies"), "{with_bots}");
         assert!(with_bots.contains("draft:false"), "drafts stay out whatever the rules say");
+    }
+
+    /// Each bar has its own draft rule, and it shapes only that bar's search: on keeps `draft:false`,
+    /// off drops it and lets drafts through to the bar's ordinary rules.
+    #[test]
+    fn each_bar_leaves_drafts_out_only_while_its_own_draft_rule_is_on() {
+        use crate::portal::types::Rules;
+        for axis in PrAxis::ALL {
+            assert!(pr_query(axis, Rules::ALL).contains("draft:false"), "{axis:?}");
+        }
+        let off = [
+            (PrAxis::ReviewRequested, Rules { skip_drafts_red: false, ..Rules::ALL }),
+            (PrAxis::ReadyToMerge, Rules { skip_drafts_green: false, ..Rules::ALL }),
+            (PrAxis::ChangesRequested, Rules { skip_drafts_amber: false, ..Rules::ALL }),
+        ];
+        for (axis, rules) in off {
+            for other in PrAxis::ALL {
+                let q = pr_query(other, rules);
+                assert_eq!(q.contains("draft:false"), other != axis, "{axis:?} off, {other:?}: {q}");
+                assert!(q.contains("state:open") && q.contains("archived:false"), "the rest stays: {q}");
+            }
+        }
     }
 
     /// `review:approved` matches nothing in a repository that requires no reviews — GitHub leaves

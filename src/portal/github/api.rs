@@ -359,7 +359,7 @@ struct PullRequestNode {
     /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`. Computed lazily by GitHub: it answers `UNKNOWN`
     /// until something asks, and asking is what starts the computation, so a cold poll sees
     /// `UNKNOWN` and the next one sees the truth. Only `CONFLICTING` is ever treated as a conflict
-    /// — see `blocked_by_conflict`.
+    /// — see `is_conflicting`.
     mergeable: Option<String>,
     /// The pull request's branch by name. On a fork it lives on the fork, which is why an
     /// integration fetches `head_ref` instead and this is only for saying.
@@ -562,30 +562,33 @@ fn has_active_reviewers(pr: &PullRequestNode) -> bool {
     reviewed + requested > 0
 }
 
-/// Whether a merge conflict is standing between this pull request and someone who wants to review it.
+/// Whether somebody is waiting on this pull request, as the amber bar's reviewer rule asks it.
 ///
-/// The second half of the work-required axis. A conflict on a pull request nobody is attached to
-/// blocks nobody and is yours to deal with whenever; a conflict with a reviewer waiting is work you
-/// owe them, which is the same situation a standing `CHANGES_REQUESTED` describes.
-///
-/// Drafts never reach here: `CHANGES_QUERY` carries `draft:false`, so the server filters them out.
-fn blocked_by_conflict(pr: &PullRequestNode) -> bool {
-    is_conflicting(pr) && has_active_reviewers(pr)
+/// A conflict or a red build on a pull request nobody is attached to blocks nobody and is yours to deal
+/// with whenever; with a reviewer waiting it is work you owe them, the same situation a standing
+/// `CHANGES_REQUESTED` describes. The rule is amber's own and standalone: switched off, both count on
+/// any pull request of yours.
+fn waited_on(pr: &PullRequestNode, rules: Rules) -> bool {
+    !rules.amber_need_reviewer || has_active_reviewers(pr)
 }
 
 /// Whether this pull request needs work from its author before a reviewer can move.
 ///
-/// Two independent reasons, counted once: a reviewer's objection still standing against it
-/// (`still_on_you`), or a merge conflict with someone waiting (`blocked_by_conflict`). The bar used
-/// to be only the first, and its query said so server-side; it now asks for every open pull request
-/// of yours and decides here, because `mergeable` is not a search qualifier.
+/// A reviewer's objection still standing against it (`still_on_you`), or, while somebody is waiting on
+/// it (`waited_on`), a merge conflict or failed checks, or open comments from the automatic reviewer.
+/// The bar used to be only the first, and its query said so server-side; it now asks for every open
+/// pull request of yours and decides here, because `mergeable` is not a search qualifier.
 /// Each reason after the first can be switched off (`Rules`), and off means ignored: not work here,
 /// and not a veto on `approved` either, so the two bars stay disjoint.
+///
+/// Failed checks used to count only once approved, and a requested reviewer sat in front of a red
+/// build with the bar dark. Now they draw the conflict's line. Drafts reach here only when the amber
+/// bar's own draft rule is off; then a draft is judged like any pull request.
 fn work_required(pr: &PullRequestNode, rules: Rules) -> bool {
     still_on_you(pr)
-        || (rules.conflicts && blocked_by_conflict(pr))
+        || (rules.conflicts && is_conflicting(pr) && waited_on(pr, rules))
         || (rules.bot_comments && copilot_unresolved(pr) > 0)
-        || (rules.failed_checks && checks_failed(pr) && has_approval(pr))
+        || (rules.failed_checks && checks_failed(pr) && waited_on(pr, rules))
 }
 
 /// Whether the head's checks definitely failed: a rollup of `FAILURE` or `ERROR`. Pending, no
@@ -1731,12 +1734,39 @@ mod tests {
         assert_eq!(judge(&running, Rules { running_checks: false, ..Rules::ALL }), (1, 0), "off: green at once");
     }
 
-    /// Only approved pull requests move: red CI on one nobody approved yet is not this rule's business.
+    /// Red CI is work as soon as someone is waiting on the pull request, approved or not: a reviewer
+    /// requested and nothing reviewed yet is the case that was missed. With nobody attached it blocks
+    /// nobody and stays quiet, the same line a conflict draws.
     #[test]
-    fn failed_checks_without_an_approval_are_not_work() {
-        let hit = reviewed("https://github.com/o/r/pull/1", &[]);
-        let body = payload(&[format!(r#"{{"statusCheckRollup":{{"state":"FAILURE"}},{}"#, &hit[1..])]);
-        assert_eq!(count_of(&body), 0);
+    fn failed_checks_with_someone_waiting_are_work() {
+        let red = |hit: String| format!(r#"{{"statusCheckRollup":{{"state":"FAILURE"}},{}"#, &hit[1..]);
+        let requested = conflicted("https://github.com/o/r/pull/1", "MERGEABLE", &[], &[("User", "alice")]);
+        assert_eq!(count_of(&payload(&[red(requested)])), 1, "a requested reviewer waits on red CI");
+        let nobody = reviewed("https://github.com/o/r/pull/1", &[]);
+        assert_eq!(count_of(&payload(&[red(nobody)])), 0, "nobody attached, nobody blocked");
+    }
+
+    /// The reviewer rule is amber's own and narrows conflicts as it narrows failed checks: off, a
+    /// conflict counts with nobody attached too.
+    #[test]
+    fn a_conflict_counts_with_nobody_attached_when_the_reviewer_rule_is_off() {
+        let body = payload(&[conflicted("https://github.com/o/r/pull/1", "CONFLICTING", &[], &[])]);
+        let count = |rules: Rules| parse_reviewed(&body, |pr| work_required(pr, rules)).expect("parses").count.expect("a count");
+        assert_eq!(count(Rules::ALL), 0, "nobody attached, nobody blocked");
+        assert_eq!(count(Rules { amber_need_reviewer: false, ..Rules::ALL }), 1);
+        assert_eq!(count(Rules { amber_need_reviewer: false, conflicts: false, ..Rules::ALL }), 0);
+    }
+
+    /// The reviewer filter switched off: red CI counts with nobody attached too. Switched-off failed
+    /// checks still count nothing, whatever the filter says.
+    #[test]
+    fn failed_checks_count_with_nobody_attached_when_the_reviewer_filter_is_off() {
+        let nobody = reviewed("https://github.com/o/r/pull/1", &[]);
+        let body = payload(&[format!(r#"{{"statusCheckRollup":{{"state":"FAILURE"}},{}"#, &nobody[1..])]);
+        let count = |rules: Rules| parse_reviewed(&body, |pr| work_required(pr, rules)).expect("parses").count.expect("a count");
+        assert_eq!(count(Rules::ALL), 0);
+        assert_eq!(count(Rules { amber_need_reviewer: false, ..Rules::ALL }), 1);
+        assert_eq!(count(Rules { amber_need_reviewer: false, failed_checks: false, ..Rules::ALL }), 0);
     }
 
     /// The conflict reaches the page too, or a pull request counted for a reason the page cannot show

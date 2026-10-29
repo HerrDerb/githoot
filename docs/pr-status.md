@@ -9,7 +9,12 @@ Three independent signals, each a GitHub Search query against your own pull requ
 |---|---|---|
 | 🔴 | `is:pr review-requested:@me state:open draft:false archived:false -label:dependencies -author:app/dependabot -author:app/renovate` | counted as is |
 | 🟢 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when its latest reviews hold an `APPROVED` and no `CHANGES_REQUESTED` |
-| 🟠 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when a reviewer's objection still stands, when it has a merge conflict and someone is waiting on it, **or** when Copilot has unresolved comments on it |
+| 🟠 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when a reviewer's objection still stands, when it has a merge conflict or failed checks and someone is waiting on it, **or** when Copilot has unresolved comments on it |
+
+Each bar's own **"not a draft"** rule (`ruleRedSkipDrafts`, `ruleGreenSkipDrafts`, `ruleAmberSkipDrafts`)
+is what puts `draft:false` in its query. Switched off, it drops that qualifier from that bar's search
+alone, and drafts are judged by the bar's other rules like any pull request. On GitLab, green and amber
+share one list, which then carries drafts, and the bar that still skips them drops them itself.
 
 **The green bar reads the reviews, not `review:approved`.** That qualifier looks like "somebody approved
 this", and it is not. It is a projection of `reviewDecision`, GitHub's verdict on whether the base branch's
@@ -54,16 +59,18 @@ requested changes**. Adding a *different* reviewer does not clear it — the ori
 stands. A pending *team* request does not clear it either, since a team has no login to match against the
 blocker; erring that way keeps the bar lit rather than hiding work.
 
-*A merge conflict with someone waiting.* GitHub's `mergeable` says `CONFLICTING`, and the pull request has
-a reviewer attached — either a pending request or a standing review. A conflict blocks the reviewer as
-surely as their own objection does, and it is yours to fix. A conflict on a pull request **nobody is
-attached to** blocks nobody and does not count.
+**Somebody waiting** is a rule of its own, `ruleAmberNeedReviewer`, and it narrows the next two: a
+reviewer attached, either a pending request or a standing review. A conflict or a red build blocks that
+reviewer as surely as their own objection does, and it is yours to fix; on a pull request **nobody is
+attached to** it blocks nobody and does not count. Switched off, both count on any pull request of yours.
+It acts on amber only: an approved pull request always has a reviewer, so green would not change.
 
-*Approved, but the checks failed.* An approved pull request whose head's check rollup is `FAILURE` or
-`ERROR` is work, not news, so it moves from the green bar to this one, with the approval still shown on
-its card. Only a definite failure moves it: pending checks, no checks at all, a rollup the token may not
-read, or a state this version does not know leave it on green. A pull request nobody has approved yet is
-not moved by red CI; it was never on the green bar to begin with.
+*A merge conflict.* GitHub's `mergeable` says `CONFLICTING`.
+
+*Failed checks.* The head's check rollup is `FAILURE` or `ERROR`. Approved or not: a requested reviewer
+looking at a red build is waiting on you just the same. An approved one moves from the green bar to this
+one, with the approval still shown on its card. Only a definite failure counts: pending checks, no
+checks at all, a rollup the token may not read, or a state this version does not know do not.
 
 *Unresolved Copilot comments.* **Copilot never approves and never requests changes — it only
 comments**, so `latestOpinionatedReviews` drops its review entirely and the objection rule above cannot
@@ -94,7 +101,7 @@ to be told about the moment you deal with it.
 hide every conflicted pull request that carries no objection, and `mergeable` is not a search qualifier.
 So it asks for every open pull request of yours and decides here. `draft:false` came with that: a draft is
 work you already know is unfinished, so neither half is news on one. Before this, a draft carrying a
-changes-requested review did count.
+changes-requested review did count. `ruleAmberSkipDrafts=off` brings exactly that back.
 
 Caps, which undercount rather than overcount: the first 100 matching pull requests, and the first 20
 reviews and 20 pending requests within each.

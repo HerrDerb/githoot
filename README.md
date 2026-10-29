@@ -106,8 +106,9 @@ are fixed, so a bar always means the same thing → [the whole design](docs/icon
 ### How each state is decided
 
 The same rules apply to every portal, GitHub and GitLab alike. "Pull request" covers GitLab's merge
-requests. Only pull requests that are **open and not drafts** are ever considered: a draft is work
-nobody can act on yet, so it lights nothing until it is marked ready.
+requests. Only **open** pull requests are considered, and by default **no drafts**: a draft is work
+nobody can act on yet, so it lights nothing until it is marked ready. Each bar has its own "not a
+draft" rule; switched off, that bar judges drafts by its other rules like any pull request.
 
 **Red bar: somebody wants your review.** A pull request counts when a review has been asked of you and
 you have not given it yet.
@@ -133,16 +134,19 @@ true:
 
 - a reviewer asked for changes and you have not handed it back to them by asking for their review
   again,
-- it conflicts with the branch it merges into while somebody is reviewing it (a conflict on a pull
-  request nobody is looking at blocks nobody),
-- it is approved but its checks failed (red CI on an approved pull request is work, not good news),
+- it conflicts with the branch it merges into while somebody is reviewing it,
+- its checks failed while somebody is reviewing it, approved or not,
 - the automatic reviewer left comments that are still open and not outdated (GitHub's Copilot, if you
   count those).
+
+"While somebody is reviewing it" is a rule of its own: a conflict or a red build nobody is waiting on
+blocks nobody. Switch it off to count both on any pull request of yours.
 
 **The rules can be switched** on **General**, one folded section per bar: the red and green bars are
 drawn as the path a pull request walks to them, the amber bar as its list of reasons. A green-bar rule
 switched off is ignored on both green and amber; on the red bar you can also count only requests naming
-you directly (GitHub), or let pull requests opened by bots in.
+you directly (GitHub), or let pull requests opened by bots in. The draft rules and amber's reviewer rule
+act on their own bar only.
 
 **The green and amber bars never light for the same pull request.** Anything that puts it on amber takes
 it off green: work comes before good news, and the approval is still there once the work is done.

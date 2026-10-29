@@ -37,6 +37,10 @@ const KEY_STATUS_COMPONENTS: &str = "statusComponents";
 const KEY_COPILOT_REVIEWS: &str = "copilotReviews";
 const KEY_RULE_CONFLICTS: &str = "ruleConflicts";
 const KEY_RULE_FAILED_CHECKS: &str = "ruleFailedChecks";
+const KEY_RULE_AMBER_NEED_REVIEWER: &str = "ruleAmberNeedReviewer";
+const KEY_RULE_RED_SKIP_DRAFTS: &str = "ruleRedSkipDrafts";
+const KEY_RULE_GREEN_SKIP_DRAFTS: &str = "ruleGreenSkipDrafts";
+const KEY_RULE_AMBER_SKIP_DRAFTS: &str = "ruleAmberSkipDrafts";
 const KEY_RULE_RUNNING_CHECKS: &str = "ruleRunningChecks";
 const KEY_RULE_TEAM_REQUESTS: &str = "ruleTeamRequests";
 const KEY_RULE_SKIP_BOTS: &str = "ruleSkipBots";
@@ -202,6 +206,12 @@ pub struct Config {
     /// The green bar's other switchable rules; see `portal::types::Rules`. All on by default.
     pub rule_conflicts: bool,
     pub rule_failed_checks: bool,
+    /// Failed checks count as amber only with a reviewer attached.
+    pub rule_amber_need_reviewer: bool,
+    /// Each bar's own "not a draft" rule.
+    pub rule_red_skip_drafts: bool,
+    pub rule_green_skip_drafts: bool,
+    pub rule_amber_skip_drafts: bool,
     pub rule_running_checks: bool,
     /// The red bar's rules; see `portal::types::Rules`. On by default.
     pub rule_team_requests: bool,
@@ -279,6 +289,10 @@ impl Switch {
 pub struct RuleSwitches {
     conflicts: Switch,
     failed_checks: Switch,
+    amber_need_reviewer: Switch,
+    skip_drafts_red: Switch,
+    skip_drafts_green: Switch,
+    skip_drafts_amber: Switch,
     running_checks: Switch,
     bot_comments: Switch,
     team_requests: Switch,
@@ -291,6 +305,10 @@ impl RuleSwitches {
         RuleSwitches {
             conflicts: Switch::new(r.conflicts),
             failed_checks: Switch::new(r.failed_checks),
+            amber_need_reviewer: Switch::new(r.amber_need_reviewer),
+            skip_drafts_red: Switch::new(r.skip_drafts_red),
+            skip_drafts_green: Switch::new(r.skip_drafts_green),
+            skip_drafts_amber: Switch::new(r.skip_drafts_amber),
             running_checks: Switch::new(r.running_checks),
             bot_comments: Switch::new(r.bot_comments),
             team_requests: Switch::new(r.team_requests),
@@ -303,6 +321,10 @@ impl RuleSwitches {
         crate::portal::types::Rules {
             conflicts: self.conflicts.is_on(),
             failed_checks: self.failed_checks.is_on(),
+            amber_need_reviewer: self.amber_need_reviewer.is_on(),
+            skip_drafts_red: self.skip_drafts_red.is_on(),
+            skip_drafts_green: self.skip_drafts_green.is_on(),
+            skip_drafts_amber: self.skip_drafts_amber.is_on(),
             running_checks: self.running_checks.is_on(),
             bot_comments: self.bot_comments.is_on(),
             team_requests: self.team_requests.is_on(),
@@ -315,6 +337,10 @@ impl RuleSwitches {
         let r = cfg.rules();
         self.conflicts.set(r.conflicts);
         self.failed_checks.set(r.failed_checks);
+        self.amber_need_reviewer.set(r.amber_need_reviewer);
+        self.skip_drafts_red.set(r.skip_drafts_red);
+        self.skip_drafts_green.set(r.skip_drafts_green);
+        self.skip_drafts_amber.set(r.skip_drafts_amber);
         self.running_checks.set(r.running_checks);
         self.bot_comments.set(r.bot_comments);
         self.team_requests.set(r.team_requests);
@@ -348,13 +374,24 @@ pub const GENERAL: &[Setting] = &[
     // The red bar's rules, drawn as the path a review request walks to red (see `ui::rule_line`).
     red_step(KEY_RULE_TEAM_REQUESTS, "Team requests count", "A review asked of a team you are in counts, not only one naming you. Anyone on the team reviewing clears it."),
     red_step(KEY_RULE_SKIP_BOTS, "Not opened by a bot", "Pull requests from dependency updaters such as Dependabot and Renovate stay off the red bar."),
+    red_step(KEY_RULE_RED_SKIP_DRAFTS, "Not a draft", "A draft is not ready for review by GitHub's own definition. Off, a review asked on a draft counts."),
     // The green bar's rules, drawn as the path a pull request walks to green (see `ui::rule_line`).
-    // Each is ignored on both bars when off, so none can put a pull request on green and amber at once.
-    step_setting(KEY_RULE_CONFLICTS, "No merge conflict", "else amber", "While somebody is reviewing it. A conflict nobody is waiting on blocks nobody."),
-    step_setting(KEY_RULE_FAILED_CHECKS, "Checks did not fail", "else amber", "Red CI on an approved pull request is work, not good news."),
+    // Each is ignored on both bars when off, so none can put a pull request on green and amber at once,
+    // except the draft rule, which is each bar's own.
+    step_setting(KEY_RULE_GREEN_SKIP_DRAFTS, "Not a draft", "else not counted", "This bar's own. Off, an approved draft lights green like any pull request."),
+    step_setting(KEY_RULE_CONFLICTS, "No merge conflict", "else amber", "With the branch it merges into."),
+    step_setting(KEY_RULE_FAILED_CHECKS, "Checks did not fail", "else amber", "Red CI is work, not good news."),
+    // The amber bar's own rules (`AMBER_ONLY`): declared in this group so the green form saves them,
+    // drawn on the amber line only. An approved pull request always has a reviewer, so the first would
+    // change nothing on green.
+    step_setting(KEY_RULE_AMBER_NEED_REVIEWER, "Only while somebody reviews it", "else not counted", "A pending request or a standing review. Narrows a merge conflict and failed checks: nobody waiting, nobody blocked. Off counts them on any of your pull requests."),
+    step_setting(KEY_RULE_AMBER_SKIP_DRAFTS, "Not a draft", "else not counted", "This bar's own. Off, a draft needing work counts like any pull request."),
     step_setting(KEY_RULE_RUNNING_CHECKS, "Checks have finished", "else waits", "Neither bar until they pass. A pull request with no checks is never held back."),
     step_setting(KEY_COPILOT_REVIEWS, "Automatic reviewer's comments resolved", "else amber", "Copilot reviews by commenting, never by a verdict. Open, current comments count."),
 ];
+
+/// The green group's keys the amber line draws instead of the green one.
+pub const AMBER_ONLY: [&str; 2] = [KEY_RULE_AMBER_NEED_REVIEWER, KEY_RULE_AMBER_SKIP_DRAFTS];
 
 const fn step_setting(key: &'static str, label: &'static str, otherwise: &'static str, help: &'static str) -> Setting {
     Setting { key, label, kind: Kind::Step { default_on: true, otherwise }, help, group: GREEN_RULES_GROUP, live: true }
@@ -460,6 +497,10 @@ pub fn value_of(cfg: &Config, key: &str) -> String {
         KEY_COPILOT_REVIEWS => flag(cfg.copilot_reviews),
         KEY_RULE_CONFLICTS => flag(cfg.rule_conflicts),
         KEY_RULE_FAILED_CHECKS => flag(cfg.rule_failed_checks),
+        KEY_RULE_AMBER_NEED_REVIEWER => flag(cfg.rule_amber_need_reviewer),
+        KEY_RULE_RED_SKIP_DRAFTS => flag(cfg.rule_red_skip_drafts),
+        KEY_RULE_GREEN_SKIP_DRAFTS => flag(cfg.rule_green_skip_drafts),
+        KEY_RULE_AMBER_SKIP_DRAFTS => flag(cfg.rule_amber_skip_drafts),
         KEY_RULE_RUNNING_CHECKS => flag(cfg.rule_running_checks),
         KEY_RULE_TEAM_REQUESTS => flag(cfg.rule_team_requests),
         KEY_RULE_SKIP_BOTS => flag(cfg.rule_skip_bots),
@@ -653,6 +694,10 @@ impl Config {
             // Default **on**, like every rule on the green bar's line: off loosens what green means.
             rule_conflicts: !values.get(KEY_RULE_CONFLICTS).is_some_and(|v| is_off(v)),
             rule_failed_checks: !values.get(KEY_RULE_FAILED_CHECKS).is_some_and(|v| is_off(v)),
+            rule_amber_need_reviewer: !values.get(KEY_RULE_AMBER_NEED_REVIEWER).is_some_and(|v| is_off(v)),
+            rule_red_skip_drafts: !values.get(KEY_RULE_RED_SKIP_DRAFTS).is_some_and(|v| is_off(v)),
+            rule_green_skip_drafts: !values.get(KEY_RULE_GREEN_SKIP_DRAFTS).is_some_and(|v| is_off(v)),
+            rule_amber_skip_drafts: !values.get(KEY_RULE_AMBER_SKIP_DRAFTS).is_some_and(|v| is_off(v)),
             rule_running_checks: !values.get(KEY_RULE_RUNNING_CHECKS).is_some_and(|v| is_off(v)),
             rule_team_requests: !values.get(KEY_RULE_TEAM_REQUESTS).is_some_and(|v| is_off(v)),
             rule_skip_bots: !values.get(KEY_RULE_SKIP_BOTS).is_some_and(|v| is_off(v)),
@@ -739,6 +784,10 @@ impl Config {
         crate::portal::types::Rules {
             conflicts: self.rule_conflicts,
             failed_checks: self.rule_failed_checks,
+            amber_need_reviewer: self.rule_amber_need_reviewer,
+            skip_drafts_red: self.rule_red_skip_drafts,
+            skip_drafts_green: self.rule_green_skip_drafts,
+            skip_drafts_amber: self.rule_amber_skip_drafts,
             running_checks: self.rule_running_checks,
             bot_comments: self.copilot_reviews,
             team_requests: self.rule_team_requests,
@@ -891,8 +940,17 @@ fn default_config() -> String {
          {KEY_RULE_CONFLICTS}=on\n\
          # Failed checks: amber instead of green.\n\
          {KEY_RULE_FAILED_CHECKS}=on\n\
+         # The amber bar counts a merge conflict or failed checks only while somebody reviews the pull\n\
+         # request. Off counts them on any of yours:\n\
+         {KEY_RULE_AMBER_NEED_REVIEWER}=on\n\
          # Checks still running: on neither bar until they pass.\n\
          {KEY_RULE_RUNNING_CHECKS}=on\n\
+         \n\
+         # Drafts, each bar on its own. On leaves drafts off that bar; off judges a draft by the\n\
+         # bar's rules like any pull request.\n\
+         {KEY_RULE_RED_SKIP_DRAFTS}=on\n\
+         {KEY_RULE_GREEN_SKIP_DRAFTS}=on\n\
+         {KEY_RULE_AMBER_SKIP_DRAFTS}=on\n\
          \n\
          # What puts a review request on the red bar. A request to a team you are in counts, not only\n\
          # one naming you (GitHub):\n\
@@ -1154,7 +1212,19 @@ mod tests {
             declared().filter(|s| s.live).map(|s| s.key).collect();
         assert_eq!(
             live,
-            [KEY_SOUND, KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS, KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS]
+            [
+                KEY_SOUND,
+                KEY_RULE_TEAM_REQUESTS,
+                KEY_RULE_SKIP_BOTS,
+                KEY_RULE_RED_SKIP_DRAFTS,
+                KEY_RULE_GREEN_SKIP_DRAFTS,
+                KEY_RULE_CONFLICTS,
+                KEY_RULE_FAILED_CHECKS,
+                KEY_RULE_AMBER_NEED_REVIEWER,
+                KEY_RULE_AMBER_SKIP_DRAFTS,
+                KEY_RULE_RUNNING_CHECKS,
+                KEY_COPILOT_REVIEWS,
+            ]
         );
         let live = |key: &str| declared().any(|s| s.key == key && s.live);
         assert!(live(KEY_SOUND) && !live(KEY_LOG_LEVEL));
@@ -1274,13 +1344,24 @@ mod tests {
         assert!(values.get(KEY_STATUS_COMPONENTS).is_some_and(|v| v.contains("Pull Requests")));
         // The two keys shipped off. Written explicitly anyway, so the file says the doors exist.
         assert_eq!(values.get(KEY_LOCAL_API), Some(&"off"));
-        for rule in [KEY_RULE_CONFLICTS, KEY_RULE_FAILED_CHECKS, KEY_RULE_RUNNING_CHECKS, KEY_COPILOT_REVIEWS, KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS] {
+        for rule in [
+            KEY_RULE_CONFLICTS,
+            KEY_RULE_FAILED_CHECKS,
+            KEY_RULE_AMBER_NEED_REVIEWER,
+            KEY_RULE_RED_SKIP_DRAFTS,
+            KEY_RULE_GREEN_SKIP_DRAFTS,
+            KEY_RULE_AMBER_SKIP_DRAFTS,
+            KEY_RULE_RUNNING_CHECKS,
+            KEY_COPILOT_REVIEWS,
+            KEY_RULE_TEAM_REQUESTS,
+            KEY_RULE_SKIP_BOTS,
+        ] {
             assert_eq!(values.get(rule), Some(&"on"), "{rule}: every green-bar rule ships on");
         }
         // And nothing else, so a key added to the template without being read is caught. The
         // integration keys are held to the registry by their own test below.
         let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
-        assert_eq!(own, 14, "unexpected keys in the template: {values:?}");
+        assert_eq!(own, 18, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -1337,6 +1418,10 @@ mod tests {
             KEY_COPILOT_REVIEWS,
             KEY_RULE_CONFLICTS,
             KEY_RULE_FAILED_CHECKS,
+            KEY_RULE_AMBER_NEED_REVIEWER,
+            KEY_RULE_RED_SKIP_DRAFTS,
+            KEY_RULE_GREEN_SKIP_DRAFTS,
+            KEY_RULE_AMBER_SKIP_DRAFTS,
             KEY_RULE_RUNNING_CHECKS,
             KEY_RULE_TEAM_REQUESTS,
             KEY_RULE_SKIP_BOTS,
@@ -2071,6 +2156,41 @@ mod tests {
         for key in ["ruleConflicts", "ruleFailedChecks", "ruleRunningChecks", "copilotReviews"] {
             assert_eq!(value_of(&some_off, key), "off", "{key}");
             assert!(GENERAL.iter().any(|s| s.key == key && s.live), "{key} is a live General setting");
+        }
+    }
+
+    /// The reviewer filter on failed checks and each bar's draft rule: on by default, each read on its
+    /// own, live. The red one sits in the red group; the rest are saved by the green form, and the
+    /// amber line draws the two that are amber's own.
+    #[test]
+    fn the_reviewer_and_draft_rules_default_on_and_follow_the_file() {
+        let on = from("");
+        assert_eq!(on.rules(), crate::portal::types::Rules::ALL);
+        let off = from(
+            "ruleAmberNeedReviewer=off\nruleRedSkipDrafts=off\nruleGreenSkipDrafts=off\nruleAmberSkipDrafts=off\n",
+        );
+        assert_eq!(
+            off.rules(),
+            crate::portal::types::Rules {
+                amber_need_reviewer: false,
+                skip_drafts_red: false,
+                skip_drafts_green: false,
+                skip_drafts_amber: false,
+                ..crate::portal::types::Rules::ALL
+            }
+        );
+        let switches = RuleSwitches::new(&on);
+        switches.set_from(&off);
+        assert_eq!(switches.now(), off.rules(), "a save reaches the next poll without a restart");
+        let group = |key: &str| GENERAL.iter().find(|s| s.key == key && s.live).map(|s| s.group);
+        for key in [KEY_RULE_AMBER_NEED_REVIEWER, KEY_RULE_GREEN_SKIP_DRAFTS, KEY_RULE_AMBER_SKIP_DRAFTS] {
+            assert_eq!(group(key), Some(GREEN_RULES_GROUP), "{key}");
+        }
+        assert_eq!(group(KEY_RULE_RED_SKIP_DRAFTS), Some(RED_RULES_GROUP));
+        assert_eq!(AMBER_ONLY, [KEY_RULE_AMBER_NEED_REVIEWER, KEY_RULE_AMBER_SKIP_DRAFTS]);
+        for key in [KEY_RULE_AMBER_NEED_REVIEWER, KEY_RULE_RED_SKIP_DRAFTS, KEY_RULE_GREEN_SKIP_DRAFTS, KEY_RULE_AMBER_SKIP_DRAFTS] {
+            assert_eq!(value_of(&off, key), "off", "{key}");
+            assert_eq!(step_portals(key), None, "both portals judge {key}");
         }
     }
 

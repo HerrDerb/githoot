@@ -77,6 +77,20 @@ fragment mr on MergeRequest{\
   diffStatsSummary{additions deletions fileCount}\
 }";
 
+/// The document as the draft rules shape it. The review list drops `draft:false` when red wants
+/// drafts; the authored list, shared by green and amber, when either does, and each of those two then
+/// drops drafts it does not want itself (`classify_with_rules`).
+fn mr_document(rules: Rules) -> String {
+    let mut doc = MR_DOCUMENT.to_string();
+    if !rules.skip_drafts_red {
+        doc = doc.replace("reviewRequestedMergeRequests(state:opened,draft:false,", "reviewRequestedMergeRequests(state:opened,");
+    }
+    if !(rules.skip_drafts_green && rules.skip_drafts_amber) {
+        doc = doc.replace("authoredMergeRequests(state:opened,draft:false,", "authoredMergeRequests(state:opened,");
+    }
+    doc
+}
+
 /// Asks for the axes marked `true` in one request. No axis in play costs no request at all.
 pub fn poll(client: &Client, graphql_url: &str, token: &str, axes: [bool; 3], rules: Rules) -> PollOutcome {
     let mut outcome = PollOutcome::default();
@@ -86,7 +100,7 @@ pub fn poll(client: &Client, graphql_url: &str, token: &str, axes: [bool; 3], ru
     let review = axes[PrAxis::ReviewRequested.index()];
     let authored = axes[PrAxis::ReadyToMerge.index()] || axes[PrAxis::ChangesRequested.index()];
     let body = serde_json::json!({
-        "query": MR_DOCUMENT,
+        "query": mr_document(rules),
         "variables": { "hits": HITS_CAP, "people": PEOPLE_CAP, "review": review, "authored": authored },
     });
     let request = client
@@ -158,10 +172,17 @@ fn classify_with_rules(
         if !axes[axis.index()] {
             continue;
         }
+        // Each bar's own draft rule, checked here as well as in the document: green and amber share one
+        // list, which carries drafts whenever either of them wants them.
+        let wanted = |mr: &MergeRequest, skip_drafts: bool| !(skip_drafts && mr.draft);
         let judged = match axis {
-            PrAxis::ReviewRequested => judge(&lists.review_requested, |mr| awaiting_review(mr, &lists.username, rules)),
-            PrAxis::ReadyToMerge => judge(&lists.authored, |mr| approved(mr, rules)),
-            PrAxis::ChangesRequested => judge(&lists.authored, |mr| work_required(mr, rules)),
+            PrAxis::ReviewRequested => judge(&lists.review_requested, |mr| {
+                wanted(mr, rules.skip_drafts_red) && awaiting_review(mr, &lists.username, rules)
+            }),
+            PrAxis::ReadyToMerge => judge(&lists.authored, |mr| wanted(mr, rules.skip_drafts_green) && approved(mr, rules)),
+            PrAxis::ChangesRequested => {
+                judge(&lists.authored, |mr| wanted(mr, rules.skip_drafts_amber) && work_required(mr, rules))
+            }
         };
         results[axis.index()] = Some(judged);
     }
@@ -394,12 +415,14 @@ fn has_active_reviewers(mr: &MergeRequest) -> bool {
     reviewers(mr).next().is_some() || approvers(mr).next().is_some()
 }
 
-/// Needs work from its author: a standing objection, or a conflict with someone waiting. Same rule as
-/// GitHub's, minus the re-request intersection GitLab's reset makes unnecessary.
+/// Needs work from its author: a standing objection, or a conflict or failed pipeline while somebody
+/// waits on it. Same rule as GitHub's, minus the re-request intersection GitLab's reset makes
+/// unnecessary. The amber bar's reviewer rule, switched off, drops the "somebody waits" part.
 fn work_required(mr: &MergeRequest, rules: Rules) -> bool {
+    let waited_on = !rules.amber_need_reviewer || has_active_reviewers(mr);
     has_objection(mr)
-        || (rules.conflicts && mr.conflicts && has_active_reviewers(mr))
-        || (rules.failed_checks && pipeline_failed(mr) && has_approval(mr))
+        || (rules.conflicts && mr.conflicts && waited_on)
+        || (rules.failed_checks && pipeline_failed(mr) && waited_on)
 }
 
 /// The head pipeline definitely failed. Running, cancelled, skipped or no pipeline are not failures.
@@ -732,10 +755,63 @@ mod tests {
             assert_eq!(approved(&body), Vec::<String>::new(), "{running}: not green while running");
             assert_eq!(work(&body), Vec::<String>::new(), "{running}: not work");
         }
-        // Unapproved with a failed pipeline: not this rule's business.
-        let m = mr("p/2", &[("alice", "UNREVIEWED")], &[], false);
+        // Unapproved with a failed pipeline and a reviewer waiting: work all the same. With nobody
+        // attached it blocks nobody, the line a conflict draws.
+        let red = |m: String| format!(r#"{{"headPipeline":{{"status":"FAILED"}},{}"#, &m[1..]);
+        let body = payload(&[], &[red(mr("p/2", &[("alice", "UNREVIEWED")], &[], false)), red(mr("p/3", &[], &[], false))]);
+        assert_eq!(work(&body), ["p/2"]);
+    }
+
+    /// The reviewer rule narrows conflicts too: off, a conflict counts with nobody attached.
+    #[test]
+    fn a_conflict_counts_with_nobody_attached_when_the_reviewer_rule_is_off() {
+        let body = payload(&[], &[mr("c/1", &[], &[], true)]);
+        let work = |rules: Rules| urls(&classify_with_rules(StatusCode::OK, &headers(&[]), &body, 0, ALL, rules)[PrAxis::ChangesRequested.index()]);
+        assert_eq!(work(Rules::ALL), Vec::<String>::new());
+        assert_eq!(work(Rules { amber_need_reviewer: false, ..Rules::ALL }), ["c/1"]);
+    }
+
+    /// The reviewer filter switched off: a failed pipeline counts with nobody attached too.
+    #[test]
+    fn a_failed_pipeline_counts_with_nobody_attached_when_the_reviewer_filter_is_off() {
+        let m = mr("p/1", &[], &[], false);
         let body = payload(&[], &[format!(r#"{{"headPipeline":{{"status":"FAILED"}},{}"#, &m[1..])]);
-        assert_eq!(work(&body), Vec::<String>::new());
+        let work = |rules: Rules| urls(&classify_with_rules(StatusCode::OK, &headers(&[]), &body, 0, ALL, rules)[PrAxis::ChangesRequested.index()]);
+        assert_eq!(work(Rules::ALL), Vec::<String>::new());
+        assert_eq!(work(Rules { amber_need_reviewer: false, ..Rules::ALL }), ["p/1"]);
+    }
+
+    /// Each bar's draft rule keeps drafts off that bar alone; off, a draft is judged like any merge
+    /// request. Green and amber read the same list, so each has to drop drafts itself.
+    #[test]
+    fn each_bar_judges_drafts_only_while_its_own_draft_rule_is_off() {
+        let draft = |m: String| m.replacen('{', r#"{"draft":true,"#, 1);
+        let body = payload(
+            &[draft(mr("d/review", &[("me", "UNREVIEWED")], &[], false))],
+            &[draft(mr("d/approved", &[("alice", "APPROVED")], &["alice"], false)), draft(mr("d/work", &[("alice", "REQUESTED_CHANGES")], &[], false))],
+        );
+        let bars = |rules: Rules| classify_with_rules(StatusCode::OK, &headers(&[]), &body, 0, ALL, rules).map(|r| urls(&r));
+        let none = Vec::<String>::new();
+        assert_eq!(bars(Rules::ALL), [none.clone(), none.clone(), none.clone()], "every draft rule on: no drafts anywhere");
+        assert_eq!(bars(Rules { skip_drafts_red: false, ..Rules::ALL }), [vec!["d/review".to_string()], none.clone(), none.clone()]);
+        assert_eq!(bars(Rules { skip_drafts_green: false, ..Rules::ALL }), [none.clone(), vec!["d/approved".to_string()], none.clone()]);
+        assert_eq!(bars(Rules { skip_drafts_amber: false, ..Rules::ALL }), [none.clone(), none.clone(), vec!["d/work".to_string()]]);
+    }
+
+    /// The document asks for drafts only where a bar wants them: the review list for red, the authored
+    /// list (shared by green and amber) when either of those two wants them.
+    #[test]
+    fn the_document_asks_for_drafts_only_where_a_bar_wants_them() {
+        let filters = |rules: Rules| {
+            let doc = mr_document(rules);
+            let list = |name: &str| doc.split(name).nth(1).and_then(|r| r.split(')').next()).unwrap_or_default().contains("draft:false");
+            (list("reviewRequestedMergeRequests("), list("authoredMergeRequests("))
+        };
+        assert_eq!(filters(Rules::ALL), (true, true));
+        assert_eq!(filters(Rules { skip_drafts_red: false, ..Rules::ALL }), (false, true));
+        assert_eq!(filters(Rules { skip_drafts_green: false, ..Rules::ALL }), (true, false));
+        assert_eq!(filters(Rules { skip_drafts_amber: false, ..Rules::ALL }), (true, false));
+        assert_eq!(mr_document(Rules::ALL), MR_DOCUMENT, "all on is the document as it always was");
     }
 
     /// "Not opened by a bot" switched off lets a bot's merge request onto the red bar.

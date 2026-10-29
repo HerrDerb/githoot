@@ -73,8 +73,14 @@ pub struct PrEntry {
 pub struct Rules {
     /// A merge conflict with somebody reviewing: amber, and not green.
     pub conflicts: bool,
-    /// Failed checks on an approved pull request: amber, and not green.
+    /// Failed checks: amber, and not green.
     pub failed_checks: bool,
+    /// Failed checks count as amber only while a reviewer is attached. Amber only.
+    pub amber_need_reviewer: bool,
+    /// Drafts stay off that one bar. Off, a draft is judged by the bar's rules like any pull request.
+    pub skip_drafts_red: bool,
+    pub skip_drafts_green: bool,
+    pub skip_drafts_amber: bool,
     /// Checks still running: not green yet, on neither bar.
     pub running_checks: bool,
     /// The automatic reviewer's open comments (GitHub's Copilot): amber, and not green.
@@ -90,6 +96,10 @@ impl Rules {
     pub const ALL: Rules = Rules {
         conflicts: true,
         failed_checks: true,
+        amber_need_reviewer: true,
+        skip_drafts_red: true,
+        skip_drafts_green: true,
+        skip_drafts_amber: true,
         running_checks: true,
         bot_comments: true,
         team_requests: true,

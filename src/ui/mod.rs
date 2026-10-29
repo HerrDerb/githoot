@@ -405,9 +405,11 @@ fn switch_step(key: &str, label: &str, on: bool, form: Option<&str>, otherwise: 
 /// is independent. A rule switched off fades and its stretch of the line turns dashed.
 fn rule_line(group: &str, steps: &[&'static Setting], value: &dyn Fn(&Setting) -> String) -> String {
     let line = line_for(group);
+    // The amber bar's own rules are saved by this form but drawn on the amber line (`amber_line`).
+    let steps: Vec<&'static Setting> = steps.iter().copied().filter(|s| !crate::config::AMBER_ONLY.contains(&s.key)).collect();
     let on = steps.iter().filter(|s| crate::setting::flag(s.kind, &value(s))).count();
     let mut items: String = line.fixed.iter().map(|(text, otherwise)| fixed_step(text, otherwise)).collect();
-    for s in steps {
+    for s in &steps {
         let Kind::Step { otherwise, .. } = s.kind else { continue };
         items.push_str(&switch_step(s.key, s.label, crate::setting::flag(s.kind, &value(s)), None, otherwise, s.help));
     }
@@ -426,21 +428,34 @@ fn rule_line(group: &str, steps: &[&'static Setting], value: &dyn Fn(&Setting) -
 /// are the green bar's own switches, because each rule acts on both bars, so they are drawn here as
 /// the very same inputs, bound to the green section's form (`form="…"`). One setting, one answer,
 /// shown in both places; the site script keeps the two boxes in step.
+///
+/// Amber's own rules (`config::AMBER_ONLY`) are bound to the same form but drawn here alone, at the
+/// top and standalone, because each narrows several reasons rather than belonging to one.
 fn amber_line(green_form: &str, value: &dyn Fn(&str) -> String) -> String {
     const REASONS: [(&str, &str, &str); 3] = [
-        ("ruleConflicts", "A merge conflict while somebody reviews it", "A conflict nobody is waiting on blocks nobody."),
-        ("ruleFailedChecks", "Approved, but its checks failed", "Red CI on an approved pull request is work, not good news."),
+        ("ruleConflicts", "A merge conflict", "With the branch it merges into."),
+        ("ruleFailedChecks", "Checks failed", "Red CI is work, approved or not. It is never good news."),
         ("copilotReviews", "Automatic reviewer's comments open", "Copilot reviews by commenting, never by a verdict. Open, current comments count."),
     ];
-    let on = REASONS.iter().filter(|(key, _, _)| crate::config::is_on_or_default(&value(key))).count();
-    let mut items = fixed_step("A reviewer's request for changes stands", "");
+    let on = |key: &str| crate::config::is_on_or_default(&value(key));
+    let own = |key: &str| {
+        let s = crate::config::GENERAL.iter().find(|s| s.key == key).expect("amber's own rules are declared");
+        let Kind::Step { otherwise, .. } = s.kind else { unreachable!("amber's own rules are steps") };
+        switch_step(s.key, s.label, on(s.key), Some(green_form), otherwise, s.help)
+    };
+    let [need_reviewer, skip_drafts] = crate::config::AMBER_ONLY;
+    let mut items = own(skip_drafts);
+    items.push_str(&own(need_reviewer));
+    items.push_str(&fixed_step("A reviewer's request for changes stands", ""));
     for (key, label, help) in REASONS {
-        items.push_str(&switch_step(key, label, crate::config::is_on_or_default(&value(key)), Some(green_form), "also off green", help));
+        items.push_str(&switch_step(key, label, on(key), Some(green_form), "also off green", help));
     }
+    let total = REASONS.len() + crate::config::AMBER_ONLY.len();
+    let count = REASONS.iter().map(|(key, _, _)| *key).chain(crate::config::AMBER_ONLY).filter(|key| on(key)).count();
     fold(
         "Any one of these puts one of your pull requests on the amber bar",
-        format!("{on} of {} reasons on", REASONS.len()),
-        "reasons",
+        format!("{count} of {total} switches on"),
+        "switches",
         "A request for changes stands until you ask that reviewer for their review again. The switches here are the green bar's own: one setting, both bars.",
         "changes",
         items,
@@ -816,10 +831,15 @@ pub(crate) mod tests {
         let green = html.find("bar-mark bar-merge").expect("the green section");
         let at = green + html[green..].find(r#"<details class="gates-fold">"#).expect("folded, and closed: no open attribute");
         let fold = &html[at..at + html[at..].find("</details>").unwrap()];
-        assert!(fold.contains(r#"<span class="gates-count" data-gates-count>3 of 4 rules on</span>"#), "{fold}");
+        assert!(fold.contains(r#"<span class="gates-count" data-gates-count>4 of 5 rules on</span>"#), "{fold}");
         assert!(fold.find("<summary").unwrap() < fold.find(r#"<ol class="gates gates-merge">"#).unwrap(), "the line is inside the fold");
         let html_all_on = sections("tok", &Place::General, crate::config::GENERAL, &|_| "on".to_string(), None);
-        assert!(html_all_on.contains(">4 of 4 rules on<"));
+        assert!(html_all_on.contains(">5 of 5 rules on<"));
+        // Green's own draft rule is on its line; amber's own rules are drawn on amber's line only.
+        assert!(fold.contains(r#"name="ruleGreenSkipDrafts""#), "{fold}");
+        for key in crate::config::AMBER_ONLY {
+            assert!(!fold.contains(&format!(r#"name="{key}""#)), "{key} is amber's: {fold}");
+        }
         assert!(SITE_SCRIPT.contains("data-gates-count"), "the count follows the boxes");
         // The section is about the green bar, so its title wears it: the tray's own pill, in its green.
         assert!(html.contains(r#"<h2 class="section"><span class="bar-mark bar-merge" aria-hidden="true"></span>What makes a pull request green</h2>"#), "{html}");
@@ -837,7 +857,8 @@ pub(crate) mod tests {
         let amber = html.find("bar-mark bar-changes").expect("amber");
         assert!(red < green && green < amber, "bar order");
         assert_eq!(html.matches(r#"<details class="gates-fold">"#).count(), 3, "all folded");
-        assert!(html.contains(">1 of 2 rules on<"), "red counts its own switches: {html}");
+        assert!(html.contains(">2 of 3 rules on<"), "red counts its own switches: {html}");
+        assert!(html[red..green].contains(r#"name="ruleRedSkipDrafts""#), "red's own draft rule");
         for text in ["A review was asked of you", "You have not given it yet", "Team requests count", "Not opened by a bot", "Red bar"] {
             assert!(html[red..green].contains(text), "{text}");
         }
@@ -847,12 +868,20 @@ pub(crate) mod tests {
         }
         let green_form = html[green..amber].find("<form").map(|i| &html[green + i..]).expect("green's form");
         let id = green_form.split("id=\"").nth(1).and_then(|r| r.split('"').next()).expect("the form has an id");
-        for key in ["ruleConflicts", "ruleFailedChecks", "copilotReviews"] {
+        for key in ["ruleConflicts", "ruleFailedChecks", "copilotReviews", "ruleAmberNeedReviewer", "ruleAmberSkipDrafts"] {
             assert!(amber_html.contains(&format!(r#"name="{key}" value="on" form="{id}""#)), "{key} bound to green's form: {amber_html}");
         }
         assert!(amber_html.contains(r#"<span class="gate-else else-wait">also off green</span>"#));
-        // The amber count keeps its own word when the script recounts it.
-        assert!(amber_html.contains(r#"data-gates-count data-noun="reasons">3 of 3 reasons on<"#), "{amber_html}");
+        // Amber's own rules stand alone at the top, ahead of every reason they narrow, and no reason
+        // carries the reviewer condition in its own label any more.
+        let reviewer = amber_html.find(r#"name="ruleAmberNeedReviewer""#).unwrap();
+        let drafts = amber_html.find(r#"name="ruleAmberSkipDrafts""#).unwrap();
+        let first_reason = amber_html.find(r#"name="ruleConflicts""#).unwrap();
+        assert!(drafts < first_reason && reviewer < first_reason, "{amber_html}");
+        assert!(amber_html.contains(">A merge conflict<"), "{amber_html}");
+        assert!(!amber_html.contains("A merge conflict while somebody reviews it"), "{amber_html}");
+        // The amber count keeps its own word when the script recounts it, and counts every box.
+        assert!(amber_html.contains(r#"data-gates-count data-noun="switches">5 of 5 switches on<"#), "{amber_html}");
         assert!(SITE_SCRIPT.contains("data-noun"));
         // Red's rules act on red only, so its lead says so; amber reports saves in its own card.
         assert!(html[red..green].contains("A step you switch off is no longer checked."), "red's own lead");

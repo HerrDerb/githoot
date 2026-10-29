@@ -120,7 +120,9 @@ the portals but cannot write their sections yet.
 
 One document answers all three axes: `currentUser.reviewRequestedMergeRequests` and
 `authoredMergeRequests`, both `state:opened, draft:false`, with `@include` dropping a list no axis in
-play needs. Measured against gitlab.com on 2026-09-28 at complexity 157 of the 250 allowed.
+play needs. Measured against gitlab.com on 2026-09-28 at complexity 157 of the 250 allowed. A bar's
+draft rule switched off drops `draft:false` from its list; green and amber share the authored one, so
+whichever of them still skips drafts drops them in code.
 
 - **Review requested: your own reviewer state, not the list.** GitLab keeps you in `reviewers` after you
   review, where GitHub drops the request. So a merge request counts while *your* `reviewState` is
