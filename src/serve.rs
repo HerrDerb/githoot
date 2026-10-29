@@ -843,7 +843,7 @@ fn handle(mut stream: TcpStream, token: &str, port: u16) {
             let now = unix_now();
             let until = |key: &str| crate::mute::until(key, now);
             let mutes = page::Mutes { token, axis, now_unix: now, until: &until };
-            let json = page::items_json(&page::groups(&snapshot.groups), snapshot.polled_at, now, Some(&mutes));
+            let json = page::items_json(axis, &page::groups(&snapshot.groups), snapshot.polled_at, now, Some(&mutes));
             respond_as(
                 &mut stream,
                 200,
