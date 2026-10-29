@@ -215,6 +215,9 @@ vertical-align:baseline}\
 text-align:center;color:var(--dim)}\
 footer{margin-top:2rem;color:var(--dim);font-size:.78rem;text-align:center}\
 footer a,.empty a{color:var(--dim)}\
+.brand{display:flex;justify-content:center;align-items:center;gap:.45rem;margin-top:.9rem;\
+font-size:.78rem;color:var(--dim)}.brand img{border-radius:4px}\
+.brand a{color:var(--dim);text-decoration:none}.brand a:hover{color:var(--ink);text-decoration:underline}\
 .section{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
 margin:1.5rem 0 .5rem;font-weight:600}\
 .section a{font-weight:400;color:var(--dim);text-decoration:underline;text-underline-offset:.25em}\
@@ -600,7 +603,7 @@ pub fn axis_page(
         esc(nonce),
         REFRESH_SCRIPT.replace("REFRESH_MS", &REFRESH_MS.to_string())
     ));
-    h.push_str("</main>\n</body>\n</html>\n");
+    h.push_str(&page_end(token));
     h
 }
 
@@ -638,10 +641,21 @@ fn newest_first(list: &[PrEntry]) -> Vec<&PrEntry> {
 /// What the settings route says when `serve::install` was never called.
 pub fn settings_unavailable(token: &str) -> String {
     let mut h = shell("Settings", crate::icons::css_hex(crate::icons::REVIEW_DOT_COLOR), token, None);
-    h.push_str(
-        "<div class=\"empty\">Settings are not available in this run.</div>\n</main>\n</body>\n</html>\n",
-    );
+    h.push_str("<div class=\"empty\">Settings are not available in this run.</div>\n");
+    h.push_str(&page_end(token));
     h
+}
+
+/// How every page ends: the owl and where GitHoot lives, so a page found in a tab days later says
+/// what made it. Then the tags `shell_with` opened.
+pub(crate) fn page_end(token: &str) -> String {
+    format!(
+        "<div class=\"brand\"><img src=\"/{}/owl.png\" alt=\"\" width=\"16\" height=\"16\">\
+         <a href=\"{url}\" rel=\"noreferrer\">GitHoot · {}</a></div>\n</main>\n</body>\n</html>\n",
+        esc(token),
+        crate::update::REPOSITORY_URL.trim_start_matches("https://"),
+        url = crate::update::REPOSITORY_URL,
+    )
 }
 
 /// Everything both kinds of page share: head, stylesheet, owl and heading.
@@ -1171,6 +1185,23 @@ mod tests {
     #[test]
     fn the_logo_is_fetched_from_our_own_token_path() {
         assert!(page(Some(&[])).contains(r#"src="/deadbeef/owl.png""#));
+    }
+
+    /// Every page signs off with the owl and where GitHoot lives, so a page found in a tab days later
+    /// says what made it.
+    #[test]
+    fn the_pr_page_ends_with_the_owl_and_the_repository() {
+        let html = page(Some(&[]));
+        assert!(html.contains(concat!(
+            r#"<div class="brand"><img src="/deadbeef/owl.png" alt="" width="16" height="16">"#,
+            r#"<a href="https://github.com/HerrDerb/githoot" rel="noreferrer">GitHoot · github.com/HerrDerb/githoot</a></div>"#,
+            "\n</main>\n</body>\n</html>\n",
+        )), "got: {html}");
+    }
+
+    #[test]
+    fn the_settings_unavailable_page_ends_with_the_owl_too() {
+        assert!(settings_unavailable("deadbeef").contains(r#"<div class="brand"><img src="/deadbeef/owl.png""#));
     }
 
     // ── Live refresh ──────────────────────────────────────────────────────────
