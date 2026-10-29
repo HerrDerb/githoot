@@ -8,7 +8,7 @@
 //! The page exists because GitHub's own search pages cannot express what two of the three bars count,
 //! and because opening one browser tab per pull request was the alternative.
 
-use crate::portal::types::{CheckRollup, PrEntry, ReviewState, Reviewer};
+use crate::portal::types::{Changes, CheckRollup, PrEntry, ReviewState, Reviewer};
 use crate::portal::PortalInfo;
 
 /// What a PR page needs to offer mute links: where to post them, and which pull requests are muted
@@ -206,6 +206,9 @@ white-space:nowrap}\
 .draft{background:color-mix(in srgb,var(--accent) 60%,#000);color:#fff;border-color:transparent}\
 .checks-success{color:var(--ok)}.checks-pending{color:var(--warn)}\
 .checks-failure{color:var(--bad)}.checks-unknown{color:var(--dim)}\
+.hrow{display:flex;align-items:baseline;gap:1rem;margin:0 0 .3rem}.hrow h2{flex:1;min-width:0;margin:0}\
+.diff{font-size:.78rem;color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums;\
+display:inline-flex;gap:.4rem}.add{color:var(--ok)}.del{color:var(--bad)}.files{opacity:.75}\
 .who{margin:.45rem 0 0;padding:0;list-style:none;font-size:.83rem;color:var(--dim)}\
 .who li{display:inline-block;margin-right:.8rem}\
 .dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;margin-right:.3rem;\
@@ -792,7 +795,38 @@ pub(crate) fn card(e: &PrEntry, link_prefix: &str, now_unix: u64, actions: &str)
     }
     let who = if who.is_empty() { String::new() } else { format!("<ul class=\"who\">{who}</ul>") };
 
-    format!("<div class=\"card\"><h2>{headline}</h2><div class=\"meta\">{meta}</div>{who}{actions}</div>\n")
+    // The size goes on the title's row, right edge, so a list's sizes line up into one column. A long
+    // title wraps beside it. No size, no row: the card stays exactly what it was.
+    let head = match e.changes {
+        Some(c) => format!("<div class=\"hrow\"><h2>{headline}</h2>{}</div>", diff(c)),
+        None => format!("<h2>{headline}</h2>"),
+    };
+
+    format!("<div class=\"card\">{head}<div class=\"meta\">{meta}</div>{who}{actions}</div>\n")
+}
+
+/// "+120 −30 · 4 files": a real minus sign, and thin spaces grouping the thousands.
+fn diff(c: Changes) -> String {
+    let plural = if c.files == 1 { "" } else { "s" };
+    format!(
+        "<span class=\"diff\"><span class=\"add\">+{}</span><span class=\"del\">\u{2212}{}</span><span class=\"files\">\u{b7} {} file{plural}</span></span>",
+        grouped(c.additions),
+        grouped(c.deletions),
+        c.files
+    )
+}
+
+/// `1234567` as "1 234 567", the gaps thin spaces.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('\u{2009}');
+        }
+        out.push(d);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1062,6 +1096,45 @@ mod tests {
         let mut e = entry("https://github.com/o/r/pull/1");
         e.bot_review = Some(crate::portal::types::BotReview { name: "Copilot".into(), unresolved: 1 });
         assert!(page(Some(&[e])).contains("1 unresolved Copilot comment<"));
+    }
+
+    /// How big a review is decides when to take it on, so the size sits on the title's row, right
+    /// edge, where the sizes of a whole list line up into one column to scan.
+    #[test]
+    fn the_size_of_the_change_sits_beside_the_title() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.changes = Some(crate::portal::types::Changes { additions: 120, deletions: 30, files: 4 });
+        let html = page(Some(&[e]));
+        assert!(
+            html.contains(concat!(
+                r#"<div class="hrow"><h2><a href="https://github.com/o/r/pull/1" rel="noreferrer">Fix the bed-exit debounce</a></h2>"#,
+                r#"<span class="diff"><span class="add">+120</span><span class="del">"#,
+                "\u{2212}30",
+                r#"</span><span class="files">"#,
+                "\u{b7} 4 files</span></span></div>",
+            )),
+            "got: {html}"
+        );
+    }
+
+    /// A thin space groups the thousands, so "+1840" and "+184" do not read alike at a glance.
+    #[test]
+    fn a_large_change_groups_its_thousands() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.changes = Some(crate::portal::types::Changes { additions: 1840, deletions: 1_234_567, files: 37 });
+        let html = page(Some(&[e]));
+        assert!(html.contains("+1\u{2009}840<"), "got: {html}");
+        assert!(html.contains("\u{2212}1\u{2009}234\u{2009}567<"), "got: {html}");
+    }
+
+    #[test]
+    fn one_file_reads_as_one_and_an_unknown_size_says_nothing() {
+        let mut e = entry("https://github.com/o/r/pull/1");
+        e.changes = Some(crate::portal::types::Changes { additions: 1, deletions: 0, files: 1 });
+        assert!(page(Some(&[e])).contains("\u{b7} 1 file<"));
+        let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
+        assert!(!html.contains("class=\"diff\""));
+        assert!(html.contains("<div class=\"card\"><h2>"), "no size, no row to lay it out in");
     }
 
     #[test]
