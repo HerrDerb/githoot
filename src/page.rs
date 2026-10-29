@@ -218,6 +218,7 @@ footer a,.empty a{color:var(--dim)}\
 .brand{display:flex;justify-content:center;align-items:center;gap:.45rem;margin-top:.9rem;\
 font-size:.78rem;color:var(--dim)}.brand img{border-radius:4px}\
 .brand a{color:var(--dim);text-decoration:none}.brand a:hover{color:var(--ink);text-decoration:underline}\
+.owl-link{white-space:nowrap}.owl-link img{vertical-align:-.2em;margin-right:.25em;border-radius:3px}\
 .section{font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);\
 margin:1.5rem 0 .5rem;font-weight:600}\
 .section a{font-weight:400;color:var(--dim);text-decoration:underline;text-underline-offset:.25em}\
@@ -593,7 +594,14 @@ pub fn axis_page(
             )
         })
         .collect();
-    h.push_str("<footer>Rendered locally by GitHoot from its last poll, and kept current without a reload.");
+    // The footer already names GitHoot, so the name is the link to where it lives; see `page_end`.
+    h.push_str(&format!(
+        "<footer>Rendered locally by <a class=\"owl-link\" href=\"{}\" rel=\"noreferrer\">\
+         <img src=\"/{}/owl.png\" alt=\"\" width=\"14\" height=\"14\">GitHoot</a> from its last poll, \
+         and kept current without a reload.",
+        crate::update::REPOSITORY_URL,
+        esc(token)
+    ));
     for inbox in inboxes {
         h.push_str(&format!(" · {inbox}"));
     }
@@ -603,7 +611,7 @@ pub fn axis_page(
         esc(nonce),
         REFRESH_SCRIPT.replace("REFRESH_MS", &REFRESH_MS.to_string())
     ));
-    h.push_str(&page_end(token));
+    h.push_str(PAGE_CLOSE);
     h
 }
 
@@ -646,12 +654,15 @@ pub fn settings_unavailable(token: &str) -> String {
     h
 }
 
-/// How every page ends: the owl and where GitHoot lives, so a page found in a tab days later says
-/// what made it. Then the tags `shell_with` opened.
+/// The tags `shell_with` opened.
+const PAGE_CLOSE: &str = "</main>\n</body>\n</html>\n";
+
+/// How a page without a footer of its own ends: the owl and where GitHoot lives, so a page found in
+/// a tab days later says what made it. The PR pages say it in their footer instead.
 pub(crate) fn page_end(token: &str) -> String {
     format!(
         "<div class=\"brand\"><img src=\"/{}/owl.png\" alt=\"\" width=\"16\" height=\"16\">\
-         <a href=\"{url}\" rel=\"noreferrer\">GitHoot · {}</a></div>\n</main>\n</body>\n</html>\n",
+         <a href=\"{url}\" rel=\"noreferrer\">GitHoot · {}</a></div>\n{PAGE_CLOSE}",
         esc(token),
         crate::update::REPOSITORY_URL.trim_start_matches("https://"),
         url = crate::update::REPOSITORY_URL,
@@ -1188,15 +1199,17 @@ mod tests {
     }
 
     /// Every page signs off with the owl and where GitHoot lives, so a page found in a tab days later
-    /// says what made it.
+    /// says what made it. The PR page's footer already names GitHoot, so the name is the link there,
+    /// and a second line saying it again would be clutter.
     #[test]
-    fn the_pr_page_ends_with_the_owl_and_the_repository() {
+    fn the_pr_page_footer_links_githoot_with_the_owl_before_it() {
         let html = page(Some(&[]));
         assert!(html.contains(concat!(
-            r#"<div class="brand"><img src="/deadbeef/owl.png" alt="" width="16" height="16">"#,
-            r#"<a href="https://github.com/HerrDerb/githoot" rel="noreferrer">GitHoot · github.com/HerrDerb/githoot</a></div>"#,
-            "\n</main>\n</body>\n</html>\n",
+            r#"<footer>Rendered locally by <a class="owl-link" href="https://github.com/HerrDerb/githoot" rel="noreferrer">"#,
+            r#"<img src="/deadbeef/owl.png" alt="" width="14" height="14">GitHoot</a> from its last poll"#,
         )), "got: {html}");
+        assert!(!html.contains(r#"class="brand""#), "no second line saying it again: {html}");
+        assert!(html.ends_with("</script>\n</main>\n</body>\n</html>\n"), "got: {html}");
     }
 
     #[test]
