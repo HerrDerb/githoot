@@ -302,6 +302,10 @@ pub enum Wake {
     /// `restart` closure the update thread uses, and that lives on this side. Handling it only *spawns*
     /// a thread, so polling is not delayed by the fifteen minutes the watch may run for.
     SettingsOpened,
+    /// The user opened the status pages: every incident on show now has been seen, so the mark drops to
+    /// the small dot until one of them changes. Answered with a tray update and no poll, since nothing
+    /// on any portal's side moved.
+    AcknowledgeStatus,
 }
 
 /// How `main` builds a portal from its configuration, handed to the loop so Install can do it too.
@@ -1163,6 +1167,15 @@ fn run_poll_loop(
                         // Opening settings says nothing about GitHub, so this is the one wake that does not
                         // want a poll at all — hence `skip_etag` going back down. All it does is arm the
                         // watcher, which then lives on its own thread.
+                        Wake::AcknowledgeStatus => {
+                            for run in &mut runs {
+                                run.state.acknowledge_status();
+                            }
+                            infoln!("incident acknowledged, the mark is quiet until it changes");
+                            if !emit(tray_update(&runs, update_available.as_deref())) {
+                                return;
+                            }
+                        }
                         Wake::SettingsOpened => {
                             crate::settings_watch::spawn(
                                 crate::config::config_path(&app_asset_path),
@@ -1392,6 +1405,8 @@ pub fn start_notification_scheduler(
     // for all of them, and because it drives a menu item the four do not.
     let mut applied_needs_auth: Option<bool> = None;
     let mut applied_status: Option<bool> = None;
+    // The mark on screen. Its own memo, because a hush changes it while every bit the others watch stays put.
+    let mut applied_mark: Option<crate::state::Mark> = None;
     // Whether anything is currently in the top group. Its own memo rather than derived on the fly,
     // because the separator must be written only when it changes — some panels rebuild the whole menu
     // when any item does, which would fight a user who has it open.
@@ -1416,7 +1431,7 @@ pub fn start_notification_scheduler(
             let needs_auth = update.icon.needs_auth;
             let update_available = update.icon.update_available;
             let status_degraded = update.icon.status_degraded;
-            let exclamation = update.icon.shows_exclamation();
+            let mark = update.icon.mark();
 
             // Checked before the four signals, because it overrides them: with no credential there
             // is nothing to draw a dot from. `wanted` is still computed and stored above, so the
@@ -1464,7 +1479,7 @@ pub fn start_notification_scheduler(
                 // replaced the bars; now it is just another bit, so every mark composes with every other.
                 indicator.set_icon(
                     icons
-                        .get(wanted[0], wanted[1], wanted[2], update_available, exclamation)
+                        .get(wanted[0], wanted[1], wanted[2], update_available, mark)
                         .as_str(),
                 );
 
@@ -1527,6 +1542,10 @@ pub fn start_notification_scheduler(
             {
                 menu_items.status.set_label(label);
                 applied_status_label = Some(label.to_string());
+            }
+            if applied_mark != Some(mark) {
+                applied_mark = Some(mark);
+                applied = None;
             }
 
             indicator.set_title(&update.tooltip);

@@ -71,6 +71,9 @@ pub fn icon(views: &[PortalView], update_available: bool) -> IconState {
     IconState {
         needs_auth: icons.iter().any(|i| i.needs_auth),
         status_degraded: icons.iter().any(|i| i.status_degraded),
+        // Every outage acknowledged, not any: one fresh incident is news wherever the others stand.
+        status_hushed: icons.iter().any(|i| i.status_degraded)
+            && icons.iter().filter(|i| i.status_degraded).all(|i| i.status_hushed),
         signals_unsure: icons.iter().any(|i| i.signals_unsure),
         update_available,
         review_requested: merge_presence(icons.iter().map(|i| i.review_requested)),
@@ -242,6 +245,22 @@ mod tests {
         assert_eq!(entry.urls, ["https://www.githubstatus.com", "https://status.gitlab.com"]);
     }
 
+    /// Hushed only while every portal that is down has been acknowledged. One fresh outage elsewhere is
+    /// news, and gets the full mark.
+    #[test]
+    fn the_mark_is_hushed_only_when_every_outage_is_acknowledged() {
+        let (mut a, b) = (degraded("Wobbly"), degraded("Down"));
+        a.acknowledge_status();
+        assert_eq!(icon(&[view("A", &a), view("B", &b)], false).mark(), crate::state::Mark::Alert);
+
+        let mut b = b;
+        b.acknowledge_status();
+        assert_eq!(icon(&[view("A", &a), view("B", &b)], false).mark(), crate::state::Mark::Hushed);
+
+        let well = PollState::for_portal("C", [true; 3]);
+        assert_eq!(icon(&[view("A", &a), view("C", &well)], false).mark(), crate::state::Mark::Hushed);
+    }
+
     // ─── One portal is the identity ─────────────────────────────────────────
 
     #[test]
@@ -255,6 +274,7 @@ mod tests {
         let own = state.icon();
         assert_eq!(merged.needs_auth, own.needs_auth);
         assert_eq!(merged.status_degraded, own.status_degraded);
+        assert_eq!(merged.status_hushed, own.status_hushed);
         assert_eq!(merged.signals_unsure, own.signals_unsure);
         assert_eq!(merged.review_requested, own.review_requested);
         assert_eq!(merged.ready_to_merge, own.ready_to_merge);

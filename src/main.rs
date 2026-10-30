@@ -317,7 +317,7 @@ fn main() {
 
     let mut indicator = AppIndicator::new("githoot", "");
     indicator.set_status(AppIndicatorStatus::Active);
-    indicator.set_icon(icons.get(false, false, false, false, false).as_str());
+    indicator.set_icon(icons.get(false, false, false, false, state::Mark::None).as_str());
 
     // The poll loop waits on this channel, so a menu click can pull the next poll forward.
     let (wake_tx, wake_rx) = std::sync::mpsc::channel::<scheduler::Wake>();
@@ -504,7 +504,12 @@ fn main() {
     // Sibling of the Authenticate entry: conditional, and the counterpart of a mark on the icon. Since
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     let status_item = MenuItem::with_label(state::STATUS_MENU_LABEL);
-    status_item.connect_activate(move |_| open_status_pages());
+    // Opening the pages is the acknowledgement: the user has gone and looked, so the mark can quiet down.
+    let status_wake_tx = wake_tx.clone();
+    status_item.connect_activate(move |_| {
+        open_status_pages();
+        let _ = status_wake_tx.send(scheduler::Wake::AcknowledgeStatus);
+    });
 
     let quit_item = MenuItem::with_label("Quit");
     quit_item.connect_activate(|_| gtk::main_quit());
@@ -812,9 +817,9 @@ fn main() {
         /// ready_to_merge, changes_requested]`, as far as we know. `None` means "unproven", which
         /// forces the next update to re-apply rather than assume.
         applied: Option<[bool; 3]>,
-        /// Whether the icon currently shows the needs-authorization variant. Separate from `applied`
-        /// because it is not one of the four signals but a replacement for all of them.
-        applied_needs_auth: Option<bool>,
+        /// Which mark the icon currently shows. Separate from `applied` because it is not one of the
+        /// three bars.
+        applied_mark: Option<state::Mark>,
         /// Likewise for the update arrow, which is a fifth independent signal rather than a replacement.
         applied_update: Option<bool>,
         /// And for the install entry's text, which carries the version.
@@ -920,7 +925,7 @@ fn main() {
 
         let tray_icon = TrayIconBuilder::new()
             .with_tooltip("GitHub Notifications")
-            .with_icon(icons.get(false, false, false, false, false).clone())
+            .with_icon(icons.get(false, false, false, false, state::Mark::None).clone())
             // Cloned rather than moved: `Menu` is a reference-counted handle, and the app keeps one
             // so it can take entries out later. The tray gets the same underlying menu.
             .with_menu(Box::new(menu.clone()))
@@ -957,7 +962,7 @@ fn main() {
             // The builder set the plain icon above, but treat that as unproven so the first
             // confirmed poll always writes the image it wants.
             applied: None,
-            applied_needs_auth: None,
+            applied_mark: None,
             applied_update: None,
             applied_update_label: None,
             applied_status_label: None,
@@ -1137,7 +1142,9 @@ fn main() {
                     errorln!("failed to open the repository: {e}");
                 }
             } else if *id == tray.status_item_id {
+                // Opening the pages is the acknowledgement, as on Linux.
                 open_status_pages();
+                let _ = self.wake_tx.send(scheduler::Wake::AcknowledgeStatus);
             } else if *id == tray.quit_item_id {
                 event_loop.exit();
             }
@@ -1386,7 +1393,7 @@ fn main() {
 
             let needs_auth = update.icon.needs_auth;
             let update_available = update.icon.update_available;
-            let exclamation = update.icon.shows_exclamation();
+            let mark = update.icon.mark();
             let shape = MenuShape {
                 wanted,
                 needs_auth,
@@ -1395,7 +1402,7 @@ fn main() {
             };
 
             if self.applied != Some(wanted)
-                || self.applied_needs_auth != Some(exclamation)
+                || self.applied_mark != Some(mark)
                 || self.applied_update != Some(update_available)
             {
                 // One lookup, no override. The exclamation is a bit like any other now that it sits in
@@ -1403,16 +1410,16 @@ fn main() {
                 // mark *and* whatever counts are still known.
                 let icon = self
                     .icons
-                    .get(wanted[0], wanted[1], wanted[2], update_available, exclamation)
+                    .get(wanted[0], wanted[1], wanted[2], update_available, mark)
                     .clone();
                 match self.tray_icon.set_icon(Some(icon)) {
                     // Only record success. A failed update leaves these `None` so the next
                     // poll retries instead of believing the icon is already correct.
                     Ok(()) => {
                         self.applied = Some(wanted);
-                        // The *exclamation*, not `needs_auth`: this memo exists to decide whether the
-                        // image on screen is still right, and an outage changes that image too.
-                        self.applied_needs_auth = Some(exclamation);
+                        // The *mark*, not `needs_auth`: this memo exists to decide whether the image on
+                        // screen is still right, and an outage or a hush changes that image too.
+                        self.applied_mark = Some(mark);
                         self.applied_update = Some(update_available);
                     }
                     Err(e) => errorln!("failed to update tray icon: {e}"),

@@ -102,6 +102,10 @@ pub struct IconState {
     /// missing credential must never point at the status page. [`IconState::shows_exclamation`] is
     /// where the two come back together.
     pub status_degraded: bool,
+    /// Every incident behind `status_degraded` has been acknowledged, so it draws the small dot rather
+    /// than the exclamation. Only ever true alongside `status_degraded`, and it quiets that cause alone:
+    /// see [`IconState::mark`].
+    pub status_hushed: bool,
     /// A signal we asked about and could not get an answer for.
     ///
     /// **Not** simply "some `Presence` is `Unknown`". A freshly built `Track` is `Unknown` too, because
@@ -138,13 +142,34 @@ impl IconState {
     /// the same visible signal on Linux, Windows and macOS, since only the composited image reaches all
     /// three.
     pub fn shows_exclamation(&self) -> bool {
-        self.needs_auth || self.status_degraded || self.any_unsure()
+        self.needs_auth || (self.status_degraded && !self.status_hushed) || self.any_unsure()
+    }
+
+    /// Which mark the icon wears. The exclamation wins: a hushed incident quiets itself, never a missing
+    /// credential or a failed poll that arrives during it.
+    pub fn mark(&self) -> Mark {
+        if self.shows_exclamation() {
+            Mark::Alert
+        } else if self.status_degraded {
+            Mark::Hushed
+        } else {
+            Mark::None
+        }
     }
 
     /// Whether any signal was asked about and could not be answered.
     pub fn any_unsure(&self) -> bool {
         self.signals_unsure
     }
+}
+
+/// The mark in the icon's bottom-left: none, the exclamation, or the small dot an acknowledged incident
+/// leaves behind. One value rather than two bools because the last two are exclusive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    None,
+    Alert,
+    Hushed,
 }
 
 /// Label of the fallback tray menu item that opens GitHub's own pull-request inbox.
@@ -658,6 +683,12 @@ pub struct PollState {
     /// A `String` because its only consumers are a tooltip line and a menu entry, and it should
     /// quote the words the portal used.
     status_degraded: Option<String>,
+    /// The verdict the user acknowledged, word for word. Hushed while it equals `status_degraded`.
+    ///
+    /// The words are the key because every portal builds them from its severity and the parts that are
+    /// down, so any change in either reads as a new incident and raises the full mark again. Memory only:
+    /// a restart is loud, which errs on the side of saying too much.
+    status_hushed: Option<String>,
     /// Most recent `x-poll-interval`, once GitHub has told us one.
     server_interval: Option<Duration>,
     /// A wait GitHub explicitly demanded; overrides normal pacing for one cycle.
@@ -693,6 +724,7 @@ impl PollState {
             // Starts clear: assuming an outage before asking would put an exclamation on the icon for
             // the first few seconds of every launch.
             status_degraded: None,
+            status_hushed: None,
             server_interval: None,
             forced_delay: None,
         }
@@ -792,7 +824,20 @@ impl PollState {
     /// Only called with a verdict we actually got. A failed check does not call this at all, which is
     /// what leaves the last known answer standing rather than clearing an outage we can no longer see.
     pub fn set_status_degraded(&mut self, description: Option<String>) {
+        // Forgotten on any change, recovery included, so the next incident is loud even if it reads the same.
+        if self.status_hushed != description {
+            self.status_hushed = None;
+        }
         self.status_degraded = description;
+    }
+
+    /// The user has seen the current incident: quiet the mark until the verdict changes.
+    pub fn acknowledge_status(&mut self) {
+        self.status_hushed.clone_from(&self.status_degraded);
+    }
+
+    fn status_is_hushed(&self) -> bool {
+        self.status_degraded.is_some() && self.status_hushed == self.status_degraded
     }
 
 
@@ -915,6 +960,7 @@ impl PollState {
         IconState {
             needs_auth: self.pr_needs_auth,
             status_degraded: self.status_degraded.is_some(),
+            status_hushed: self.status_is_hushed(),
             signals_unsure: self.any_track_failing(),
             // App-level, not this portal's to know: `overview::icon` fills it in. Every other
             // reader of a single `PollState` sees a truthful `false`, never a stale `true`.
@@ -1051,7 +1097,8 @@ impl PollState {
         // First, because it reframes everything below it: during an outage a stale count or an
         // "unknown" axis has an explanation, and the user should read that before the numbers.
         if let Some(description) = self.status_degraded.as_deref() {
-            lines.push(format!("{}: {description}", self.portal_name));
+            let seen = if self.status_is_hushed() { " (acknowledged)" } else { "" };
+            lines.push(format!("{}: {description}{seen}", self.portal_name));
         }
 
         // A disabled axis explains itself; there is nothing else left to keep quiet about
@@ -2019,6 +2066,70 @@ mod tests {
         state.set_status_degraded(None);
         assert!(!state.icon().shows_exclamation(), "a resolved incident must take the mark down");
         assert!(!state.tooltip().contains("Major Service Outage"));
+    }
+
+    /// An acknowledged incident quiets the mark to the small dot. The entry and the tooltip line stay, so
+    /// the truth is one hover away, and the line says it was seen.
+    #[test]
+    fn acknowledging_an_incident_quiets_the_mark_and_keeps_the_words() {
+        let mut state = PollState::new([true; 3]);
+        state.set_status_degraded(Some("Partially Degraded Service".to_string()));
+        assert_eq!(state.icon().mark(), Mark::Alert);
+
+        state.acknowledge_status();
+        let icon = state.icon();
+        assert_eq!(icon.mark(), Mark::Hushed);
+        assert!(icon.status_degraded, "the status entry stays");
+        assert!(icon.status_hushed);
+        assert!(!icon.shows_exclamation(), "the loud mark is down");
+        assert!(state.tooltip().contains("GitHub: Partially Degraded Service (acknowledged)"), "{}", state.tooltip());
+    }
+
+    /// The same verdict again is not news. A new one is: worse, better, or a different part down.
+    #[test]
+    fn a_changed_incident_raises_the_mark_again() {
+        let mut state = PollState::new([true; 3]);
+        state.set_status_degraded(Some("Issues (Partial Outage)".to_string()));
+        state.acknowledge_status();
+        state.set_status_degraded(Some("Issues (Partial Outage)".to_string()));
+        assert_eq!(state.icon().mark(), Mark::Hushed, "a repeat poll is the same incident");
+
+        state.set_status_degraded(Some("Issues (Major Outage)".to_string()));
+        assert_eq!(state.icon().mark(), Mark::Alert);
+        assert!(!state.tooltip().contains("(acknowledged)"));
+    }
+
+    /// A recovery forgets the acknowledgement, so the next incident is loud even if it reads the same.
+    #[test]
+    fn a_recovery_forgets_the_acknowledgement() {
+        let mut state = PollState::new([true; 3]);
+        state.set_status_degraded(Some("Major Service Outage".to_string()));
+        state.acknowledge_status();
+        state.set_status_degraded(None);
+        assert_eq!(state.icon().mark(), Mark::None);
+
+        state.set_status_degraded(Some("Major Service Outage".to_string()));
+        assert_eq!(state.icon().mark(), Mark::Alert);
+    }
+
+    /// The acknowledgement covers the incident and nothing else. A missing credential during a hushed
+    /// outage still raises the full mark.
+    #[test]
+    fn a_hushed_incident_never_quiets_another_cause() {
+        let mut state = PollState::new([true; 3]);
+        state.set_status_degraded(Some("Major Service Outage".to_string()));
+        state.acknowledge_status();
+        state.require_pr_auth();
+        assert_eq!(state.icon().mark(), Mark::Alert);
+    }
+
+    /// Nothing to acknowledge is a no-op, and must not pre-hush the next incident.
+    #[test]
+    fn acknowledging_with_no_incident_changes_nothing() {
+        let mut state = PollState::new([true; 3]);
+        state.acknowledge_status();
+        state.set_status_degraded(Some("Major Service Outage".to_string()));
+        assert_eq!(state.icon().mark(), Mark::Alert);
     }
 
     /// The tooltip is the only thing that distinguishes the two exclamation causes at a glance, and it

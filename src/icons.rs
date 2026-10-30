@@ -17,6 +17,7 @@
 use image::{Rgba, RgbaImage};
 
 use crate::errorln;
+use crate::state::Mark;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 
@@ -35,12 +36,12 @@ pub(crate) const MARKS: [&str; 6] = ["review", "merge", "changes", "update", "al
 /// opened the page.
 pub(crate) fn mark_png(name: &str) -> Option<Vec<u8>> {
     let (review, merge, changes, update, mark) = match name {
-        "review" => (true, false, false, false, false),
-        "merge" => (false, true, false, false, false),
-        "changes" => (false, false, true, false, false),
-        "update" => (false, false, false, true, false),
-        "alert" => (false, false, false, false, true),
-        "all" => (true, true, true, true, true),
+        "review" => (true, false, false, false, Mark::None),
+        "merge" => (false, true, false, false, Mark::None),
+        "changes" => (false, false, true, false, Mark::None),
+        "update" => (false, false, false, true, Mark::None),
+        "alert" => (false, false, false, false, Mark::Alert),
+        "all" => (true, true, true, true, Mark::Alert),
         _ => return None,
     };
     static SET: std::sync::OnceLock<Option<IconSet<RgbaImage>>> = std::sync::OnceLock::new();
@@ -227,6 +228,14 @@ const MARK_DOT_CENTRE_RATIO: f32 = 0.867;
 ///
 /// Smaller than the bars' 10px because the mark is smaller — the same ratio of border to shape.
 const MARK_CARVE_PX: f32 = 8.0;
+
+/// Diameter of the hushed dot, as a fraction of icon width: 60% of the exclamation's band. Small enough
+/// to stop shouting, big enough to survive a 16px tray, where it lands at about two pixels.
+const HUSHED_DOT_RATIO: f32 = MARK_BAND_RATIO * 0.6;
+/// Gap between the hushed dot and the icon's bottom edge, in source pixels.
+const HUSHED_DOT_BOTTOM_PX: f32 = 2.0;
+/// The hushed dot's carve. Smaller than the mark's, in proportion to the smaller shape.
+const HUSHED_CARVE_PX: f32 = 6.0;
 
 /// One indicator bar: where it sits and what colour it is.
 #[derive(Clone, Copy, Debug)]
@@ -489,20 +498,43 @@ fn with_exclamation(src: &RgbaImage) -> RgbaImage {
         stem.min(dot)
     };
 
-    // Two passes, exactly as `with_indicator_bars` does and for the same reason: carving and painting in
-    // one pass lets the carve eat colour the same pass has already laid down. Here it matters more than
-    // ever, because this runs *after* the bars and the arrow — a single-pass version would erase parts of
-    // marks that were already correct.
+    stamp(&mut out, distance_to_mark, MARK_CARVE_PX);
+    out
+}
+
+/// Returns a copy of `src` with the small red dot an acknowledged incident leaves: the exclamation's dot
+/// alone, shrunk, in the same bottom-left corner. Same red, so it still says "outage"; a fraction of the
+/// size, so it stops asking for attention.
+fn with_hushed_dot(src: &RgbaImage) -> RgbaImage {
+    let (width, height) = src.dimensions();
+    let mut out = src.clone();
+
+    let radius = (width as f32 * HUSHED_DOT_RATIO).round().max(1.0) / 2.0;
+    let centre_x = width as f32 * MARK_LEFT_MARGIN_RATIO + radius;
+    let centre_y = height as f32 - HUSHED_DOT_BOTTOM_PX - radius;
+    stamp(&mut out, |px, py| (px - centre_x).hypot(py - centre_y) - radius, HUSHED_CARVE_PX);
+    out
+}
+
+/// Carves `carve` pixels of transparency around a shape given as a signed distance, then paints it in
+/// `MARK_COLOR`.
+///
+/// Two passes, exactly as `with_indicator_bars` does and for the same reason: carving and painting in one
+/// pass lets the carve eat colour the same pass has already laid down. Here it matters more than ever,
+/// because this runs *after* the bars and the arrow — a single-pass version would erase parts of marks
+/// that were already correct.
+fn stamp(out: &mut RgbaImage, distance: impl Fn(f32, f32) -> f32, carve: f32) {
+    let (width, height) = out.dimensions();
     for y in 0..height {
         for x in 0..width {
-            if distance_to_mark(x as f32 + 0.5, y as f32 + 0.5) <= MARK_CARVE_PX {
+            if distance(x as f32 + 0.5, y as f32 + 0.5) <= carve {
                 out.get_pixel_mut(x, y)[3] = 0;
             }
         }
     }
     for y in 0..height {
         for x in 0..width {
-            let distance = distance_to_mark(x as f32 + 0.5, y as f32 + 0.5);
+            let distance = distance(x as f32 + 0.5, y as f32 + 0.5);
             if distance <= 0.5 {
                 let coverage = (0.5 - distance).clamp(0.0, 1.0);
                 let pixel = out.get_pixel_mut(x, y);
@@ -510,8 +542,6 @@ fn with_exclamation(src: &RgbaImage) -> RgbaImage {
             }
         }
     }
-
-    out
 }
 
 /// Source-over composite of `src` (at `coverage` alpha) onto `dst`, un-premultiplied throughout.
@@ -555,13 +585,28 @@ fn decode(bytes: &[u8]) -> Result<RgbaImage, String> {
 ///
 /// The cost is exactly the doubling that shape implies: 32 variants became 64, measured at ~14ms to
 /// generate and ~300KB on disk.
+///
+/// The mark has since grown a third state, the hushed dot of an acknowledged incident, so bits 4 and 5
+/// together hold a `Mark` (0 none, 1 alert, 2 hushed) and there are 48 variants.
 pub struct IconSet<T> {
-    variants: [T; 32],
+    variants: [T; VARIANTS],
+}
+
+/// Sixteen combinations of bars and arrow, times three marks.
+const VARIANTS: usize = 48;
+
+/// Bits 4 and 5 of a variant index.
+fn mark_bits(mark: Mark) -> usize {
+    match mark {
+        Mark::None => 0,
+        Mark::Alert => 1,
+        Mark::Hushed => 2,
+    }
 }
 
 impl<T> IconSet<T> {
-    fn index(review: bool, merge: bool, changes: bool, update: bool, mark: bool) -> usize {
-        (usize::from(mark) << 4)
+    fn index(review: bool, merge: bool, changes: bool, update: bool, mark: Mark) -> usize {
+        (mark_bits(mark) << 4)
             | (usize::from(update) << 3)
             | (usize::from(review) << 2)
             | (usize::from(merge) << 1)
@@ -571,13 +616,13 @@ impl<T> IconSet<T> {
     /// The variant for one complete state. `mark` is the exclamation, which since it moved to the
     /// bottom-left is a sixth *independent* signal rather than an override — every combination of the
     /// other five can be shown alongside it.
-    pub fn get(&self, review: bool, merge: bool, changes: bool, update: bool, mark: bool) -> &T {
+    pub fn get(&self, review: bool, merge: bool, changes: bool, update: bool, mark: Mark) -> &T {
         &self.variants[Self::index(review, merge, changes, update, mark)]
     }
 
 }
 
-/// Builds all thirty-two variants from the embedded base icon.
+/// Builds all forty-eight variants from the embedded base icon.
 ///
 /// Infallible past decoding the base asset: compositing dots never fails, so the loop needs
 /// no error path of its own — that is what makes a plain `std::array::from_fn` sufficient here
@@ -586,7 +631,7 @@ impl<T> IconSet<T> {
 fn build_variants() -> Result<IconSet<RgbaImage>, String> {
     let plain = decode(TRAY_ICON)?;
 
-    let variants: [RgbaImage; 32] = std::array::from_fn(|i| {
+    let variants: [RgbaImage; VARIANTS] = std::array::from_fn(|i| {
         // One call for all three, unlike the per-corner discs this replaced: the bars share a carve
         // pass, and carving them one at a time would let each bar's border bite into the last bar's
         // colour. See `with_indicator_bars`.
@@ -598,7 +643,11 @@ fn build_variants() -> Result<IconSet<RgbaImage>, String> {
         // and carving after the others means this one's border cannot be painted over by them. It sits in
         // the one band free of both — x 0..54, y 39..95 — so its carve cannot reach the bars or the
         // arrow either. `the_mark_never_touches_the_bars_or_the_arrow` is what holds that.
-        if i & 0b10000 != 0 { with_exclamation(&img) } else { img }
+        match i >> 4 {
+            1 => with_exclamation(&img),
+            2 => with_hushed_dot(&img),
+            _ => img,
+        }
     });
 
     Ok(IconSet { variants })
@@ -642,8 +691,11 @@ fn variant_filename(i: usize) -> String {
     }
     // Appended after `_update`, for the same reason `_update` came after the original four: adding a
     // signal must not rename files that already exist in users' asset directories.
-    if i & 0b10000 != 0 {
-        name.push_str("_alert");
+    // `_hushed` rather than a second bit's name, because bits 4 and 5 together are one `Mark`.
+    match i >> 4 {
+        1 => name.push_str("_alert"),
+        2 => name.push_str("_hushed"),
+        _ => {}
     }
     name.push_str(".png");
     name
@@ -678,10 +730,10 @@ fn write_icon_if_changed(bytes: &[u8], path: &Path) {
     }
 }
 
-/// Creates all thirty-four icon files in `<app_asset_path>/icons` and returns their paths.
+/// Creates all forty-eight icon files in `<app_asset_path>/icons` and returns their paths.
 /// Used on Linux by libappindicator, which requires file-system paths.
 ///
-/// A subdirectory rather than the asset root, so the thirty-four generated PNGs stop sitting between the
+/// A subdirectory rather than the asset root, so the forty-eight generated PNGs stop sitting between the
 /// four files a person might actually want to open — `config.txt`, `log.txt` and the two credentials.
 /// Generated output and hand-edited input in one directory made the interesting files hard to find.
 ///
@@ -702,9 +754,9 @@ pub fn create_icons(app_asset_path: &Path) -> Result<IconSet<String>, String> {
         paths.push(path.to_string_lossy().into_owned());
     }
 
-    let variants: [String; 32] = paths
+    let variants: [String; VARIANTS] = paths
         .try_into()
-        .map_err(|_| "internal error: expected exactly 64 icon variants".to_string())?;
+        .map_err(|_| format!("internal error: expected exactly {VARIANTS} icon variants"))?;
 
 Ok(IconSet { variants })
 }
@@ -726,14 +778,14 @@ pub fn load_tray_icons() -> Result<IconSet<tray_icon::Icon>, String> {
     }
 
     let images = build_variants()?;
-    let mut icons = Vec::with_capacity(32);
+    let mut icons = Vec::with_capacity(VARIANTS);
     for image in &images.variants {
         icons.push(to_icon(image)?);
     }
 
-    let variants: [tray_icon::Icon; 32] = icons
+    let variants: [tray_icon::Icon; VARIANTS] = icons
         .try_into()
-        .map_err(|_| "internal error: expected exactly 32 icon variants".to_string())?;
+        .map_err(|_| format!("internal error: expected exactly {VARIANTS} icon variants"))?;
     Ok(IconSet { variants })
 }
 
@@ -751,12 +803,12 @@ mod tests {
     fn each_welcome_mark_is_the_variant_the_tray_draws() {
         let set = build_variants().expect("variants must build");
         for (name, (r, m, c, u, a)) in [
-            ("review", (true, false, false, false, false)),
-            ("merge", (false, true, false, false, false)),
-            ("changes", (false, false, true, false, false)),
-            ("update", (false, false, false, true, false)),
-            ("alert", (false, false, false, false, true)),
-            ("all", (true, true, true, true, true)),
+            ("review", (true, false, false, false, Mark::None)),
+            ("merge", (false, true, false, false, Mark::None)),
+            ("changes", (false, false, true, false, Mark::None)),
+            ("update", (false, false, false, true, Mark::None)),
+            ("alert", (false, false, false, false, Mark::Alert)),
+            ("all", (true, true, true, true, Mark::Alert)),
         ] {
             let png = mark_png(name).unwrap_or_else(|| panic!("{name} should be a mark"));
             assert_eq!(&decode(&png).expect("decodes"), set.get(r, m, c, u, a), "{name}");
@@ -900,10 +952,10 @@ mod tests {
     }
 
     #[test]
-    fn all_thirty_two_variants_build_and_are_pairwise_distinct() {
+    fn all_forty_eight_variants_build_and_are_pairwise_distinct() {
         let set = build_variants().expect("variants must build");
-        for i in 0..32 {
-            for j in (i + 1)..32 {
+        for i in 0..48 {
+            for j in (i + 1)..48 {
                 assert_ne!(
                     set.variants[i].as_raw(),
                     set.variants[j].as_raw(),
@@ -967,6 +1019,36 @@ mod tests {
                 bars.get_pixel(cx, cy).0,
                 "the mark must not disturb indicator slot {i}"
             );
+        }
+    }
+
+    /// The hushed mark is the exclamation's dot alone, shrunk: red so it still says "outage", small so
+    /// it does not shout. It stays in the bottom-left, clear of the bars, and well under the full mark.
+    #[test]
+    fn the_hushed_dot_is_small_red_and_clear_of_the_bars() {
+        let src = base();
+        let out = with_hushed_dot(&src);
+        assert_eq!(out.dimensions(), src.dimensions());
+
+        let touched: Vec<(u32, u32)> = (0..src.height())
+            .flat_map(|y| (0..src.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| out.get_pixel(x, y).0 != src.get_pixel(x, y).0)
+            .collect();
+        assert!(!touched.is_empty(), "the dot must actually draw something");
+        let max_x = touched.iter().map(|&(x, _)| x).max().unwrap();
+        let min_y = touched.iter().map(|&(_, y)| y).min().unwrap();
+        assert!(max_x < 55, "the dot reaches x {max_x}, into the bar column");
+        assert!(min_y > 60, "the dot reaches up to y {min_y}, it belongs in the bottom corner");
+
+        let red = |img: &RgbaImage| img.pixels().filter(|p| p[3] > 200 && p.0[..3] == MARK_COLOR[..3]).count();
+        let (quiet, loud) = (red(&out), red(&with_exclamation(&src)));
+        assert!(quiet > 0 && quiet * 8 < loud, "the dot is {quiet}px against the mark's {loud}px");
+
+        let bars = with_indicator_bars(&base(), [true, true, true]);
+        let both = with_hushed_dot(&bars);
+        for i in 0..3 {
+            let (cx, cy) = slot_centre(i);
+            assert_eq!(both.get_pixel(cx, cy).0, bars.get_pixel(cx, cy).0, "slot {i}");
         }
     }
 
@@ -1068,6 +1150,11 @@ mod tests {
                 set.variants[i | 0b10000].as_raw(),
                 "variant {i:#08b} must differ from its marked twin"
             );
+            assert_ne!(
+                set.variants[i | 0b10000].as_raw(),
+                set.variants[i | 0b100000].as_raw(),
+                "variant {i:#08b}'s hushed twin must differ from its marked one"
+            );
         }
     }
 
@@ -1076,7 +1163,7 @@ mod tests {
     #[test]
     fn the_mark_leaves_the_bar_colours_intact() {
         let set = build_variants().expect("variants must build");
-        let all_bars_and_mark = set.get(true, true, true, false, true);
+        let all_bars_and_mark = set.get(true, true, true, false, Mark::Alert);
         for (name, colour) in
             [("review", REVIEW_DOT_COLOR), ("merge", MERGE_DOT_COLOR), ("changes", CHANGES_DOT_COLOR)]
         {
@@ -1229,14 +1316,16 @@ mod tests {
     fn get_indexes_by_the_matching_bit_pattern() {
         let set = build_variants().expect("variants must build");
         let raw = |i: usize| set.variants[i].as_raw();
-        assert_eq!(set.get(false, false, false, false, false).as_raw(), raw(0b00000));
-        assert_eq!(set.get(true, false, false, false, false).as_raw(), raw(0b00100));
-        assert_eq!(set.get(false, true, false, false, false).as_raw(), raw(0b00010));
-        assert_eq!(set.get(false, false, true, false, false).as_raw(), raw(0b00001));
-        assert_eq!(set.get(false, false, false, true, false).as_raw(), raw(0b01000));
+        assert_eq!(set.get(false, false, false, false, Mark::None).as_raw(), raw(0b00000));
+        assert_eq!(set.get(true, false, false, false, Mark::None).as_raw(), raw(0b00100));
+        assert_eq!(set.get(false, true, false, false, Mark::None).as_raw(), raw(0b00010));
+        assert_eq!(set.get(false, false, true, false, Mark::None).as_raw(), raw(0b00001));
+        assert_eq!(set.get(false, false, false, true, Mark::None).as_raw(), raw(0b01000));
         // The bit that moved the mark into the combinable space.
-        assert_eq!(set.get(false, false, false, false, true).as_raw(), raw(0b10000));
-        assert_eq!(set.get(true, true, true, true, true).as_raw(), raw(0b11111));
+        assert_eq!(set.get(false, false, false, false, Mark::Alert).as_raw(), raw(0b10000));
+        assert_eq!(set.get(true, true, true, true, Mark::Alert).as_raw(), raw(0b11111));
+        assert_eq!(set.get(false, false, false, false, Mark::Hushed).as_raw(), raw(0b100000));
+        assert_eq!(set.get(true, true, true, true, Mark::Hushed).as_raw(), raw(0b101111));
     }
 
     /// Geometric proof, independent of the rendered-pixel tests above, that the column fits.
@@ -1287,11 +1376,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn variant_filenames_are_unique_and_encode_the_bits() {
-        let names: Vec<String> = (0..32).map(variant_filename).collect();
+        let names: Vec<String> = (0..48).map(variant_filename).collect();
         let mut sorted = names.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), 32, "every variant must get a distinct filename");
+        assert_eq!(sorted.len(), 48, "every variant must get a distinct filename");
+        assert_eq!(variant_filename(0b100000), "tray_hushed.png");
+        assert_eq!(variant_filename(0b100100), "tray_review_hushed.png");
 
         assert_eq!(variant_filename(0b00000), "tray.png");
         assert_eq!(variant_filename(0b00111), "tray_review_merge_changes.png");
@@ -1338,7 +1429,7 @@ mod docgen {
     fn write_doc_icons() {
         let set = build_variants().expect("variants must build");
         let dir = std::path::Path::new("docs/icons");
-        for i in 0..32 {
+        for i in 0..VARIANTS {
             let name = variant_filename(i);
             if !dir.join(&name).exists() && name != "tray_review_merge_changes_update_alert.png" {
                 continue;

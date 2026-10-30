@@ -5,7 +5,7 @@
 | Item | Shown when | Does |
 |---|---|---|
 | **Install update: X.Y.Z** | A newer release exists | Shows what changed, then verifies, installs and restarts |
-| **The Octocat (GitHub) is having a rough day, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
+| **The Octocat (GitHub) is having a rough day, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) and acknowledges the incident: the exclamation becomes a small red dot until it changes. See [icons](icons.md#acknowledging-an-outage) |
 | **The Tanuki (GitLab) is having a rough day, check status** | GitLab.com reports an incident | Opens [status.gitlab.com](https://status.gitlab.com) |
 | **The Octocat (GitHub) and the Tanuki (GitLab) are having a rough day, check status** | Both at once | Opens both status pages |
 | *— separator —* | Something above **and** below it | |
