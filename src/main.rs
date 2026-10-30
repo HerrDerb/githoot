@@ -317,7 +317,7 @@ fn main() {
 
     let mut indicator = AppIndicator::new("githoot", "");
     indicator.set_status(AppIndicatorStatus::Active);
-    indicator.set_icon(icons.get(false, false, false, false, false).as_str());
+    indicator.set_icon(icons.get(false, false, false, false, state::Mark::None).as_str());
 
     // The poll loop waits on this channel, so a menu click can pull the next poll forward.
     let (wake_tx, wake_rx) = std::sync::mpsc::channel::<scheduler::Wake>();
@@ -505,6 +505,11 @@ fn main() {
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     let status_item = MenuItem::with_label(state::STATUS_MENU_LABEL);
     status_item.connect_activate(move |_| open_status_pages());
+    let hush_item = MenuItem::with_label(state::STATUS_HUSH_MENU_LABEL);
+    let hush_wake_tx = wake_tx.clone();
+    hush_item.connect_activate(move |_| {
+        let _ = hush_wake_tx.send(scheduler::Wake::AcknowledgeStatus);
+    });
 
     let quit_item = MenuItem::with_label("Quit");
     quit_item.connect_activate(|_| gtk::main_quit());
@@ -519,6 +524,7 @@ fn main() {
 
     menu.append(&update_item);
     menu.append(&status_item);
+    menu.append(&hush_item);
     menu.append(&top_separator);
     menu.append(&authenticate_item);
     menu.append(&reviews_item);
@@ -534,6 +540,7 @@ fn main() {
     // it has nothing to separate until one of them is up.
     update_item.set_visible(false);
     status_item.set_visible(false);
+    hush_item.set_visible(false);
     top_separator.set_visible(false);
     // The three PR entries too. Each is shown only on a *confirmed* count above zero, and before the
     // first answer there is no such thing — an entry opening an empty list is a dead end, and one
@@ -589,6 +596,7 @@ fn main() {
             changes_requested: changes_requested_item.clone(),
             pr_inbox: pr_inbox_item.clone(),
             status: status_item.clone(),
+            hush: hush_item.clone(),
             top_separator: top_separator.clone(),
             authenticate: authenticate_item.clone(),
             update: update_item.clone(),
@@ -799,6 +807,9 @@ fn main() {
         /// Shown only while GitHub reports an incident.
         status_item: tray_icon::menu::MenuItem,
         status_item_id: tray_icon::menu::MenuId,
+        /// Shown only while an incident is on show and not yet acknowledged.
+        hush_item: tray_icon::menu::MenuItem,
+        hush_item_id: tray_icon::menu::MenuId,
         /// Offered only while PR status is waiting to be authorized.
         authenticate_item: tray_icon::menu::MenuItem,
         authenticate_item_id: tray_icon::menu::MenuId,
@@ -812,9 +823,9 @@ fn main() {
         /// ready_to_merge, changes_requested]`, as far as we know. `None` means "unproven", which
         /// forces the next update to re-apply rather than assume.
         applied: Option<[bool; 3]>,
-        /// Whether the icon currently shows the needs-authorization variant. Separate from `applied`
-        /// because it is not one of the four signals but a replacement for all of them.
-        applied_needs_auth: Option<bool>,
+        /// Which mark the icon currently shows. Separate from `applied` because it is not one of the
+        /// three bars.
+        applied_mark: Option<state::Mark>,
         /// Likewise for the update arrow, which is a fifth independent signal rather than a replacement.
         applied_update: Option<bool>,
         /// And for the install entry's text, which carries the version.
@@ -840,6 +851,8 @@ fn main() {
         wanted: [bool; 3],
         needs_auth: bool,
         status_degraded: bool,
+        /// An incident is on show and not yet acknowledged, so the hush entry is offered.
+        hush: bool,
         update: bool,
     }
 
@@ -900,6 +913,8 @@ fn main() {
         .map_err(|e| format!("Failed to build the settings submenu: {e}"))?;
         let status_item = MenuItem::new(state::STATUS_MENU_LABEL, true, None);
         let status_item_id = status_item.id().clone();
+        let hush_item = MenuItem::new(state::STATUS_HUSH_MENU_LABEL, true, None);
+        let hush_item_id = hush_item.id().clone();
         let quit_item = MenuItem::new("Quit", true, None);
         let quit_item_id = quit_item.id().clone();
         let menu = Menu::new();
@@ -920,7 +935,7 @@ fn main() {
 
         let tray_icon = TrayIconBuilder::new()
             .with_tooltip("GitHub Notifications")
-            .with_icon(icons.get(false, false, false, false, false).clone())
+            .with_icon(icons.get(false, false, false, false, state::Mark::None).clone())
             // Cloned rather than moved: `Menu` is a reference-counted handle, and the app keeps one
             // so it can take entries out later. The tray gets the same underlying menu.
             .with_menu(Box::new(menu.clone()))
@@ -948,6 +963,8 @@ fn main() {
             repository_item_id,
             status_item,
             status_item_id,
+            hush_item,
+            hush_item_id,
             authenticate_item,
             authenticate_item_id,
             update_item,
@@ -957,7 +974,7 @@ fn main() {
             // The builder set the plain icon above, but treat that as unproven so the first
             // confirmed poll always writes the image it wants.
             applied: None,
-            applied_needs_auth: None,
+            applied_mark: None,
             applied_update: None,
             applied_update_label: None,
             applied_status_label: None,
@@ -969,6 +986,7 @@ fn main() {
                 wanted: [false; 3],
                 needs_auth: false,
                 status_degraded: false,
+                hush: false,
                 update: false,
             }),
         })
@@ -1138,6 +1156,8 @@ fn main() {
                 }
             } else if *id == tray.status_item_id {
                 open_status_pages();
+            } else if *id == tray.hush_item_id {
+                let _ = self.wake_tx.send(scheduler::Wake::AcknowledgeStatus);
             } else if *id == tray.quit_item_id {
                 event_loop.exit();
             }
@@ -1314,7 +1334,7 @@ fn main() {
         fn rebuild_menu(&self, shape: MenuShape) {
             while self.menu.remove_at(0).is_some() {}
 
-            let MenuShape { wanted, needs_auth, status_degraded, update } = shape;
+            let MenuShape { wanted, needs_auth, status_degraded, hush, update } = shape;
             // A separator is only worth drawing when something sits above it; with nothing there it is a
             // stray line that reads as a rendering fault. Created fresh each rebuild rather than held on
             // `Tray`, because the whole menu is emptied first anyway and a separator carries no state.
@@ -1332,12 +1352,13 @@ fn main() {
             // which entry an axis lights — see `state::pr_entry_visibility`.
             let shown = state::pr_entry_visibility(wanted, needs_auth);
 
-            let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 11] = [
+            let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 12] = [
                 // The top group: the app's own state and the service's, rather than anything about your
                 // pull requests. First because when the icon is wearing a mark, two of the three things
                 // that explain it are here.
                 (&self.update_item, update, "update"),
                 (&self.status_item, status_degraded, "github-status"),
+                (&self.hush_item, hush, "hush"),
                 (&top_separator, separate, "top-separator"),
                 (&self.authenticate_item, needs_auth, "authenticate"),
                 // The three PR entries share the credential that is missing, so none of them can
@@ -1386,16 +1407,17 @@ fn main() {
 
             let needs_auth = update.icon.needs_auth;
             let update_available = update.icon.update_available;
-            let exclamation = update.icon.shows_exclamation();
+            let mark = update.icon.mark();
             let shape = MenuShape {
                 wanted,
                 needs_auth,
                 status_degraded: update.icon.status_degraded,
+                hush: update.icon.status_degraded && !update.icon.status_hushed,
                 update: update_available,
             };
 
             if self.applied != Some(wanted)
-                || self.applied_needs_auth != Some(exclamation)
+                || self.applied_mark != Some(mark)
                 || self.applied_update != Some(update_available)
             {
                 // One lookup, no override. The exclamation is a bit like any other now that it sits in
@@ -1403,16 +1425,16 @@ fn main() {
                 // mark *and* whatever counts are still known.
                 let icon = self
                     .icons
-                    .get(wanted[0], wanted[1], wanted[2], update_available, exclamation)
+                    .get(wanted[0], wanted[1], wanted[2], update_available, mark)
                     .clone();
                 match self.tray_icon.set_icon(Some(icon)) {
                     // Only record success. A failed update leaves these `None` so the next
                     // poll retries instead of believing the icon is already correct.
                     Ok(()) => {
                         self.applied = Some(wanted);
-                        // The *exclamation*, not `needs_auth`: this memo exists to decide whether the
-                        // image on screen is still right, and an outage changes that image too.
-                        self.applied_needs_auth = Some(exclamation);
+                        // The *mark*, not `needs_auth`: this memo exists to decide whether the image on
+                        // screen is still right, and an outage or a hush changes that image too.
+                        self.applied_mark = Some(mark);
                         self.applied_update = Some(update_available);
                     }
                     Err(e) => errorln!("failed to update tray icon: {e}"),

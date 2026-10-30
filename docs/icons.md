@@ -19,6 +19,7 @@ no state of its own. On top of it:
 | <img src="icons/tray_changes.png" alt="changes bar" height="28"> | amber bar | Your PR needs work: an objection stands, or it conflicts |
 | <img src="icons/tray_update.png" alt="update arrow" height="28"> | green up-arrow | A newer release is available |
 | <img src="icons/tray_alert.png" alt="exclamation" height="28"> | red exclamation | Something needs saying, see below |
+| <img src="icons/tray_hushed.png" alt="small red dot" height="28"> | small red dot | An outage you acknowledged, see below |
 
 The icons above are the real ones the app draws, not mock-ups.
 
@@ -60,3 +61,34 @@ missing credential never points at the status page.
 
 "A poll failed" means exactly that — asked and not answered. A freshly started app has answered nothing yet
 and shows no mark, and a single transient blip holds the last known value rather than raising one.
+
+## Acknowledging an outage
+
+An incident can last hours, and nothing the user does ends it. A mark that cannot be acted on teaches
+people to ignore the mark, and then they miss the sign-in or the failed poll it also stands for. So the
+menu offers **Got it, quiet the mark until it changes** while an incident is on show.
+
+| Icon | State |
+|:---:|---|
+| <img src="icons/tray_review_changes_alert.png" alt="exclamation beside the bars" height="28"> | Incident, not yet acknowledged |
+| <img src="icons/tray_review_changes_hushed.png" alt="small dot beside the bars" height="28"> | The same incident, acknowledged |
+
+The exclamation shrinks to its own dot, in the same corner and the same red. Red because it is still an
+outage; small because it has been seen. Grey was tried and lost: at 16px on a light panel it disappears.
+The status entry and the tooltip line stay, the line marked `(acknowledged)`, so the truth is one hover
+away.
+
+**What brings the exclamation back:**
+
+- **The incident changes.** The acknowledgement is keyed on the portal's own words, which every portal
+  builds from the severity and the parts that are down. Worse, better or another part down all read as
+  new. A repeat of the same verdict does not.
+- **It ends, and another starts.** A recovery forgets the acknowledgement, so the next incident is loud
+  even if it reads the same.
+- **A restart.** It lives in memory only, which errs on the side of saying too much.
+- **Another cause.** It quiets the outage and nothing else: a missing credential or a failed poll during
+  an acknowledged outage still raises the full mark. With several portals, the dot shows only while every
+  portal that is down has been acknowledged.
+
+The mark is therefore a three-state value (`state::Mark`: none, alert, hushed), and the icon set holds 48
+variants rather than 32.

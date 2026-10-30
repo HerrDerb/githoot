@@ -101,6 +101,7 @@ marks around it do, and **every mark combines with every other**, so any state c
 | <img src="docs/icons/tray_changes.png" height="26"> | Amber bar: a reviewer asked for changes, a conflict is blocking one, or an approved one failed its checks |
 | <img src="docs/icons/tray_update.png" height="26"> | Green arrow: a newer release is available |
 | <img src="docs/icons/tray_alert.png" height="26"> | Red exclamation: sign-in needed, a portal is down, or a poll failed; the tooltip says which |
+| <img src="docs/icons/tray_hushed.png" height="26"> | Small red dot: a portal is still down, and you acknowledged it |
 | <img src="docs/icons/tray_review_merge_changes.png" height="26"> | All three at once. A very bad Monday |
 
 Those are the real icons the app draws, composited at runtime from one owl, not mock-ups. Positions
@@ -163,6 +164,11 @@ bar is silent, and several arriving at once are one hoot → [the hoot](docs/hoo
 **The exclamation** means GitHoot cannot vouch for what it shows: you need to sign in, a portal reports
 an outage, or asking failed. A failed answer is never shown as zero; the last known state is kept and
 the tooltip says what went wrong.
+
+**The small dot** is an outage you acknowledged with **Got it, quiet the mark until it changes**. The
+exclamation comes back when the incident changes (worse, better, or another part down), when it ends and
+a new one starts, or when GitHoot restarts. It quiets the outage only: a sign-in or a failed poll still
+raises the full mark.
 
 **The arrow** means a newer GitHoot release is available. Install it from the tray menu or from
 **Updates** in the settings pages.

@@ -8,6 +8,7 @@
 | **The Octocat (GitHub) is having a rough day, check status** | GitHub reports an incident | Opens [githubstatus.com](https://www.githubstatus.com) |
 | **The Tanuki (GitLab) is having a rough day, check status** | GitLab.com reports an incident | Opens [status.gitlab.com](https://status.gitlab.com) |
 | **The Octocat (GitHub) and the Tanuki (GitLab) are having a rough day, check status** | Both at once | Opens both status pages |
+| **Got it, quiet the mark until it changes** | An incident is on show and not yet acknowledged | Turns the exclamation into a small red dot until the incident changes. See [icons](icons.md#acknowledging-an-outage) |
 | *— separator —* | Something above **and** below it | |
 | **Authenticate GitHub PR Status** | PR status has no usable credential | Opens **Portals ▸ GitHub**, where the sign-in button is |
 | **Open Requested Reviews (N)** | A PR waits on your review | Opens GitHoot's own page for exactly what the red bar counts |
