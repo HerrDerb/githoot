@@ -165,7 +165,7 @@ bar is silent, and several arriving at once are one hoot → [the hoot](docs/hoo
 an outage, or asking failed. A failed answer is never shown as zero; the last known state is kept and
 the tooltip says what went wrong.
 
-**The small dot** is an outage you acknowledged with **Got it, quiet the mark until it changes**. The
+**The small dot** is an outage you acknowledged by opening its status page from the tray menu. The
 exclamation comes back when the incident changes (worse, better, or another part down), when it ends and
 a new one starts, or when GitHoot restarts. It quiets the outage only: a sign-in or a failed poll still
 raises the full mark.

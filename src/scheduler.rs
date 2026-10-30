@@ -302,7 +302,7 @@ pub enum Wake {
     /// `restart` closure the update thread uses, and that lives on this side. Handling it only *spawns*
     /// a thread, so polling is not delayed by the fifteen minutes the watch may run for.
     SettingsOpened,
-    /// The user picked the hush entry: every incident on show now has been seen, so the mark drops to
+    /// The user opened the status pages: every incident on show now has been seen, so the mark drops to
     /// the small dot until one of them changes. Answered with a tray update and no poll, since nothing
     /// on any portal's side moved.
     AcknowledgeStatus,
@@ -1340,8 +1340,6 @@ pub struct MenuItems {
     /// it means: both are conditional, both are the counterpart of a mark on the icon, and because
     /// that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     pub status: gtk::MenuItem,
-    /// Shown only while an incident is on show and not yet acknowledged. Sits under `status`.
-    pub hush: gtk::MenuItem,
     /// The rule above the body of the menu. Shown only while something sits above it — see the append
     /// order in `main`, and `applied_top_group` below for why its visibility is tracked separately.
     pub top_separator: gtk::SeparatorMenuItem,
@@ -1407,7 +1405,6 @@ pub fn start_notification_scheduler(
     // for all of them, and because it drives a menu item the four do not.
     let mut applied_needs_auth: Option<bool> = None;
     let mut applied_status: Option<bool> = None;
-    let mut applied_hush: Option<bool> = None;
     // The mark on screen. Its own memo, because a hush changes it while every bit the others watch stays put.
     let mut applied_mark: Option<crate::state::Mark> = None;
     // Whether anything is currently in the top group. Its own memo rather than derived on the fly,
@@ -1435,7 +1432,6 @@ pub fn start_notification_scheduler(
             let update_available = update.icon.update_available;
             let status_degraded = update.icon.status_degraded;
             let mark = update.icon.mark();
-            let hush = status_degraded && !update.icon.status_hushed;
 
             // Checked before the four signals, because it overrides them: with no credential there
             // is nothing to draw a dot from. `wanted` is still computed and stored above, so the
@@ -1546,10 +1542,6 @@ pub fn start_notification_scheduler(
             {
                 menu_items.status.set_label(label);
                 applied_status_label = Some(label.to_string());
-            }
-            if applied_hush != Some(hush) {
-                menu_items.hush.set_visible(hush);
-                applied_hush = Some(hush);
             }
             if applied_mark != Some(mark) {
                 applied_mark = Some(mark);

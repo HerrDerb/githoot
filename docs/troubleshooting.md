@@ -18,7 +18,7 @@ memory and never write one to disk.
 | `PR status off: setup failed` | No HTTP client could be built; clicking will not help |
 | `PR status off in config.txt` | All three signals switched off |
 | `... state unknown` | Several polls failed; that signal is no longer trustworthy, and the exclamation is up |
-| `GitHub: <description>` | GitHub reports an incident; quotes its own wording, and comes first in the tooltip. With `statusComponents` set, the description names the components: `Issues (Partial Outage)`. Ends in `(acknowledged)` once you quieted it from the menu |
+| `GitHub: <description>` | GitHub reports an incident; quotes its own wording, and comes first in the tooltip. With `statusComponents` set, the description names the components: `Issues (Partial Outage)`. Ends in `(acknowledged)` once you opened the status page from the menu |
 | `Update available: X.Y.Z` | A newer release exists |
 
 A bar that is simply absent, with no message, means you genuinely have nothing pending. That distinction

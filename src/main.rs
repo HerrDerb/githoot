@@ -504,11 +504,11 @@ fn main() {
     // Sibling of the Authenticate entry: conditional, and the counterpart of a mark on the icon. Since
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     let status_item = MenuItem::with_label(state::STATUS_MENU_LABEL);
-    status_item.connect_activate(move |_| open_status_pages());
-    let hush_item = MenuItem::with_label(state::STATUS_HUSH_MENU_LABEL);
-    let hush_wake_tx = wake_tx.clone();
-    hush_item.connect_activate(move |_| {
-        let _ = hush_wake_tx.send(scheduler::Wake::AcknowledgeStatus);
+    // Opening the pages is the acknowledgement: the user has gone and looked, so the mark can quiet down.
+    let status_wake_tx = wake_tx.clone();
+    status_item.connect_activate(move |_| {
+        open_status_pages();
+        let _ = status_wake_tx.send(scheduler::Wake::AcknowledgeStatus);
     });
 
     let quit_item = MenuItem::with_label("Quit");
@@ -524,7 +524,6 @@ fn main() {
 
     menu.append(&update_item);
     menu.append(&status_item);
-    menu.append(&hush_item);
     menu.append(&top_separator);
     menu.append(&authenticate_item);
     menu.append(&reviews_item);
@@ -540,7 +539,6 @@ fn main() {
     // it has nothing to separate until one of them is up.
     update_item.set_visible(false);
     status_item.set_visible(false);
-    hush_item.set_visible(false);
     top_separator.set_visible(false);
     // The three PR entries too. Each is shown only on a *confirmed* count above zero, and before the
     // first answer there is no such thing — an entry opening an empty list is a dead end, and one
@@ -596,7 +594,6 @@ fn main() {
             changes_requested: changes_requested_item.clone(),
             pr_inbox: pr_inbox_item.clone(),
             status: status_item.clone(),
-            hush: hush_item.clone(),
             top_separator: top_separator.clone(),
             authenticate: authenticate_item.clone(),
             update: update_item.clone(),
@@ -807,9 +804,6 @@ fn main() {
         /// Shown only while GitHub reports an incident.
         status_item: tray_icon::menu::MenuItem,
         status_item_id: tray_icon::menu::MenuId,
-        /// Shown only while an incident is on show and not yet acknowledged.
-        hush_item: tray_icon::menu::MenuItem,
-        hush_item_id: tray_icon::menu::MenuId,
         /// Offered only while PR status is waiting to be authorized.
         authenticate_item: tray_icon::menu::MenuItem,
         authenticate_item_id: tray_icon::menu::MenuId,
@@ -851,8 +845,6 @@ fn main() {
         wanted: [bool; 3],
         needs_auth: bool,
         status_degraded: bool,
-        /// An incident is on show and not yet acknowledged, so the hush entry is offered.
-        hush: bool,
         update: bool,
     }
 
@@ -913,8 +905,6 @@ fn main() {
         .map_err(|e| format!("Failed to build the settings submenu: {e}"))?;
         let status_item = MenuItem::new(state::STATUS_MENU_LABEL, true, None);
         let status_item_id = status_item.id().clone();
-        let hush_item = MenuItem::new(state::STATUS_HUSH_MENU_LABEL, true, None);
-        let hush_item_id = hush_item.id().clone();
         let quit_item = MenuItem::new("Quit", true, None);
         let quit_item_id = quit_item.id().clone();
         let menu = Menu::new();
@@ -963,8 +953,6 @@ fn main() {
             repository_item_id,
             status_item,
             status_item_id,
-            hush_item,
-            hush_item_id,
             authenticate_item,
             authenticate_item_id,
             update_item,
@@ -986,7 +974,6 @@ fn main() {
                 wanted: [false; 3],
                 needs_auth: false,
                 status_degraded: false,
-                hush: false,
                 update: false,
             }),
         })
@@ -1155,8 +1142,8 @@ fn main() {
                     errorln!("failed to open the repository: {e}");
                 }
             } else if *id == tray.status_item_id {
+                // Opening the pages is the acknowledgement, as on Linux.
                 open_status_pages();
-            } else if *id == tray.hush_item_id {
                 let _ = self.wake_tx.send(scheduler::Wake::AcknowledgeStatus);
             } else if *id == tray.quit_item_id {
                 event_loop.exit();
@@ -1334,7 +1321,7 @@ fn main() {
         fn rebuild_menu(&self, shape: MenuShape) {
             while self.menu.remove_at(0).is_some() {}
 
-            let MenuShape { wanted, needs_auth, status_degraded, hush, update } = shape;
+            let MenuShape { wanted, needs_auth, status_degraded, update } = shape;
             // A separator is only worth drawing when something sits above it; with nothing there it is a
             // stray line that reads as a rendering fault. Created fresh each rebuild rather than held on
             // `Tray`, because the whole menu is emptied first anyway and a separator carries no state.
@@ -1352,13 +1339,12 @@ fn main() {
             // which entry an axis lights — see `state::pr_entry_visibility`.
             let shown = state::pr_entry_visibility(wanted, needs_auth);
 
-            let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 12] = [
+            let entries: [(&dyn tray_icon::menu::IsMenuItem, bool, &str); 11] = [
                 // The top group: the app's own state and the service's, rather than anything about your
                 // pull requests. First because when the icon is wearing a mark, two of the three things
                 // that explain it are here.
                 (&self.update_item, update, "update"),
                 (&self.status_item, status_degraded, "github-status"),
-                (&self.hush_item, hush, "hush"),
                 (&top_separator, separate, "top-separator"),
                 (&self.authenticate_item, needs_auth, "authenticate"),
                 // The three PR entries share the credential that is missing, so none of them can
@@ -1412,7 +1398,6 @@ fn main() {
                 wanted,
                 needs_auth,
                 status_degraded: update.icon.status_degraded,
-                hush: update.icon.status_degraded && !update.icon.status_hushed,
                 update: update_available,
             };
 

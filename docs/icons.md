@@ -65,8 +65,9 @@ and shows no mark, and a single transient blip holds the last known value rather
 ## Acknowledging an outage
 
 An incident can last hours, and nothing the user does ends it. A mark that cannot be acted on teaches
-people to ignore the mark, and then they miss the sign-in or the failed poll it also stands for. So the
-menu offers **Got it, quiet the mark until it changes** while an incident is on show.
+people to ignore the mark, and then they miss the sign-in or the failed poll it also stands for. So
+opening the status page from the tray menu acknowledges the incident: the user has gone and looked. No
+entry of its own, so nothing new to find; the cost is that quieting the mark always opens a tab.
 
 | Icon | State |
 |:---:|---|

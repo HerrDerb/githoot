@@ -238,9 +238,6 @@ pub const UPDATE_MENU_LABEL: &str = "Install update";
 /// apart at a glance.
 pub const STATUS_MENU_LABEL: &str = "The Octocat (GitHub) is having a rough day, check status";
 
-/// Text of the tray entry that acknowledges every incident on show. Shown only while one is unacknowledged.
-pub const STATUS_HUSH_MENU_LABEL: &str = "Got it, quiet the mark until it changes";
-
 /// Text of the tray's Settings submenu.
 ///
 /// Always present, unlike every other entry here: it needs no credential, no poll and no available
