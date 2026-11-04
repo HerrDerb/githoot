@@ -19,7 +19,7 @@ use crate::{errorln, infoln};
 use crate::state::{IconState, PollState, PrAxis, MENU_BURST, REFRESH_BURST};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -318,7 +318,7 @@ pub type PortalBuilder =
 static BUILDER: std::sync::OnceLock<(PortalBuilder, PathBuf)> = std::sync::OnceLock::new();
 
 /// One rendering instruction for the UI thread.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Update {
     pub icon: IconState,
     pub tooltip: String,
@@ -332,6 +332,41 @@ pub struct Update {
     /// The status entry while a portal is degraded: its label, and the pages a click opens. `None`
     /// while none is, when the entry is hidden.
     pub status: Option<crate::overview::StatusMenu>,
+    /// How many status clicks the poll thread had acted on when it built this. See [`Update::shown_icon`].
+    pub hushes: u64,
+}
+
+/// Status clicks so far, counted on the UI thread the moment they happen.
+static HUSH_ASKED: AtomicU64 = AtomicU64::new(0);
+/// Status clicks the poll thread has acted on. Read into every `Update` it builds.
+static HUSH_DONE: AtomicU64 = AtomicU64::new(0);
+
+/// The status entry was clicked: count it here, at once, and tell the poll thread to acknowledge.
+///
+/// The count is what lets the icon quiet down immediately. The poll thread reads its wakes only between
+/// polls, and opening the menu starts a burst of them, so the click usually lands mid-poll and the wake
+/// waits seconds. Until it is handled, the UI draws every update as already hushed.
+pub fn acknowledge_status(wake: &std::sync::mpsc::Sender<Wake>) {
+    HUSH_ASKED.fetch_add(1, Ordering::SeqCst);
+    let _ = wake.send(Wake::AcknowledgeStatus);
+}
+
+impl Update {
+    /// The icon to draw: as built, or with the outage hushed while a status click is still on its way
+    /// to the poll thread.
+    pub fn shown_icon(&self) -> IconState {
+        self.icon_with(HUSH_ASKED.load(Ordering::SeqCst))
+    }
+
+    /// `shown_icon`, given the click count. Only the outage is hushed: `mark` still puts a missing
+    /// credential or a failed poll first.
+    fn icon_with(&self, asked: u64) -> IconState {
+        let mut icon = self.icon;
+        if asked > self.hushes {
+            icon.status_hushed = icon.status_degraded;
+        }
+        icon
+    }
 }
 
 /// The pages the status entry opens, as the last tray update named them. The click is handled on
@@ -681,6 +716,7 @@ fn tray_update(runs: &[PortalRun], update_available: Option<&str>) -> Update {
         pr_labels: PrAxis::ALL.map(|axis| crate::overview::pr_menu_label(&views, axis)),
         update_label: crate::overview::update_menu_label(update_available),
         status,
+        hushes: HUSH_DONE.load(Ordering::SeqCst),
     }
 }
 
@@ -1168,9 +1204,13 @@ fn run_poll_loop(
                         // want a poll at all — hence `skip_etag` going back down. All it does is arm the
                         // watcher, which then lives on its own thread.
                         Wake::AcknowledgeStatus => {
+                            // Read before the acknowledgement and stored after it, so every update built
+                            // from here on is hushed itself and no click is counted twice or missed.
+                            let asked = HUSH_ASKED.load(Ordering::SeqCst);
                             for run in &mut runs {
                                 run.state.acknowledge_status();
                             }
+                            HUSH_DONE.store(asked, Ordering::SeqCst);
                             infoln!("incident acknowledged, the mark is quiet until it changes");
                             if !emit(tray_update(&runs, update_available.as_deref())) {
                                 return;
@@ -1417,146 +1457,165 @@ pub fn start_notification_scheduler(
     let mut applied_update_label: Option<String> = None;
     let mut applied_status_label: Option<String> = None;
 
+    // The status entry is about to be redrawn from here as well as from the timer: a click hushes the
+    // icon at once rather than at the next tick, after a poll that may take seconds. So the body that
+    // draws an update is shared, and the last update is kept to draw again.
+    let status_item = menu_items.status.clone();
+    let apply = std::rc::Rc::new(std::cell::RefCell::new(move |update: Update| {
+        let icon = update.shown_icon();
+        // `Unknown` on any axis deliberately leaves that part of the picture alone — a brief
+        // failure should change the words, not make the icon flap. Only a confirmed answer
+        // moves the image, so an unknown axis falls back to whatever is on screen.
+        let current = applied.unwrap_or([false; 3]);
+        let wanted = [
+            icon.review_requested.as_confirmed().unwrap_or(current[0]),
+            icon.ready_to_merge.as_confirmed().unwrap_or(current[1]),
+            icon.changes_requested.as_confirmed().unwrap_or(current[2]),
+        ];
+        let needs_auth = icon.needs_auth;
+        let update_available = icon.update_available;
+        let status_degraded = icon.status_degraded;
+        let mark = icon.mark();
+
+        // Checked before the four signals, because it overrides them: with no credential there
+        // is nothing to draw a dot from. `wanted` is still computed and stored above, so the
+        // moment authorization succeeds the icon can go straight back to the right variant
+        // without waiting for a signal to change.
+        if applied_needs_auth != Some(needs_auth) {
+            menu_items.authenticate.set_visible(needs_auth);
+            applied_needs_auth = Some(needs_auth);
+            // Force the icon/menu block below to run: the variant it should show has just
+            // changed even if none of the four signals did.
+            applied = None;
+        }
+
+        // Its own memo rather than riding on `applied_needs_auth`, because the two are independent:
+        // GitHub can be down while the credential is fine, and vice versa.
+        if applied_status != Some(status_degraded) {
+            menu_items.status.set_visible(status_degraded);
+            applied_status = Some(status_degraded);
+            // Same reason as above: this bit is part of which variant the icon shows.
+            applied = None;
+        }
+
+        // A separator needs something on both sides. Only the top side is still in question: the
+        // body — Authenticate, notifications, the PR entries — used to be able to empty out, leaving
+        // this rule directly above the bottom one, which reads as a rendering fault rather than a
+        // grouping. The PR-inbox entry appears exactly when the three PR entries do not, so the body
+        // can no longer be empty and the old test for it was permanently true.
+        let top_group = status_degraded || update_available;
+        let separate = top_group;
+        if applied_top_group != Some(separate) {
+            menu_items.top_separator.set_visible(separate);
+            applied_top_group = Some(separate);
+        }
+
+        if applied_update != Some(update_available) {
+            menu_items.update.set_visible(update_available);
+            applied_update = Some(update_available);
+            // Same reason as above: the arrow is part of the variant, so the image has to be
+            // re-applied even though none of the four signals moved.
+            applied = None;
+        }
+
+        if applied != Some(wanted) {
+            // One call, no branch. The exclamation used to select a whole separate icon because it
+            // replaced the bars; now it is just another bit, so every mark composes with every other.
+            indicator.set_icon(
+                icons
+                    .get(wanted[0], wanted[1], wanted[2], update_available, mark)
+                    .as_str(),
+            );
+
+            // An entry that opens an empty list is a dead end, so it is hidden. `wanted` says
+            // it directly: the icon carries a signal exactly when that entry has somewhere to
+            // go. Its treatment of `Unknown` carries over too, so a failed poll leaves the menu
+            // as it was rather than hiding an entry we simply could not ask about.
+            //
+            // The three PR entries are hidden outright while waiting to authorize, because none
+            // of them can have anything behind them.
+            //
+            // GTK has per-item visibility, so this is a flag rather than the remove-and-append
+            // dance the Windows side needs. `show_all` is called once during setup and never
+            // again, so nothing undoes these.
+            // `needs_auth`, deliberately not `exclamation`: an outage hides the *bars* because the
+            // icon has only one exclamation to give, but the counts behind these entries are the
+            // last known good ones and the lists still open. Hiding them would take away working
+            // links to punish GitHub for being slow.
+            //
+            // Indexed by axis on both sides, not zipped. This used to be `.zip(&wanted[1..])`,
+            // skipping a notifications slot at index 0 — and when that slot was removed the slice
+            // stayed, so every entry showed its *neighbour's* bit: the reviews entry lit up for an
+            // approved PR with a bare label, and the changes entry never lit at all. Shipped that
+            // way in 2.0.0 and 2.0.1. One index for both arrays cannot drift apart like that.
+            let items = menu_items.pr_items();
+            let shown = crate::state::pr_entry_visibility(wanted, needs_auth);
+            for axis in PrAxis::ALL {
+                items[axis.index()].set_visible(shown[axis.index()]);
+            }
+            // Deliberately *not* gated on `needs_auth`: a plain URL needs no credential, which is
+            // exactly what makes it worth keeping when the three that do need one are hidden.
+            let pr_entries = wanted;
+            menu_items.pr_inbox.set_visible(crate::state::shows_pr_inbox(pr_entries, needs_auth));
+
+            applied = Some(wanted);
+        }
+
+        // Only on change: relabelling a menu item is cheap, but some panels rebuild the whole
+        // menu when an item changes, which would fight a user who has it open.
+        for (item, (label, applied_label)) in
+            menu_items.pr_items().into_iter().zip(update.pr_labels.iter().zip(&mut applied_labels))
+        {
+            if applied_label.as_deref() != Some(label.as_str()) {
+                item.set_label(label);
+                *applied_label = Some(label.clone());
+            }
+        }
+
+        // Carries the version, so it changes whenever a newer release appears. Same
+        // only-on-change guard as the PR labels, for the same reason.
+        if let Some(label) = update.update_label.as_deref()
+            && applied_update_label.as_deref() != Some(label)
+        {
+            menu_items.update.set_label(label);
+            applied_update_label = Some(label.to_string());
+        }
+        // Names the portal that is down, so it changes when a different one goes down.
+        if let Some(label) = update.status.as_ref().map(|s| s.label.as_str())
+            && applied_status_label.as_deref() != Some(label)
+        {
+            menu_items.status.set_label(label);
+            applied_status_label = Some(label.to_string());
+        }
+        if applied_mark != Some(mark) {
+            applied_mark = Some(mark);
+            applied = None;
+        }
+
+        indicator.set_title(&update.tooltip);
+        // No `set_label`. It used to put a "!" beside the icon whenever a signal was `Unknown`,
+        // which worked — but only here: `set_label` is a StatusNotifierItem property, and neither
+        // Windows' `Shell_NotifyIcon` nor macOS' `NSStatusItem` has anywhere to put it. So the one
+        // platform with a panel label was the only platform that showed a failed poll without
+        // hovering. That signal is now the exclamation in the composited icon, which reaches all
+        // three — see `IconState::shows_exclamation`.
+    }));
+    let last: std::rc::Rc<std::cell::RefCell<Option<Update>>> = Default::default();
+
+    let (timer_apply, timer_last) = (apply.clone(), last.clone());
     glib::timeout_add_local(UI_DRAIN_INTERVAL, move || {
         while let Ok(update) = update_rx.try_recv() {
-            // `Unknown` on any axis deliberately leaves that part of the picture alone — a brief
-            // failure should change the words, not make the icon flap. Only a confirmed answer
-            // moves the image, so an unknown axis falls back to whatever is on screen.
-            let current = applied.unwrap_or([false; 3]);
-            let wanted = [
-                update.icon.review_requested.as_confirmed().unwrap_or(current[0]),
-                update.icon.ready_to_merge.as_confirmed().unwrap_or(current[1]),
-                update.icon.changes_requested.as_confirmed().unwrap_or(current[2]),
-            ];
-            let needs_auth = update.icon.needs_auth;
-            let update_available = update.icon.update_available;
-            let status_degraded = update.icon.status_degraded;
-            let mark = update.icon.mark();
-
-            // Checked before the four signals, because it overrides them: with no credential there
-            // is nothing to draw a dot from. `wanted` is still computed and stored above, so the
-            // moment authorization succeeds the icon can go straight back to the right variant
-            // without waiting for a signal to change.
-            if applied_needs_auth != Some(needs_auth) {
-                menu_items.authenticate.set_visible(needs_auth);
-                applied_needs_auth = Some(needs_auth);
-                // Force the icon/menu block below to run: the variant it should show has just
-                // changed even if none of the four signals did.
-                applied = None;
-            }
-
-            // Its own memo rather than riding on `applied_needs_auth`, because the two are independent:
-            // GitHub can be down while the credential is fine, and vice versa.
-            if applied_status != Some(status_degraded) {
-                menu_items.status.set_visible(status_degraded);
-                applied_status = Some(status_degraded);
-                // Same reason as above: this bit is part of which variant the icon shows.
-                applied = None;
-            }
-
-            // A separator needs something on both sides. Only the top side is still in question: the
-            // body — Authenticate, notifications, the PR entries — used to be able to empty out, leaving
-            // this rule directly above the bottom one, which reads as a rendering fault rather than a
-            // grouping. The PR-inbox entry appears exactly when the three PR entries do not, so the body
-            // can no longer be empty and the old test for it was permanently true.
-            let top_group = status_degraded || update_available;
-            let separate = top_group;
-            if applied_top_group != Some(separate) {
-                menu_items.top_separator.set_visible(separate);
-                applied_top_group = Some(separate);
-            }
-
-            if applied_update != Some(update_available) {
-                menu_items.update.set_visible(update_available);
-                applied_update = Some(update_available);
-                // Same reason as above: the arrow is part of the variant, so the image has to be
-                // re-applied even though none of the four signals moved.
-                applied = None;
-            }
-
-            if applied != Some(wanted) {
-                // One call, no branch. The exclamation used to select a whole separate icon because it
-                // replaced the bars; now it is just another bit, so every mark composes with every other.
-                indicator.set_icon(
-                    icons
-                        .get(wanted[0], wanted[1], wanted[2], update_available, mark)
-                        .as_str(),
-                );
-
-                // An entry that opens an empty list is a dead end, so it is hidden. `wanted` says
-                // it directly: the icon carries a signal exactly when that entry has somewhere to
-                // go. Its treatment of `Unknown` carries over too, so a failed poll leaves the menu
-                // as it was rather than hiding an entry we simply could not ask about.
-                //
-                // The three PR entries are hidden outright while waiting to authorize, because none
-                // of them can have anything behind them.
-                //
-                // GTK has per-item visibility, so this is a flag rather than the remove-and-append
-                // dance the Windows side needs. `show_all` is called once during setup and never
-                // again, so nothing undoes these.
-                // `needs_auth`, deliberately not `exclamation`: an outage hides the *bars* because the
-                // icon has only one exclamation to give, but the counts behind these entries are the
-                // last known good ones and the lists still open. Hiding them would take away working
-                // links to punish GitHub for being slow.
-                //
-                // Indexed by axis on both sides, not zipped. This used to be `.zip(&wanted[1..])`,
-                // skipping a notifications slot at index 0 — and when that slot was removed the slice
-                // stayed, so every entry showed its *neighbour's* bit: the reviews entry lit up for an
-                // approved PR with a bare label, and the changes entry never lit at all. Shipped that
-                // way in 2.0.0 and 2.0.1. One index for both arrays cannot drift apart like that.
-                let items = menu_items.pr_items();
-                let shown = crate::state::pr_entry_visibility(wanted, needs_auth);
-                for axis in PrAxis::ALL {
-                    items[axis.index()].set_visible(shown[axis.index()]);
-                }
-                // Deliberately *not* gated on `needs_auth`: a plain URL needs no credential, which is
-                // exactly what makes it worth keeping when the three that do need one are hidden.
-                let pr_entries = wanted;
-                menu_items.pr_inbox.set_visible(crate::state::shows_pr_inbox(pr_entries, needs_auth));
-
-                applied = Some(wanted);
-            }
-
-            // Only on change: relabelling a menu item is cheap, but some panels rebuild the whole
-            // menu when an item changes, which would fight a user who has it open.
-            for (item, (label, applied_label)) in
-                menu_items.pr_items().into_iter().zip(update.pr_labels.iter().zip(&mut applied_labels))
-            {
-                if applied_label.as_deref() != Some(label.as_str()) {
-                    item.set_label(label);
-                    *applied_label = Some(label.clone());
-                }
-            }
-
-            // Carries the version, so it changes whenever a newer release appears. Same
-            // only-on-change guard as the PR labels, for the same reason.
-            if let Some(label) = update.update_label.as_deref()
-                && applied_update_label.as_deref() != Some(label)
-            {
-                menu_items.update.set_label(label);
-                applied_update_label = Some(label.to_string());
-            }
-            // Names the portal that is down, so it changes when a different one goes down.
-            if let Some(label) = update.status.as_ref().map(|s| s.label.as_str())
-                && applied_status_label.as_deref() != Some(label)
-            {
-                menu_items.status.set_label(label);
-                applied_status_label = Some(label.to_string());
-            }
-            if applied_mark != Some(mark) {
-                applied_mark = Some(mark);
-                applied = None;
-            }
-
-            indicator.set_title(&update.tooltip);
-            // No `set_label`. It used to put a "!" beside the icon whenever a signal was `Unknown`,
-            // which worked — but only here: `set_label` is a StatusNotifierItem property, and neither
-            // Windows' `Shell_NotifyIcon` nor macOS' `NSStatusItem` has anywhere to put it. So the one
-            // platform with a panel label was the only platform that showed a failed poll without
-            // hovering. That signal is now the exclamation in the composited icon, which reaches all
-            // three — see `IconState::shows_exclamation`.
+            *timer_last.borrow_mut() = Some(update.clone());
+            (timer_apply.borrow_mut())(update);
         }
         glib::ControlFlow::Continue
+    });
+    // Connected after `main`'s own handler, which counts the click, so this one already draws it hushed.
+    status_item.connect_activate(move |_| {
+        let update = last.borrow().clone();
+        if let Some(update) = update {
+            (apply.borrow_mut())(update);
+        }
     });
 }
 
@@ -1715,6 +1774,25 @@ mod tests {
     use crate::portal::fake::FakePortal;
     use crate::portal::types::{PollResponse, PollResult};
     use crate::portal::{CredentialState, Health, PollOutcome};
+
+    /// A status click quiets the icon on the UI thread at once, before the poll thread has heard of it:
+    /// an update built before the click is drawn hushed, one built after it already is.
+    #[test]
+    fn a_status_click_hushes_the_icon_before_the_poll_thread_hears_of_it() {
+        let mut runs = vec![PortalRun::new(Box::new(FakePortal::named("GitHub")), CredentialState::Ready, [true; 3])];
+        runs[0].state.set_status_degraded(Some("Down".to_string()));
+        let before = Update { hushes: 3, ..tray_update(&runs, None) };
+        assert_eq!(before.icon_with(3).mark(), crate::state::Mark::Alert, "no click it has not heard of");
+        assert_eq!(before.icon_with(4).mark(), crate::state::Mark::Hushed, "a click on its way");
+
+        runs[0].state.require_pr_auth();
+        let loud = Update { hushes: 3, ..tray_update(&runs, None) };
+        assert_eq!(loud.icon_with(4).mark(), crate::state::Mark::Alert, "it hushes the outage, nothing else");
+
+        let well = vec![PortalRun::new(Box::new(FakePortal::named("GitHub")), CredentialState::Ready, [true; 3])];
+        let calm = Update { hushes: 3, ..tray_update(&well, None) };
+        assert!(!calm.icon_with(4).status_hushed, "nothing down, nothing to hush");
+    }
 
     /// What the tray is told is built in one place, so the loop can draw it again the moment an
     /// update check changes the answer, rather than a whole poll interval later.

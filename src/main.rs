@@ -252,11 +252,14 @@ fn open_status_pages() {
     if pages.is_empty() {
         errorln!("the status entry was clicked, but no portal has reported being down");
     }
-    for page in pages {
-        if let Err(e) = open::that(&page) {
-            errorln!("failed to open the status page {page}: {e}");
+    // Off this thread: a launcher can block, and this is the UI thread, which has the hush to draw.
+    std::thread::spawn(move || {
+        for page in pages {
+            if let Err(e) = open::that(&page) {
+                errorln!("failed to open the status page {page}: {e}");
+            }
         }
-    }
+    });
 }
 
 // ─── Linux ────────────────────────────────────────────────────────────────────
@@ -505,10 +508,11 @@ fn main() {
     // that mark is the *same* exclamation for both, this entry is what tells the two states apart.
     let status_item = MenuItem::with_label(state::STATUS_MENU_LABEL);
     // Opening the pages is the acknowledgement: the user has gone and looked, so the mark can quiet down.
+    // Counted before the pages open, so the scheduler's own handler on this entry draws the hush at once.
     let status_wake_tx = wake_tx.clone();
     status_item.connect_activate(move |_| {
+        scheduler::acknowledge_status(&status_wake_tx);
         open_status_pages();
-        let _ = status_wake_tx.send(scheduler::Wake::AcknowledgeStatus);
     });
 
     let quit_item = MenuItem::with_label("Quit");
@@ -831,6 +835,8 @@ fn main() {
         /// And for which entries the menu currently holds. Tracked separately from `applied` because a
         /// failed `set_icon` must not also suppress the menu update.
         applied_menu: Option<MenuShape>,
+        /// The update drawn last, kept so a status click can draw it again, hushed, at once.
+        last: Option<Update>,
     }
 
     /// Which entries the menu should hold.
@@ -976,6 +982,7 @@ fn main() {
                 status_degraded: false,
                 update: false,
             }),
+            last: None,
         })
     }
 
@@ -1089,7 +1096,18 @@ fn main() {
         ///
         /// Shared by the two ways an entry can reach us: Windows drains `MenuEvent::receiver()` in
         /// `about_to_wait`, macOS gets a `muda` callback forwarded in as a user event.
-        fn on_menu(&self, id: &tray_icon::menu::MenuId, event_loop: &ActiveEventLoop) {
+        fn on_menu(&mut self, id: &tray_icon::menu::MenuId, event_loop: &ActiveEventLoop) {
+            // First and on its own, because it is the one entry that redraws the tray, which takes it
+            // mutably. Opening the pages is the acknowledgement, as on Linux. Counted and drawn before
+            // they open, so the mark quiets at once rather than after the poll the click landed in.
+            if let Some(tray) = self.tray.as_mut().filter(|tray| *id == tray.status_item_id) {
+                scheduler::acknowledge_status(&self.wake_tx);
+                if let Some(update) = tray.last.clone() {
+                    tray.apply(update);
+                }
+                open_status_pages();
+                return;
+            }
             let Some(tray) = &self.tray else {
                 return;
             };
@@ -1141,10 +1159,6 @@ fn main() {
                 if let Err(e) = open::that(update::REPOSITORY_URL) {
                     errorln!("failed to open the repository: {e}");
                 }
-            } else if *id == tray.status_item_id {
-                // Opening the pages is the acknowledgement, as on Linux.
-                open_status_pages();
-                let _ = self.wake_tx.send(scheduler::Wake::AcknowledgeStatus);
             } else if *id == tray.quit_item_id {
                 event_loop.exit();
             }
@@ -1381,23 +1395,25 @@ fn main() {
         }
 
         fn apply(&mut self, update: Update) {
+            self.last = Some(update.clone());
+            let icon = update.shown_icon();
             // `Unknown` on any axis deliberately leaves that part of the picture alone — a brief
             // failure should change the words, not make the icon flap. So an unknown axis falls
             // back to whatever is currently on screen.
             let current = self.applied.unwrap_or([false; 3]);
             let wanted = [
-                update.icon.review_requested.as_confirmed().unwrap_or(current[0]),
-                update.icon.ready_to_merge.as_confirmed().unwrap_or(current[1]),
-                update.icon.changes_requested.as_confirmed().unwrap_or(current[2]),
+                icon.review_requested.as_confirmed().unwrap_or(current[0]),
+                icon.ready_to_merge.as_confirmed().unwrap_or(current[1]),
+                icon.changes_requested.as_confirmed().unwrap_or(current[2]),
             ];
 
-            let needs_auth = update.icon.needs_auth;
-            let update_available = update.icon.update_available;
-            let mark = update.icon.mark();
+            let needs_auth = icon.needs_auth;
+            let update_available = icon.update_available;
+            let mark = icon.mark();
             let shape = MenuShape {
                 wanted,
                 needs_auth,
-                status_degraded: update.icon.status_degraded,
+                status_degraded: icon.status_degraded,
                 update: update_available,
             };
 
