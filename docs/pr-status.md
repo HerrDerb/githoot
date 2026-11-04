@@ -30,6 +30,11 @@ One approver's yes does not outrank another's no. A PR with an `APPROVED` and a 
 keeps the two bars from lighting for the same PR. An approval on a commit you have since pushed over still
 counts: the PR page shows it, and this bar reports news rather than gating a merge.
 
+**A pull request in the merge queue is off the green bar** (`isInMergeQueue`). It is already being merged,
+so a bar asking you to merge it is noise. Unlike the rules under **General**, this one has no switch: no
+setting makes "merge what is already merging" useful. It leaves the queue merged, or kicked out and back
+on whichever bar its state then earns.
+
 **The green bar means approved, not mergeable.** It used to mean both: through 1.10.0 the bar counted an
 approved pull request only when its GraphQL `statusCheckRollup` was `SUCCESS`, so one red or still-running
 check darkened it. That hid the thing worth being told, that somebody approved your work, and it also

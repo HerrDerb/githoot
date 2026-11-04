@@ -128,7 +128,8 @@ you have not given it yet.
 - nobody's request for changes still stands,
 - it does not conflict with the branch it merges into,
 - its checks have finished without failing (while they are still running it waits, on neither bar),
-- and no automatic reviewer comments are still open (GitHub's Copilot, if you count those).
+- no automatic reviewer comments are still open (GitHub's Copilot, if you count those),
+- and it is not in the merge queue, where it is already on its way in. This one cannot be switched off.
 
 It reports good news, not permission to merge: your repository's required number of approvals is not
 checked. A pull request with no checks at all counts as soon as it is approved.

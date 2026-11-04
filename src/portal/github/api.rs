@@ -133,7 +133,7 @@ query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!,$labels:Int!){\
   rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
-      id url title number isDraft updatedAt mergeable headRefName additions deletions changedFiles \
+      id url title number isDraft isInMergeQueue updatedAt mergeable headRefName additions deletions changedFiles \
       labels(first:$labels){nodes{name}}\
       repository{nameWithOwner}\
       author{login}\
@@ -355,6 +355,9 @@ struct PullRequestNode {
     /// draft, which is a claim about the PR rather than an admission of ignorance.
     #[serde(default)]
     is_draft: bool,
+    /// Queued to merge. Absent is not queued, for the same reason as `is_draft`. See `approved`.
+    #[serde(default)]
+    is_in_merge_queue: bool,
     updated_at: Option<String>,
     /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`. Computed lazily by GitHub: it answers `UNKNOWN`
     /// until something asks, and asking is what starts the computation, so a cold poll sees
@@ -632,6 +635,11 @@ fn has_approval(pr: &PullRequestNode) -> bool {
 /// is: the server hands over every open pull request, and a missing or empty review list is simply no
 /// evidence of approval. Lighting a green bar over a PR nobody approved would be the false claim.
 fn approved(pr: &PullRequestNode, rules: Rules) -> bool {
+    // In the merge queue it is already on its way in, so there is no news left to tell. A hard rule,
+    // not one of `Rules`: nobody wants a bar asking them to merge what is being merged.
+    if pr.is_in_merge_queue {
+        return false;
+    }
     // Anything that puts the pull request on the work-required bar takes it off this one, so the two
     // never light for the same PR. Work before news, and the approval is still there to be told about
     // the moment you deal with it. The conflict veto needs no `has_active_reviewers` check of its own:
@@ -1224,6 +1232,24 @@ mod tests {
             }
             other => panic!("expected Fresh, got {:?}", other),
         }
+    }
+
+    /// A pull request in the merge queue is already on its way in: nothing left to tell you, so it is
+    /// off the green bar. A hard rule rather than one of `Rules`, so even everything switched off keeps
+    /// it. Absent reads as not queued, the same lenience `isDraft` gets.
+    #[test]
+    fn a_queued_approval_is_not_news() {
+        let queued = format!(r#"{{"isInMergeQueue":true,{}"#, &reviewed("https://github.com/o/r/pull/1", &["APPROVED"])[1..]);
+        let waiting = format!(r#"{{"isInMergeQueue":false,{}"#, &reviewed("https://github.com/o/r/pull/2", &["APPROVED"])[1..]);
+        let unsaid = reviewed("https://github.com/o/r/pull/3", &["APPROVED"]);
+        let body = payload(&[queued, waiting, unsaid]);
+        for rules in [Rules::ALL, Rules::NONE] {
+            let list = parse_reviewed(&body, |pr| approved(pr, rules)).expect("parses");
+            assert_eq!(list.count, Some(2), "only the two outside the queue count");
+            let urls: Vec<_> = list.prs.expect("a list").into_iter().map(|e| e.url).collect();
+            assert_eq!(urls, ["https://github.com/o/r/pull/2", "https://github.com/o/r/pull/3"]);
+        }
+        assert!(PR_REVIEWS_DOCUMENT.contains(" isInMergeQueue "), "the document must ask for it");
     }
 
     /// Same error path as the changes-requested parser: a GraphQL-level failure must hold the last

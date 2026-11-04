@@ -105,6 +105,19 @@ impl Rules {
         team_requests: true,
         skip_bots: true,
     };
+
+    pub const NONE: Rules = Rules {
+        conflicts: false,
+        failed_checks: false,
+        amber_need_reviewer: false,
+        skip_drafts_red: false,
+        skip_drafts_green: false,
+        skip_drafts_amber: false,
+        running_checks: false,
+        bot_comments: false,
+        team_requests: false,
+        skip_bots: false,
+    };
 }
 
 /// The size of a pull request's change: lines added and removed, and files touched.
