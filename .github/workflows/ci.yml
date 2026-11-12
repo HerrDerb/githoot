@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false # One platform breaking should not hide the state of the other two.
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-15]
     steps:
       - uses: actions/checkout@v5
 

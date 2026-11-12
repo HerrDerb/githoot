@@ -178,7 +178,7 @@ jobs:
     needs: release-notes
     # Pinned rather than `macos-latest` so the runner architecture cannot change under us: the
     # artefact name promises aarch64.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
 
