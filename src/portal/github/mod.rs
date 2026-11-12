@@ -37,9 +37,8 @@ const STATUS_PAGE: &str = "https://www.githubstatus.com";
 
 /// Search query for pull requests awaiting the user's review.
 ///
-/// `-label:dependencies` is the conventional Dependabot marker, but it is applied by convention
-/// rather than guaranteed — a repo with custom Dependabot config, or Renovate instead, would slip
-/// through — so the bot authors are excluded by name as well.
+/// Bots are excluded by author, never by label. `-label:dependencies` used to be here too, and it hid
+/// human pull requests carrying that label (a hand-made library bump) that asked you for review.
 ///
 /// `draft:false`, same as `MERGE_QUERY`: a draft is not ready for review by GitHub's own
 /// definition, so a request parked on one is work that cannot be acted on yet. It lights the dot
@@ -54,7 +53,7 @@ const STATUS_PAGE: &str = "https://www.githubstatus.com";
 /// qualifier the API does not read, and the order hits come back in is the page's business, not the
 /// count's.
 const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false archived:false \
-                            -label:dependencies -author:app/dependabot -author:app/renovate";
+                            -author:app/dependabot -author:app/renovate";
 
 /// Search query for the user's own pull requests that might be approved.
 ///
@@ -101,7 +100,7 @@ fn review_query(rules: super::types::Rules) -> String {
     let who = if rules.team_requests { "review-requested:@me" } else { "user-review-requested:@me" };
     let mut q = format!("is:pr {who} state:open draft:false archived:false");
     if rules.skip_bots {
-        q.push_str(" -label:dependencies -author:app/dependabot -author:app/renovate");
+        q.push_str(" -author:app/dependabot -author:app/renovate");
     }
     q
 }
@@ -415,8 +414,24 @@ mod tests {
         assert_eq!(
             REVIEW_QUERY,
             "is:pr review-requested:@me state:open draft:false archived:false \
--label:dependencies -author:app/dependabot -author:app/renovate"
+-author:app/dependabot -author:app/renovate"
         );
+    }
+
+    /// A human's pull request labelled `dependencies` (a hand-made library bump) is still a review
+    /// someone asked you for. Bots are excluded by author alone, never by label, whatever the rules.
+    #[test]
+    fn a_dependencies_label_never_hides_a_review_request() {
+        use crate::portal::types::Rules;
+        let rules = [
+            Rules::ALL,
+            Rules { team_requests: false, ..Rules::ALL },
+            Rules { skip_bots: false, ..Rules::ALL },
+        ];
+        for rules in rules {
+            let query = review_query(rules);
+            assert!(!query.contains("label:"), "{query}");
+        }
     }
 
     /// The red bar's two rules shape the query itself. Team requests off asks only for requests that
@@ -428,7 +443,7 @@ mod tests {
         let direct = review_query(Rules { team_requests: false, ..Rules::ALL });
         assert!(direct.contains("user-review-requested:@me") && !direct.contains(" review-requested:@me"), "{direct}");
         let with_bots = review_query(Rules { skip_bots: false, ..Rules::ALL });
-        assert!(!with_bots.contains("dependabot") && !with_bots.contains("-label:dependencies"), "{with_bots}");
+        assert!(!with_bots.contains("dependabot") && !with_bots.contains("renovate"), "{with_bots}");
         assert!(with_bots.contains("draft:false"), "drafts stay out whatever the rules say");
     }
 
