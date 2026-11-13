@@ -153,7 +153,9 @@ the explaining. With no local page server to show it, the install page opens dir
 is still the old name: it was registered before the rename.
 
 Onboarding also opens at every start while no portal is signed in, and on Windows it shows whether the
-owl is kept on the taskbar, with a button to the taskbar settings. For now it walks through the GitHub
+owl is kept on the taskbar, with a button to the taskbar settings. **Skip for now** moves on to what
+the marks mean without connecting. It saves nothing, which is why the next start opens onboarding
+again; connect under **Settings ▸ Portals** to end that. For now it walks through the GitHub
 portal only: GitLab is in beta and not yet fully supported.
 
 If you have authorized but see nothing, check whether it is installed anywhere:
