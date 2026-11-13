@@ -115,9 +115,13 @@ pub fn onboarding_page(token: &str, o: &Onboarding) -> String {
     let next = if o.ready() {
         format!("<div class=\"next\"><a class=\"button\" href=\"/{t}/welcome/marks\">Continue</a></div>")
     } else {
-        "<div class=\"next\"><span class=\"sub\">Continue once you are signed in and the App is installed.</span>\
-         <button disabled>Continue</button></div>"
-            .to_string()
+        // Skipping saves nothing: the next start finds no portal signed in and opens this page again.
+        format!(
+            "<div class=\"next\"><span class=\"sub\">Continue once you are signed in and the App is installed.</span>\
+             <button disabled>Continue</button></div>\
+             <div class=\"next\"><span class=\"sub\">Connect later under Settings ▸ Portals. Until then, this page \
+             opens again at each start.</span><a class=\"ghost\" href=\"/{t}/welcome/marks\">Skip for now</a></div>"
+        )
     };
     let body = format!(
         "<p class=\"onboard-step\">Step 1 of 2 · Get connected</p>\n\
@@ -313,7 +317,24 @@ mod tests {
         assert!(html.contains(r#"<a class="ghost" href="/tok/portals/github">Sign in to GitHub</a>"#), "{html}");
         assert!(html.contains(r#"<li class="check wait">"#), "the install waits for the sign-in: {html}");
         assert!(html.contains("<button disabled>Continue</button>"), "{html}");
-        assert!(!html.contains("/tok/welcome/marks"), "{html}");
+        assert!(!html.contains(r#"<a class="button" href="/tok/welcome/marks">"#), "{html}");
+    }
+
+    /// Not ready: skipping is allowed. It saves nothing, so step 1 opens again at the next start
+    /// until a portal is connected, and the page says so.
+    #[test]
+    fn get_connected_can_be_skipped_until_the_next_start() {
+        let html = step1(not_signed_in(), None);
+        assert!(html.contains(r#"<a class="ghost" href="/tok/welcome/marks">Skip for now</a>"#), "{html}");
+        assert!(html.contains("Connect later under Settings ▸ Portals. Until then, this page opens again at each start."), "{html}");
+    }
+
+    /// Ready: Continue is the way on, so there is nothing to skip.
+    #[test]
+    fn a_connected_start_offers_no_skip() {
+        let html = step1(Some(GitHubStep::Ready), None);
+        assert!(!html.contains("Skip for now"), "{html}");
+        assert!(!html.contains("Connect later"), "{html}");
     }
 
     /// Signed in, App nowhere: the install is the one thing left, on GitHub's own page.
