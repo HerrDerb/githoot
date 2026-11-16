@@ -88,6 +88,11 @@ fn flow_config(app_asset_path: &Path, oauth: &OAuthEndpoints) -> DeviceFlowConfi
 }
 
 /// Deletes the saved credential. Nothing there is not an error: the outcome is the same.
+pub fn valid_saved_token(app_asset_path: &Path) -> Option<String> {
+    crate::portal::oauth::valid_saved_token(&app_asset_path.join(PR_TOKEN_FILE))
+}
+
+/// Deletes the saved GitHub credential.
 pub fn forget_saved(app_asset_path: &Path) -> std::io::Result<()> {
     crate::portal::oauth::forget_saved(&app_asset_path.join(PR_TOKEN_FILE))
 }

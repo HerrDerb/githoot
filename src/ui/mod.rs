@@ -249,6 +249,12 @@ pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option
 /// **A folder's Browse button** (`[data-browse]`) is revealed here, since it does nothing without the
 /// script. It asks GitHoot to show the native folder picker, opened where the box points, and fills the
 /// box with the answer. It saves nothing: Save does, as for any text.
+///
+/// **A login list** (`[data-logins]`) becomes chips with a type-ahead. The comma box stays the one
+/// thing the form posts, hidden and kept in step with the chips. From the first letter, a pause in
+/// typing asks GitHoot (`action=people`), which asks GitHub: people on your repositories first, then
+/// everyone. A stale answer is dropped. Enter, a comma or a space adds what is typed even with no
+/// suggestion, Backspace in an empty box takes the last chip off. Nothing saves itself: Save does.
 const SITE_SCRIPT: &str = "(function(){\
 document.querySelectorAll('form[data-autosave]').forEach(function(f){f.classList.add('auto');});\
 function parts(){document.querySelectorAll('[data-parts]').forEach(function(p){var some=p.querySelector('input[value=\"some\"]');\
@@ -270,6 +276,43 @@ var body=new URLSearchParams();body.append('action','browse');body.append('start
 b.disabled=true;say('Choose a folder in the window GitHoot opened…');\
 fetch(f.getAttribute('action'),{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){if(j.path)box.value=j.path;say(j.line);\
 }).catch(function(){say('GitHoot did not answer. Is it still running?');}).finally(function(){b.disabled=false;});});});\
+document.querySelectorAll('[data-logins]').forEach(function(fs){\
+var box=fs.querySelector('input[name=\"'+fs.getAttribute('data-logins')+'\"]'),f=box&&box.form;if(!f)return;\
+var holder=box.closest('label'),line=f.querySelector('.save-line'),seq=0,timer=0,act=-1,opts=[];\
+var who=document.createElement('div');who.className='who';var typed=document.createElement('input');\
+typed.type='text';typed.placeholder=box.placeholder;typed.spellcheck=false;typed.autocomplete='off';typed.setAttribute('aria-label',box.placeholder);\
+var drop=document.createElement('div');drop.className='drop';drop.hidden=true;\
+var spin=document.createElement('span');spin.className='spin';spin.setAttribute('aria-hidden','true');\
+function busy(on){who.classList.toggle('busy',on);if(on)who.setAttribute('aria-busy','true');else who.removeAttribute('aria-busy');}\
+holder.hidden=true;holder.parentNode.insertBefore(who,holder.nextSibling);\
+function list(){return box.value.split(/[\\s,]+/).filter(function(x){return x;});}\
+function changed(){if(line)line.textContent='Save to keep it.';}\
+function profile(l){return l.slice(0,4)==='app/'?'https://github.com/apps/'+l.slice(4):'https://github.com/'+l;}\
+function draw(){who.textContent='';list().forEach(function(l,i){var c=document.createElement('span');c.className='chip';var a=document.createElement('a');\
+a.href=profile(l);a.target='_blank';a.rel='noopener noreferrer';a.title='Open '+l+' on GitHub';a.textContent=l;c.appendChild(a);\
+var x=document.createElement('button');x.type='button';x.title='Remove '+l;x.textContent='\u{d7}';\
+x.addEventListener('click',function(){var a=list();a.splice(i,1);box.value=a.join(', ');changed();draw();typed.focus();});c.appendChild(x);who.appendChild(c);});\
+who.appendChild(typed);who.appendChild(spin);who.appendChild(drop);}\
+function close(){drop.hidden=true;drop.textContent='';act=-1;opts=[];}\
+function add(l){l=(l||'').trim();if(!l)return;if(l.slice(-5)==='[bot]')l='app/'+l.slice(0,-5);var a=list();\
+if(!a.some(function(x){return x.toLowerCase()===l.toLowerCase();})){a.push(l);box.value=a.join(', ');changed();}typed.value='';close();draw();typed.focus();}\
+function mark(){opts.forEach(function(o,i){o.classList.toggle('on',i===act);});}\
+function show(j){drop.textContent='';opts=[];act=-1;[['near','People you work with'],['bots','Bots'],['everyone','Everyone on GitHub']].forEach(function(g){\
+var ps=(j[g[0]]||[]).filter(function(p){return !list().some(function(x){return x.toLowerCase()===p.login.toLowerCase();});});if(!ps.length)return;\
+var h=document.createElement('div');h.className='group';h.textContent=g[1];drop.appendChild(h);ps.forEach(function(p){var o=document.createElement('div');o.className='opt';\
+var b=document.createElement('b');b.textContent=p.login;o.appendChild(b);var more=[p.name,p.org].filter(function(x){return x;}).join(' \u{b7} ');\
+if(more){var s=document.createElement('span');s.textContent=more;o.appendChild(s);}o.addEventListener('mousedown',function(e){e.preventDefault();add(p.login);});\
+opts.push(o);drop.appendChild(o);});});drop.hidden=!opts.length;if(opts.length){act=0;mark();}}\
+function ask(){var q=typed.value.trim(),mine=++seq;if(!q){busy(false);return close();}busy(true);var body=new URLSearchParams();\
+body.append('action','people');body.append('q',q);body.append('reply','json');\
+fetch(f.getAttribute('action'),{method:'POST',body:body}).then(function(r){return r.json();}).then(function(j){if(mine===seq){busy(false);show(j);}}).catch(function(){if(mine===seq){busy(false);close();}});}\
+typed.addEventListener('input',function(){clearTimeout(timer);timer=setTimeout(ask,250);});\
+typed.addEventListener('blur',function(){setTimeout(close,100);});\
+typed.addEventListener('keydown',function(e){if(e.key==='ArrowDown'||e.key==='ArrowUp'){if(!opts.length)return;e.preventDefault();\
+act=(act+(e.key==='ArrowDown'?1:opts.length-1))%opts.length;mark();}\
+else if(e.key==='Enter'||e.key===','||e.key===' '){e.preventDefault();add(act>=0&&opts[act]&&e.key==='Enter'?opts[act].querySelector('b').textContent:typed.value);}\
+else if(e.key==='Escape'){close();}else if(e.key==='Backspace'&&!typed.value){var a=list();if(a.length){a.pop();box.value=a.join(', ');changed();draw();}}});\
+draw();});\
 })();";
 
 /// Every section `settings` is cut into, each its own form posting to `place` with its index.
@@ -311,7 +354,7 @@ pub fn sections_with(
                 _ => String::new(),
             };
             // No text box in it: the section saves as it changes, and the script hides its button.
-            let auto = if members.iter().any(|s| matches!(s.kind, Kind::Text { .. } | Kind::Folder { .. })) { "" } else { " data-autosave" };
+            let auto = if members.iter().any(|s| matches!(s.kind, Kind::Text { .. } | Kind::Folder { .. } | Kind::Logins { .. })) { "" } else { " data-autosave" };
             // The green bar's rules wear the bar itself in front of their title.
             let mark = if title == crate::config::GREEN_RULES_GROUP {
                 "<span class=\"bar-mark bar-merge\" aria-hidden=\"true\"></span>"
@@ -516,6 +559,14 @@ fn field(s: &Setting, value: &str, trouble: Option<&str>) -> String {
         Kind::Folder { placeholder } => format!(
             "<label class=\"path{bad}\"><span>{}</span><input type=\"text\" name=\"{key}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\"{invalid}>\
              <button class=\"small ghost\" type=\"button\" data-browse=\"{key}\" hidden>Browse…</button></label>{why}{help}",
+            esc(s.label),
+            esc(value),
+            esc(placeholder)
+        ),
+        // A comma list the script turns into chips with a type-ahead; without it, it is that list.
+        Kind::Logins { placeholder } => format!(
+            "<fieldset data-logins=\"{key}\"><legend>{}</legend>{help}<label class=\"path\"><span>Logins, comma separated</span>\
+             <input type=\"text\" name=\"{key}\" value=\"{}\" placeholder=\"{}\" spellcheck=\"false\" autocomplete=\"off\"></label></fieldset>",
             esc(s.label),
             esc(value),
             esc(placeholder)
@@ -866,16 +917,17 @@ pub(crate) mod tests {
     /// bound to green's form, so one setting never shows two answers.
     #[test]
     fn each_bar_has_its_folded_line_in_bar_order() {
-        let cfg = crate::config::Config::from_text("ruleSkipBots=off\n");
+        let cfg = crate::config::Config::from_text("ruleRedSkipDrafts=off\n");
         let html = general_page(&site(), &cfg, None);
         let red = html.find("bar-mark bar-review").expect("red");
         let green = html.find("bar-mark bar-merge").expect("green");
         let amber = html.find("bar-mark bar-changes").expect("amber");
         assert!(red < green && green < amber, "bar order");
         assert_eq!(html.matches(r#"<details class="gates-fold">"#).count(), 3, "all folded");
-        assert!(html.contains(">2 of 3 rules on<"), "red counts its own switches: {html}");
+        assert!(html.contains(">1 of 2 rules on<"), "red counts its own switches: {html}");
+        assert!(!html.contains("Not opened by a bot"), "the bot switch is gone");
         assert!(html[red..green].contains(r#"name="ruleRedSkipDrafts""#), "red's own draft rule");
-        for text in ["A review was asked of you", "You have not given it yet", "Team requests count", "Not opened by a bot", "Red bar"] {
+        for text in ["A review was asked of you", "You have not given it yet", "Team requests count", "Red bar"] {
             assert!(html[red..green].contains(text), "{text}");
         }
         let amber_html = &html[amber..];
@@ -1055,6 +1107,30 @@ pub(crate) mod tests {
     /// A folder is its text box plus a Browse button the script reveals: without the script the button
     /// could do nothing, so it starts hidden and the box works as before. A folder section keeps its
     /// Save, as text does: picking a folder fills the box, it does not write the file behind your back.
+    /// A login list is one comma-separated box, which is all it is without the script, inside a
+    /// `data-logins` fieldset the script turns into chips and a type-ahead asking the server.
+    /// Its section has a Save button: typing must not save itself.
+    #[test]
+    fn a_login_list_is_a_text_box_the_script_turns_into_chips() {
+        static WHO: [Setting; 1] =
+            [Setting { key: "who", label: "Who", kind: Kind::Logins { placeholder: "Add a GitHub login" }, help: "", group: "G", live: true }];
+        let html = sections("tok", &Place::General, &WHO, &|_| "app/dependabot, octocat".to_string(), None);
+        assert!(html.contains(r#"<fieldset data-logins="who">"#), "{html}");
+        assert!(html.contains(r#"name="who" value="app/dependabot, octocat""#), "{html}");
+        assert!(!html.contains("data-autosave"), "{html}");
+        assert!(SITE_SCRIPT.contains("[data-logins]") && SITE_SCRIPT.contains("'action','people'"));
+        assert!(SITE_SCRIPT.contains("if(!q){busy(false);return close();}"), "suggestions from the first letter typed");
+        // While GitHub is being asked, a spinner shows at the box's right edge, and only for the
+        // latest question: a stale answer must not hide the spinner of the one still on its way.
+        assert!(SITE_SCRIPT.contains("spin.className='spin'") && SITE_SCRIPT.contains("busy(true)"));
+        assert!(SITE_SCRIPT.contains("if(mine===seq){busy(false);"), "only the latest answer ends the wait");
+        assert!(crate::page::STYLESHEET.contains(".who.busy .spin{display:block}"));
+        assert!(SITE_SCRIPT.contains("[['near','People you work with'],['bots','Bots'],['everyone','Everyone on GitHub']]"));
+        // Each chip links to the account on GitHub, a bot to its App's page, in a new tab.
+        assert!(SITE_SCRIPT.contains("function profile(l){return l.slice(0,4)==='app/'?'https://github.com/apps/'+l.slice(4):'https://github.com/'+l;}"));
+        assert!(SITE_SCRIPT.contains("a.href=profile(l);a.target='_blank';a.rel='noopener noreferrer';"));
+    }
+
     #[test]
     fn a_folder_is_a_text_box_with_a_browse_button_the_script_reveals() {
         static FOLDERS: [Setting; 1] =

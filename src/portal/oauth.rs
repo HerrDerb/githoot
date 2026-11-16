@@ -174,6 +174,14 @@ fn read_credential(path: &Path) -> Option<Credential> {
     Some(Credential { access_token: access_token?, expires_at, refresh_token })
 }
 
+/// The saved access token, only while it is still good: no refresh, no network.
+///
+/// For callers off the poll thread. Refreshing belongs to the thread that owns the credential, since a
+/// GitHub App's refresh token is single-use and two refreshes racing would sign the loser out.
+pub fn valid_saved_token(path: &Path) -> Option<String> {
+    read_credential(path).filter(|c| !c.needs_refresh()).map(|c| c.access_token)
+}
+
 /// Deletes the saved credential. Nothing there is not an error: the outcome is the same.
 pub fn forget_saved(token_path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(token_path) {
@@ -586,6 +594,22 @@ mod tests {
         assert_eq!(loaded.expires_at, None);
         assert_eq!(loaded.refresh_token, None);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the settings page's suggestions may use: a saved token still good for a while, never a
+    /// refresh, which belongs to the poll thread alone.
+    #[test]
+    fn only_a_saved_token_still_valid_is_lent_out() {
+        let dir = scratch("lent");
+        let path = dir.join("token.txt");
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        let earlier = SystemTime::now() - Duration::from_secs(60);
+        for (expires_at, lent) in [(Some(later), true), (None, true), (Some(earlier), false)] {
+            save_credential(&path, &Credential { access_token: "ghu_x".into(), expires_at, refresh_token: Some("ghr_y".into()) });
+            assert_eq!(valid_saved_token(&path).is_some(), lent, "{expires_at:?}");
+        }
+        assert!(valid_saved_token(&dir.join("absent.txt")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

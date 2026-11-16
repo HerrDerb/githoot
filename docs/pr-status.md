@@ -7,9 +7,14 @@ Three independent signals, each a GitHub Search query against your own pull requ
 
 | Bar | Query | Then |
 |---|---|---|
-| 🔴 | `is:pr review-requested:@me state:open draft:false archived:false -author:app/dependabot -author:app/renovate` | counted as is |
+| 🔴 | `is:pr review-requested:@me state:open draft:false archived:false`, plus `-author:<login>` for each of `ignoreAuthors` (by default `-author:app/dependabot -author:app/renovate`) | counted as is |
 | 🟢 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when its latest reviews hold an `APPROVED` and no `CHANGES_REQUESTED` |
 | 🟠 | `is:pr author:@me state:open draft:false archived:false` | a hit counts when a reviewer's objection still stands, when it has a merge conflict or failed checks and someone is waiting on it, **or** when Copilot has unresolved comments on it |
+
+**Ignored authors** (`ignoreAuthors`, on the GitHub page) is the red bar's list of accounts whose review
+requests do not count. Each login is one `-author:` in the search, so GitHub leaves them out of the count,
+the list and the hoot alike. Dependabot and Renovate are on it by default, which is all the query used to
+name outright. Green and amber list only your own pull requests, so the list does not touch them.
 
 Each bar's own **"not a draft"** rule (`ruleRedSkipDrafts`, `ruleGreenSkipDrafts`, `ruleAmberSkipDrafts`)
 is what puts `draft:false` in its query. Switched off, it drops that qualifier from that bar's search

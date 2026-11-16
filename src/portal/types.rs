@@ -87,8 +87,6 @@ pub struct Rules {
     pub bot_comments: bool,
     /// The red bar: a review asked of a team you are in counts, not only one naming you (GitHub).
     pub team_requests: bool,
-    /// The red bar: pull requests opened by bots (dependency updaters) are left out.
-    pub skip_bots: bool,
 }
 
 #[cfg(test)]
@@ -103,7 +101,6 @@ impl Rules {
         running_checks: true,
         bot_comments: true,
         team_requests: true,
-        skip_bots: true,
     };
 
     pub const NONE: Rules = Rules {
@@ -116,7 +113,6 @@ impl Rules {
         running_checks: false,
         bot_comments: false,
         team_requests: false,
-        skip_bots: false,
     };
 }
 

@@ -1308,6 +1308,7 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
                 return respond(stream, 404, "text/plain; charset=utf-8", b"Unknown portal", true);
             };
             match form.get("action").map(String::as_str) {
+                Some("people") => people(stream, settings, &status, &form),
                 Some(action) => portal_action(stream, token, settings, &status, action),
                 None => save_core_section(stream, token, settings, place, crate::ui::portals::settings_for(status.info.kind), &form),
             }
@@ -1541,6 +1542,33 @@ fn browse_reply(picked: &crate::dialog::Picked) -> String {
         Picked::Unavailable(why) => serde_json::json!({ "path": null, "line": format!("No folder picker: {why}. Type the path instead.") }),
     }
     .to_string()
+}
+
+/// The Ignored authors type-ahead's answer: both groups of suggestions.
+fn people_reply(people: &crate::portal::github::people::People) -> String {
+    serde_json::to_string(people).unwrap_or_else(|_| r#"{"near":[],"everyone":[]}"#.to_string())
+}
+
+/// What the Ignored authors box suggests for what was typed. Reads only, so the write guards the
+/// caller passed are all it needs.
+///
+/// GitHub answers in a fraction of a second but may take up to the client's timeout, and the page
+/// server answers one connection at a time, so the answer goes out from a thread of its own, as a
+/// Browse button's does. Only GitHub has logins to suggest.
+fn people(stream: &mut TcpStream, settings: &Settings, status: &crate::portal::PortalStatus, form: &Form) {
+    if status.info.kind != crate::portal::PortalKind::GitHub {
+        let body = people_reply(&Default::default());
+        return respond(stream, 200, "application/json", body.as_bytes(), true);
+    }
+    let Ok(mut answer) = stream.try_clone() else {
+        return respond(stream, 500, "text/plain; charset=utf-8", b"", true);
+    };
+    let typed = form.get("q").cloned().unwrap_or_default();
+    let home = settings.app_asset_path.clone();
+    std::thread::spawn(move || {
+        let people = crate::portal::github::suggest_people(&home, &typed);
+        respond(&mut answer, 200, "application/json", people_reply(&people).as_bytes(), true);
+    });
 }
 
 /// One picker at a time: a second press while it is open would stack a second one behind it.
@@ -1784,6 +1812,16 @@ mod tests {
     /// may fade, which it may not while it says a restart is needed.
     #[test]
     fn a_background_save_hears_the_line_and_whether_it_may_fade() {
+        let people = crate::portal::github::people::People {
+            near: vec![crate::portal::github::people::Person { login: "marta".into(), name: Some("Marta Keller".into()), org: Some("acme".into()) }],
+            bots: Vec::new(),
+            everyone: vec![crate::portal::github::people::Person { login: "app/mabl".into(), name: None, org: None }],
+        };
+        let j: serde_json::Value = serde_json::from_str(&people_reply(&people)).unwrap();
+        assert_eq!(j["near"][0]["login"], "marta");
+        assert_eq!(j["near"][0]["org"], "acme");
+        assert_eq!(j["everyone"][0]["login"], "app/mabl");
+        assert!(j["everyone"][0]["name"].is_null());
         let j: serde_json::Value = serde_json::from_str(&save_reply("Saved.", true)).unwrap();
         assert_eq!(j, serde_json::json!({ "ok": true, "line": "Saved.", "fade": true }));
         let j: serde_json::Value = serde_json::from_str(&save_reply("Saved. Takes effect after a restart: Log.", true)).unwrap();
@@ -2006,7 +2044,7 @@ mod tests {
         let form = |body: &str| parse_form(body);
         assert_eq!(section_of(crate::config::GENERAL, &form("section=0")).map(|(i, m)| (i, m.len())), Some((0, 3)));
         assert_eq!(section_of(crate::config::GENERAL, &form("section=1")).map(|(i, m)| (i, m.len())), Some((1, 1)), "the hoot");
-        assert_eq!(section_of(crate::config::GENERAL, &form("section=2")).map(|(i, m)| (i, m.len())), Some((2, 3)), "the red bar's line");
+        assert_eq!(section_of(crate::config::GENERAL, &form("section=2")).map(|(i, m)| (i, m.len())), Some((2, 2)), "the red bar's line");
         // Seven: the green line's five, and the two amber's line draws but green's form saves.
         assert_eq!(section_of(crate::config::GENERAL, &form("section=3")).map(|(i, m)| (i, m.len())), Some((3, 7)), "the green bar's line");
         for bad in ["section=4", "section=-1", "section=x", "", "section=01e3"] {

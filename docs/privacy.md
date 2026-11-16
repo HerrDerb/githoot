@@ -10,7 +10,7 @@ GitHoot only talks to the services below, and only to do the job you set it up f
 
 | Service | When | Why |
 |---|---|---|
-| GitHub (`github.com`, `api.github.com`), or your GitHub Enterprise host | While you are signed in to GitHub in GitHoot | Sign-in, and reading the pull requests that need you |
+| GitHub (`github.com`, `api.github.com`), or your GitHub Enterprise host | While you are signed in to GitHub in GitHoot | Sign-in, and reading the pull requests that need you. While you type into Ignored authors on the GitHub page, what you typed, to suggest matching accounts |
 | GitLab (`gitlab.com`), or your self-hosted GitLab | While you are signed in to GitLab in GitHoot | Sign-in, and reading the merge requests that need you |
 | Public status pages (`www.githubstatus.com`, `api.status.io`, `status.gitlab.com`) | While the matching service is in use | Showing whether GitHub or GitLab is having an outage |
 | GitHub Releases for this project (`api.github.com`, `github.com`) | At startup and once a day | Checking for, and on your request installing, a newer GitHoot. Turn it off with `updateCheck=off` in `config.txt` |

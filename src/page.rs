@@ -180,7 +180,7 @@ fn checks_pill(checks: CheckRollup) -> (&'static str, &'static str) {
 /// **The accent is ornament, never text.** `#1AC94A` on white is about 2:1 contrast, unreadable as
 /// prose. It is used for borders, dots and filled badges with white text — never for a text colour on
 /// the page background.
-const STYLESHEET: &str = "\
+pub(crate) const STYLESHEET: &str = "\
 :root{--bg:#f6f7f9;--card:#fff;--ink:#1c1f23;--dim:#5b6570;--line:#e3e6ea;\
 --ok:#1A7F3C;--warn:#8a5a00;--bad:#b02525}\
 @media(prefers-color-scheme:dark){:root{--bg:#14171a;--card:#1c2024;--ink:#e8eaed;--dim:#9aa4ae;\
@@ -331,6 +331,27 @@ details.prompt{border-top:1px solid var(--line);padding:.55rem 0}\
 details.prompt:last-child{border-bottom:1px solid var(--line)}\
 details.prompt summary{cursor:pointer;display:flex;align-items:center;gap:.5rem}\
 details.prompt textarea{margin:.6rem 0 0}\
+.who{position:relative;display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin:.5rem 0 0;padding:.3rem .4rem;\
+border:1px solid var(--line);border-radius:6px;background:var(--bg);font-size:.9rem}\
+.who .spin{display:none;position:absolute;right:.55rem;top:50%;width:.85rem;height:.85rem;margin-top:-.425rem;\
+border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}\
+.who.busy .spin{display:block}\
+.who.busy{padding-right:1.8rem}\
+@keyframes spin{to{transform:rotate(360deg)}}\
+@media(prefers-reduced-motion:reduce){.who .spin{animation-duration:2.4s}}\
+.who>input{flex:1 1 10rem;min-width:0;border:0;outline:0;background:none;color:inherit;font:inherit;padding:.2rem}\
+.chip{display:inline-flex;align-items:center;gap:.15rem;padding:.1rem .15rem .1rem .6rem;border:1px solid var(--line);\
+border-radius:999px;background:var(--card)}\
+.chip a{color:inherit;text-decoration:none}\
+.chip a:hover{text-decoration:underline}\
+.chip button{border:0;background:none;color:var(--dim);cursor:pointer;font:inherit;padding:0 .3rem}\
+.chip button:hover{color:var(--ink)}\
+.drop{position:absolute;left:0;right:0;top:100%;margin-top:.25rem;border:1px solid var(--line);border-radius:8px;\
+background:var(--card);box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:5;overflow:hidden}\
+.drop .group{margin:0;padding:.4rem .7rem .1rem;font-size:.78rem;color:var(--dim)}\
+.drop .opt{display:flex;gap:.5rem;align-items:baseline;padding:.35rem .7rem;cursor:pointer}\
+.drop .opt span{color:var(--dim);font-size:.85rem}\
+.drop .opt.on{background:color-mix(in srgb,var(--accent) 16%,transparent)}\
 .boxes{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:0 1rem;margin:.2rem 0 0 1.6rem}\
 .save-line{color:var(--dim);font-size:.85rem}\
 .auto .actions{margin-top:.3rem}\

@@ -128,8 +128,8 @@ whichever of them still skips drafts drops them in code.
   review, where GitHub drops the request. So a merge request counts while *your* `reviewState` is
   `UNREVIEWED`, `REVIEW_STARTED` or `UNAPPROVED` (an approval you took back and have not replaced with
   a verdict). If you cannot be found among the reviewers returned, or your state comes back `null`,
-  GitLab's list is trusted. Merge requests authored by a bot are left out, as Dependabot and Renovate
-  are on GitHub.
+  GitLab's list is trusted. Merge requests authored by a bot are always left out, as GitHub
+  leaves out the accounts on its Ignored authors list.
 - **Needs work: a `REQUESTED_CHANGES` reviewer, or a conflict with anyone attached.** Re-requesting a
   review resets that reviewer to `UNREVIEWED` and removes their approval (GitLab's
   `RequestReviewService`), so a standing `REQUESTED_CHANGES` is still on you by definition; no second
