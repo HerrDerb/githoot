@@ -177,7 +177,7 @@ fn classify_with_rules(
         let wanted = |mr: &MergeRequest, skip_drafts: bool| !(skip_drafts && mr.draft);
         let judged = match axis {
             PrAxis::ReviewRequested => judge(&lists.review_requested, |mr| {
-                wanted(mr, rules.skip_drafts_red) && awaiting_review(mr, &lists.username, rules)
+                wanted(mr, rules.skip_drafts_red) && awaiting_review(mr, &lists.username)
             }),
             PrAxis::ReadyToMerge => judge(&lists.authored, |mr| wanted(mr, rules.skip_drafts_green) && approved(mr, rules)),
             PrAxis::ChangesRequested => {
@@ -389,9 +389,10 @@ fn is_pending(state: Option<&str>) -> bool {
 /// my review list and that is trusted: a lit bar that should be dark costs a glance, the opposite
 /// costs a colleague waiting.
 ///
-/// Bot authors are left out, as GitHub's query leaves out Dependabot and Renovate.
-fn awaiting_review(mr: &MergeRequest, me: &str, rules: Rules) -> bool {
-    if rules.skip_bots && mr.author.as_ref().is_some_and(|a| a.bot) {
+/// Accounts GitLab marks as bots are always left out, until GitLab has an ignored authors list as
+/// GitHub does.
+fn awaiting_review(mr: &MergeRequest, me: &str) -> bool {
+    if mr.author.as_ref().is_some_and(|a| a.bot) {
         return false;
     }
     match reviewers(mr).find(|r| r.username == me) {
@@ -814,14 +815,15 @@ mod tests {
         assert_eq!(mr_document(Rules::ALL), MR_DOCUMENT, "all on is the document as it always was");
     }
 
-    /// "Not opened by a bot" switched off lets a bot's merge request onto the red bar.
+    /// A merge request from an account GitLab marks as a bot never reaches the red bar, whatever the
+    /// rules: there is no switch for it any more.
     #[test]
-    fn a_bots_merge_request_counts_when_bots_are_let_in() {
+    fn a_bots_merge_request_never_counts() {
         let bot = mr("u/1", &[("me", "UNREVIEWED")], &[], false).replacen('{', r#"{"author":{"username":"renovate-bot","bot":true},"#, 1);
         let body = payload(&[bot], &[]);
         let red = |rules: Rules| urls(&classify_with_rules(StatusCode::OK, &headers(&[]), &body, 0, ALL, rules)[PrAxis::ReviewRequested.index()]);
         assert_eq!(red(Rules::ALL), Vec::<String>::new());
-        assert_eq!(red(Rules { skip_bots: false, ..Rules::ALL }), ["u/1"]);
+        assert_eq!(red(Rules::NONE), Vec::<String>::new());
     }
 
     /// The green bar's rules switched off are ignored on both bars, as on GitHub.

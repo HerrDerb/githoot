@@ -43,7 +43,6 @@ const KEY_RULE_GREEN_SKIP_DRAFTS: &str = "ruleGreenSkipDrafts";
 const KEY_RULE_AMBER_SKIP_DRAFTS: &str = "ruleAmberSkipDrafts";
 const KEY_RULE_RUNNING_CHECKS: &str = "ruleRunningChecks";
 const KEY_RULE_TEAM_REQUESTS: &str = "ruleTeamRequests";
-const KEY_RULE_SKIP_BOTS: &str = "ruleSkipBots";
 const KEY_IGNORE_AUTHORS: &str = "ignoreAuthors";
 /// Who GitHub's red search leaves out when the file does not say: the two dependency bots the query
 /// used to name outright, so moving them into a list changes nobody's red bar.
@@ -219,12 +218,10 @@ pub struct Config {
     pub rule_running_checks: bool,
     /// The red bar's rules; see `portal::types::Rules`. On by default.
     pub rule_team_requests: bool,
-    pub rule_skip_bots: bool,
     /// GitHub logins whose pull requests stay off the red bar, each an `-author:` in its search.
     ///
-    /// Absent means `DEFAULT_IGNORE_AUTHORS`, except in a file with `ruleSkipBots=off`: before this
-    /// list existed that switch let the two bots in on GitHub too, and such a file keeps doing so. An
-    /// empty line is a deliberate empty list. GitLab reads no logins; its bots go by `ruleSkipBots`.
+    /// Absent means `DEFAULT_IGNORE_AUTHORS`; an empty line is a deliberate empty list. GitHub only:
+    /// GitLab always leaves out the accounts it marks as bots.
     pub ignore_authors: Vec<String>,
     /// Whether the judged lists are served as JSON to scripts running as you on this machine.
     ///
@@ -306,7 +303,6 @@ pub struct RuleSwitches {
     running_checks: Switch,
     bot_comments: Switch,
     team_requests: Switch,
-    skip_bots: Switch,
     /// Not a rule but read beside them, every poll, and set by the same save.
     ignored_authors: std::sync::Arc<std::sync::RwLock<Vec<String>>>,
 }
@@ -324,7 +320,6 @@ impl RuleSwitches {
             running_checks: Switch::new(r.running_checks),
             bot_comments: Switch::new(r.bot_comments),
             team_requests: Switch::new(r.team_requests),
-            skip_bots: Switch::new(r.skip_bots),
             ignored_authors: std::sync::Arc::new(std::sync::RwLock::new(cfg.ignore_authors.clone())),
         }
     }
@@ -346,7 +341,6 @@ impl RuleSwitches {
             running_checks: self.running_checks.is_on(),
             bot_comments: self.bot_comments.is_on(),
             team_requests: self.team_requests.is_on(),
-            skip_bots: self.skip_bots.is_on(),
         }
     }
 
@@ -362,7 +356,6 @@ impl RuleSwitches {
         self.running_checks.set(r.running_checks);
         self.bot_comments.set(r.bot_comments);
         self.team_requests.set(r.team_requests);
-        self.skip_bots.set(r.skip_bots);
         if let Ok(mut list) = self.ignored_authors.write() {
             list.clone_from(&cfg.ignore_authors);
         }
@@ -394,7 +387,6 @@ pub const GENERAL: &[Setting] = &[
     flag_setting(KEY_SOUND, "Hoot when a pull request needs you", true, "The same switch as the tray menu's Hoot.", "Hoot", true),
     // The red bar's rules, drawn as the path a review request walks to red (see `ui::rule_line`).
     red_step(KEY_RULE_TEAM_REQUESTS, "Team requests count", "A review asked of a team you are in counts, not only one naming you. Anyone on the team reviewing clears it."),
-    red_step(KEY_RULE_SKIP_BOTS, "Not opened by a bot", "Merge requests from accounts GitLab marks as bots stay off the red bar. On GitHub, Ignored authors on its own page decides."),
     red_step(KEY_RULE_RED_SKIP_DRAFTS, "Not a draft", "A draft is not ready for review by GitHub's own definition. Off, a review asked on a draft counts."),
     // The green bar's rules, drawn as the path a pull request walks to green (see `ui::rule_line`).
     // Each is ignored on both bars when off, so none can put a pull request on green and amber at once,
@@ -431,7 +423,6 @@ pub fn step_portals(key: &str) -> Option<Vec<PortalKind>> {
         KEY_RULE_CONFLICTS => |c| c.conflict_state,
         KEY_COPILOT_REVIEWS => |c| c.bot_reviewer.is_some(),
         KEY_RULE_TEAM_REQUESTS => |c| c.team_reviewers,
-        KEY_RULE_SKIP_BOTS => |c| c.bot_authors,
         // Checks: every kind reports a head's checks or pipeline.
         _ => return None,
     };
@@ -533,7 +524,6 @@ pub fn value_of(cfg: &Config, key: &str) -> String {
         KEY_RULE_AMBER_SKIP_DRAFTS => flag(cfg.rule_amber_skip_drafts),
         KEY_RULE_RUNNING_CHECKS => flag(cfg.rule_running_checks),
         KEY_RULE_TEAM_REQUESTS => flag(cfg.rule_team_requests),
-        KEY_RULE_SKIP_BOTS => flag(cfg.rule_skip_bots),
         KEY_LOCAL_API => flag(cfg.local_api),
         KEY_SOUND => flag(cfg.sound),
         KEY_UPDATE_CHECK => flag(cfg.update_check),
@@ -731,10 +721,8 @@ impl Config {
             rule_amber_skip_drafts: !values.get(KEY_RULE_AMBER_SKIP_DRAFTS).is_some_and(|v| is_off(v)),
             rule_running_checks: !values.get(KEY_RULE_RUNNING_CHECKS).is_some_and(|v| is_off(v)),
             rule_team_requests: !values.get(KEY_RULE_TEAM_REQUESTS).is_some_and(|v| is_off(v)),
-            rule_skip_bots: !values.get(KEY_RULE_SKIP_BOTS).is_some_and(|v| is_off(v)),
             ignore_authors: match values.get(KEY_IGNORE_AUTHORS) {
                 Some(v) => split_list(v),
-                None if values.get(KEY_RULE_SKIP_BOTS).is_some_and(|v| is_off(v)) => Vec::new(),
                 None => DEFAULT_IGNORE_AUTHORS.iter().map(|s| s.to_string()).collect(),
             },
             // Default **off**, alone in this file, because it opens a listening socket at boot and
@@ -827,7 +815,6 @@ impl Config {
             running_checks: self.rule_running_checks,
             bot_comments: self.copilot_reviews,
             team_requests: self.rule_team_requests,
-            skip_bots: self.rule_skip_bots,
         }
     }
 
@@ -992,8 +979,6 @@ fn default_config() -> String {
          # What puts a review request on the red bar. A request to a team you are in counts, not only\n\
          # one naming you (GitHub):\n\
          {KEY_RULE_TEAM_REQUESTS}=on\n\
-         # Merge requests from accounts GitLab marks as bots are left out (GitLab):\n\
-         {KEY_RULE_SKIP_BOTS}=on\n\
          # GitHub accounts whose review requests are left out, comma separated. A bot is app/<name>:\n\
          {KEY_IGNORE_AUTHORS}={ignored}\n\
          \n\
@@ -1254,7 +1239,6 @@ mod tests {
             [
                 KEY_SOUND,
                 KEY_RULE_TEAM_REQUESTS,
-                KEY_RULE_SKIP_BOTS,
                 KEY_RULE_RED_SKIP_DRAFTS,
                 KEY_RULE_GREEN_SKIP_DRAFTS,
                 KEY_RULE_CONFLICTS,
@@ -1394,14 +1378,13 @@ mod tests {
             KEY_RULE_RUNNING_CHECKS,
             KEY_COPILOT_REVIEWS,
             KEY_RULE_TEAM_REQUESTS,
-            KEY_RULE_SKIP_BOTS,
         ] {
             assert_eq!(values.get(rule), Some(&"on"), "{rule}: every green-bar rule ships on");
         }
         // And nothing else, so a key added to the template without being read is caught. The
         // integration keys are held to the registry by their own test below.
         let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
-        assert_eq!(own, 19, "unexpected keys in the template: {values:?}");
+        assert_eq!(own, 18, "unexpected keys in the template: {values:?}");
     }
 
     /// A fresh file watches the parts a pull-request tray actually touches, and no more.
@@ -1464,7 +1447,6 @@ mod tests {
             KEY_RULE_AMBER_SKIP_DRAFTS,
             KEY_RULE_RUNNING_CHECKS,
             KEY_RULE_TEAM_REQUESTS,
-            KEY_RULE_SKIP_BOTS,
             KEY_IGNORE_AUTHORS,
             KEY_LOCAL_API,
         ];
@@ -2235,33 +2217,32 @@ mod tests {
         }
     }
 
-    /// The red bar's two rules: on by default, live, badged where only some portals can judge them.
-    /// The bot switch is GitLab's alone now: GitHub leaves out whoever `ignoreAuthors` names.
+    /// Team requests: on by default, live, GitHub only.
     #[test]
-    fn the_red_bar_rules_default_on_and_each_is_one_portals() {
-        let on = from("");
-        assert!(on.rules().team_requests && on.rules().skip_bots);
-        let off = from("ruleTeamRequests=off\nruleSkipBots=off\n");
-        assert!(!off.rules().team_requests && !off.rules().skip_bots);
+    fn team_requests_default_on_and_are_github_only() {
+        assert!(from("").rules().team_requests);
+        assert!(!from("ruleTeamRequests=off\n").rules().team_requests);
         assert_eq!(step_portals(KEY_RULE_TEAM_REQUESTS), Some(vec![crate::portal::PortalKind::GitHub]));
-        assert_eq!(step_portals(KEY_RULE_SKIP_BOTS), Some(vec![crate::portal::PortalKind::GitLab]));
-        for key in [KEY_RULE_TEAM_REQUESTS, KEY_RULE_SKIP_BOTS] {
-            assert!(GENERAL.iter().any(|s| s.key == key && s.live && s.group == RED_RULES_GROUP), "{key}");
-        }
+        assert!(GENERAL.iter().any(|s| s.key == KEY_RULE_TEAM_REQUESTS && s.live && s.group == RED_RULES_GROUP));
+    }
+
+    /// "Not opened by a bot" is gone: GitHub leaves out whoever `ignoreAuthors` names, and GitLab
+    /// always leaves out the accounts it marks as bots.
+    #[test]
+    fn the_bot_switch_is_gone_from_the_page_and_the_template() {
+        assert!(!declared().any(|s| s.key == "ruleSkipBots"));
+        assert!(!default_config().contains("ruleSkipBots"));
     }
 
     // ── ignoreAuthors ───────────────────────────────────────────────────────
 
     /// Absent, the list is the two dependency bots GitHub's search always left out, so nobody's red
-    /// bar changes on upgrade. Except where the bot switch was already off: that file let them in, and
-    /// keeps letting them in.
+    /// bar changes on upgrade.
     #[test]
-    fn ignored_authors_default_to_the_dependency_bots_unless_bots_were_let_in() {
+    fn ignored_authors_default_to_the_dependency_bots() {
         assert_eq!(from("").ignore_authors, ["app/dependabot", "app/renovate"]);
-        assert!(from("ruleSkipBots=off\n").ignore_authors.is_empty());
         assert_eq!(from("ignoreAuthors=octo-intern, app/dependabot\n").ignore_authors, ["octo-intern", "app/dependabot"]);
         assert!(from("ignoreAuthors=\n").ignore_authors.is_empty(), "an empty line is a deliberate empty list");
-        assert_eq!(from("ruleSkipBots=off\nignoreAuthors=x\n").ignore_authors, ["x"], "once written, the list alone decides");
         assert_eq!(value_of(&from(""), KEY_IGNORE_AUTHORS), "app/dependabot, app/renovate");
     }
 

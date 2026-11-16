@@ -79,7 +79,6 @@ impl PortalKind {
                 rereview_pending: true,
                 team_reviewers: true,
                 bot_reviewer: Some("Copilot"),
-                bot_authors: false,
             },
             PortalKind::GitLab => Capabilities {
                 auth_style: AuthStyle::DeviceFlow,
@@ -90,7 +89,6 @@ impl PortalKind {
                 // GitLab Duo reviews by commenting, like Copilot, but its account name is not
                 // documented, and guessing it would fail silently.
                 bot_reviewer: None,
-                bot_authors: true,
             },
         }
     }
@@ -131,9 +129,6 @@ pub struct Capabilities {
     /// The automatic reviewer whose unresolved comments count as work, when the portal has one.
     /// `Some("Copilot")` for GitHub.
     pub bot_reviewer: Option<&'static str>,
-    /// Whether the portal marks an author as a bot, so "not opened by a bot" can be judged without a
-    /// list of names. GitLab does; GitHub's search cannot, so it goes by `ignoreAuthors` instead.
-    pub bot_authors: bool,
 }
 
 /// A portal's status page and how the menu names it.

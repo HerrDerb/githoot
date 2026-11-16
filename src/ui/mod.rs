@@ -917,16 +917,17 @@ pub(crate) mod tests {
     /// bound to green's form, so one setting never shows two answers.
     #[test]
     fn each_bar_has_its_folded_line_in_bar_order() {
-        let cfg = crate::config::Config::from_text("ruleSkipBots=off\n");
+        let cfg = crate::config::Config::from_text("ruleRedSkipDrafts=off\n");
         let html = general_page(&site(), &cfg, None);
         let red = html.find("bar-mark bar-review").expect("red");
         let green = html.find("bar-mark bar-merge").expect("green");
         let amber = html.find("bar-mark bar-changes").expect("amber");
         assert!(red < green && green < amber, "bar order");
         assert_eq!(html.matches(r#"<details class="gates-fold">"#).count(), 3, "all folded");
-        assert!(html.contains(">2 of 3 rules on<"), "red counts its own switches: {html}");
+        assert!(html.contains(">1 of 2 rules on<"), "red counts its own switches: {html}");
+        assert!(!html.contains("Not opened by a bot"), "the bot switch is gone");
         assert!(html[red..green].contains(r#"name="ruleRedSkipDrafts""#), "red's own draft rule");
-        for text in ["A review was asked of you", "You have not given it yet", "Team requests count", "Not opened by a bot", "Red bar"] {
+        for text in ["A review was asked of you", "You have not given it yet", "Team requests count", "Red bar"] {
             assert!(html[red..green].contains(text), "{text}");
         }
         let amber_html = &html[amber..];

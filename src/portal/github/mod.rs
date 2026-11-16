@@ -93,8 +93,7 @@ const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:fa
 
 /// The red bar's query as the rules shape it: requests naming you only (`user-review-requested`) with
 /// team requests off, and one `-author:` per ignored login. Drafts, archived repositories and closed
-/// pull requests stay out whatever the rules say. `skip_bots` is not read: GitHub's search cannot tell
-/// a bot from a person, so on GitHub the list is the whole rule.
+/// pull requests stay out whatever the rules say.
 ///
 /// The logins were checked on their way into the file (`setting::is_login`), so none can carry a
 /// space or a qualifier into the search.
@@ -473,11 +472,8 @@ mod tests {
         let list = ignored(&["app/dependabot", "app/renovate", "octo-intern"]);
         let q = review_query(Rules::ALL, &list);
         assert_eq!(q, format!("{REVIEW_QUERY} -author:app/dependabot -author:app/renovate -author:octo-intern"));
-        for rules in [Rules::ALL, Rules { skip_bots: false, ..Rules::ALL }] {
-            let q = review_query(rules, &[]);
-            assert!(!q.contains("dependabot") && !q.contains("renovate") && !q.contains("-author:"), "{q}");
-        }
-        assert_eq!(review_query(Rules { skip_bots: false, ..Rules::ALL }, &list), q, "the bot switch is GitLab's");
+        let q = review_query(Rules::ALL, &[]);
+        assert!(!q.contains("dependabot") && !q.contains("renovate") && !q.contains("-author:"), "{q}");
         for axis in [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] {
             assert!(!pr_query(axis, Rules::ALL, &list).contains("-author:"), "{axis:?}: only your own pull requests there");
         }
