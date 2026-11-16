@@ -15,6 +15,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod people;
 
 use std::path::PathBuf;
 
@@ -37,8 +38,9 @@ const STATUS_PAGE: &str = "https://www.githubstatus.com";
 
 /// Search query for pull requests awaiting the user's review.
 ///
-/// Bots are excluded by author, never by label. `-label:dependencies` used to be here too, and it hid
-/// human pull requests carrying that label (a hand-made library bump) that asked you for review.
+/// Nobody is excluded here. Who is left out is the `ignoreAuthors` list, one `-author:` each, appended
+/// by `review_query`; Dependabot and Renovate are on it by default. Never by label: `-label:dependencies`
+/// once hid human pull requests carrying that label (a hand-made library bump) that asked you for review.
 ///
 /// `draft:false`, same as `MERGE_QUERY`: a draft is not ready for review by GitHub's own
 /// definition, so a request parked on one is work that cannot be acted on yet. It lights the dot
@@ -52,8 +54,7 @@ const STATUS_PAGE: &str = "https://www.githubstatus.com";
 /// `sort:updated-desc` from the equivalent UI search is deliberately absent: it is a UI-only
 /// qualifier the API does not read, and the order hits come back in is the page's business, not the
 /// count's.
-const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false archived:false \
-                            -author:app/dependabot -author:app/renovate";
+const REVIEW_QUERY: &str = "is:pr review-requested:@me state:open draft:false archived:false";
 
 /// Search query for the user's own pull requests that might be approved.
 ///
@@ -90,26 +91,31 @@ const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:fals
 /// a semantic change and a poll-loop refactor do not land in the same commit.
 const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
 
-/// The red bar's query as the rules shape it: `REVIEW_QUERY` itself with both on, requests naming you
-/// only (`user-review-requested`) with team requests off, and no bot exclusions with bots let in.
-/// Drafts, archived repositories and closed pull requests stay out whatever the rules say.
-fn review_query(rules: super::types::Rules) -> String {
-    if rules.team_requests && rules.skip_bots {
-        return REVIEW_QUERY.to_string();
-    }
-    let who = if rules.team_requests { "review-requested:@me" } else { "user-review-requested:@me" };
-    let mut q = format!("is:pr {who} state:open draft:false archived:false");
-    if rules.skip_bots {
-        q.push_str(" -author:app/dependabot -author:app/renovate");
+/// The red bar's query as the rules shape it: requests naming you only (`user-review-requested`) with
+/// team requests off, and one `-author:` per ignored login. Drafts, archived repositories and closed
+/// pull requests stay out whatever the rules say. `skip_bots` is not read: GitHub's search cannot tell
+/// a bot from a person, so on GitHub the list is the whole rule.
+///
+/// The logins were checked on their way into the file (`setting::is_login`), so none can carry a
+/// space or a qualifier into the search.
+fn review_query(rules: super::types::Rules, ignored: &[String]) -> String {
+    let mut q = if rules.team_requests {
+        REVIEW_QUERY.to_string()
+    } else {
+        REVIEW_QUERY.replace("review-requested:@me", "user-review-requested:@me")
+    };
+    for login in ignored {
+        q.push_str(" -author:");
+        q.push_str(login);
     }
     q
 }
 
 /// The search query behind `axis`'s dot. Each bar's own draft rule, switched off, drops `draft:false`
 /// from that bar's search alone, so drafts reach its ordinary rules and no other bar's.
-fn pr_query(axis: PrAxis, rules: super::types::Rules) -> String {
+fn pr_query(axis: PrAxis, rules: super::types::Rules, ignored: &[String]) -> String {
     let (query, skip_drafts) = match axis {
-        PrAxis::ReviewRequested => (review_query(rules), rules.skip_drafts_red),
+        PrAxis::ReviewRequested => (review_query(rules, ignored), rules.skip_drafts_red),
         PrAxis::ReadyToMerge => (MERGE_QUERY.to_string(), rules.skip_drafts_green),
         PrAxis::ChangesRequested => (CHANGES_QUERY.to_string(), rules.skip_drafts_amber),
     };
@@ -154,8 +160,9 @@ pub fn poll_axis(
     token: &str,
     axis: PrAxis,
     rules: super::types::Rules,
+    ignored: &[String],
 ) -> PollResponse {
-    let query = pr_query(axis, rules);
+    let query = pr_query(axis, rules, ignored);
     let query = query.as_str();
     match pr_judge(axis) {
         PrJudge::EveryHit => api::poll_review_requested(client, &endpoints.graphql, token, query),
@@ -173,6 +180,8 @@ pub struct Endpoints {
     pub oauth: auth::OAuthEndpoints,
     /// The App's install page, a browser page rather than an API.
     pub install: String,
+    /// GitHub's user search, for the Ignored authors suggestions.
+    pub user_search: String,
 }
 
 impl Endpoints {
@@ -196,6 +205,7 @@ impl Endpoints {
                 installations: format!("{rest}/user/installations"),
             },
             install: format!("{base}/apps/{}/installations/new", auth::APP_SLUG),
+            user_search: format!("{rest}/search/users"),
         }
     }
 
@@ -204,6 +214,19 @@ impl Endpoints {
     pub fn github_com() -> Endpoints {
         Endpoints::for_base(DEFAULT_BASE_URL)
     }
+}
+
+/// Login suggestions for the settings page while `typed` is typed, with the saved credential if it is
+/// still valid, else none. github.com only, as is every GitHub portal until GHES ships.
+pub fn suggest_people(app_asset_path: &std::path::Path, typed: &str) -> people::People {
+    let Some(token) = auth::valid_saved_token(app_asset_path) else {
+        return people::People::default();
+    };
+    let Ok(client) = api::build_client() else {
+        return people::People::default();
+    };
+    let e = Endpoints::for_base(DEFAULT_BASE_URL);
+    people::suggest(&client, &e.graphql, &e.user_search, &token, typed)
 }
 
 /// The GitHub-specific settings, read from the same `config.txt` keys they always had.
@@ -355,13 +378,14 @@ impl Portal for GitHubPortal {
     fn poll(&mut self, axes: [bool; 3]) -> PollOutcome {
         let mut outcome = PollOutcome::default();
         let rules = self.options.rules.now();
+        let ignored = self.options.rules.ignored_authors();
         for axis in PrAxis::ALL {
             if !axes[axis.index()] {
                 continue;
             }
             let response = match self.store.as_ref() {
                 Some(store) => {
-                    poll_axis(&self.http, &self.endpoints, store.token(), axis, rules)
+                    poll_axis(&self.http, &self.endpoints, store.token(), axis, rules, &ignored)
                 }
                 // Asked without a credential. Not a transport failure and not a zero: the one
                 // variant that says "only a sign-in fixes this".
@@ -409,42 +433,55 @@ mod tests {
     }
 
     /// If this literal drifts, the count moves with it and the bar starts meaning something else.
+    /// No author is named in it: who is left out is the `ignoreAuthors` list's business.
     #[test]
     fn the_review_query_is_unchanged() {
-        assert_eq!(
-            REVIEW_QUERY,
-            "is:pr review-requested:@me state:open draft:false archived:false \
--author:app/dependabot -author:app/renovate"
-        );
+        assert_eq!(REVIEW_QUERY, "is:pr review-requested:@me state:open draft:false archived:false");
     }
 
     /// A human's pull request labelled `dependencies` (a hand-made library bump) is still a review
-    /// someone asked you for. Bots are excluded by author alone, never by label, whatever the rules.
+    /// someone asked you for. Authors are excluded by name alone, never by label, whatever the rules.
     #[test]
     fn a_dependencies_label_never_hides_a_review_request() {
         use crate::portal::types::Rules;
-        let rules = [
-            Rules::ALL,
-            Rules { team_requests: false, ..Rules::ALL },
-            Rules { skip_bots: false, ..Rules::ALL },
-        ];
-        for rules in rules {
-            let query = review_query(rules);
+        for rules in [Rules::ALL, Rules { team_requests: false, ..Rules::ALL }] {
+            let query = review_query(rules, &ignored(&["app/dependabot"]));
             assert!(!query.contains("label:"), "{query}");
         }
     }
 
-    /// The red bar's two rules shape the query itself. Team requests off asks only for requests that
-    /// name you (`user-review-requested`); bots off drops the exclusions.
+    fn ignored(logins: &[&str]) -> Vec<String> {
+        logins.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// Team requests off asks only for requests that name you (`user-review-requested`).
     #[test]
     fn the_review_query_follows_the_red_bar_rules() {
         use crate::portal::types::Rules;
-        assert_eq!(review_query(Rules::ALL), REVIEW_QUERY);
-        let direct = review_query(Rules { team_requests: false, ..Rules::ALL });
+        assert_eq!(review_query(Rules::ALL, &[]), REVIEW_QUERY);
+        let direct = review_query(Rules { team_requests: false, ..Rules::ALL }, &[]);
         assert!(direct.contains("user-review-requested:@me") && !direct.contains(" review-requested:@me"), "{direct}");
-        let with_bots = review_query(Rules { skip_bots: false, ..Rules::ALL });
-        assert!(!with_bots.contains("dependabot") && !with_bots.contains("renovate"), "{with_bots}");
-        assert!(with_bots.contains("draft:false"), "drafts stay out whatever the rules say");
+        assert!(direct.contains("draft:false"), "drafts stay out whatever the rules say");
+    }
+
+    /// Every ignored author is one `-author:` qualifier, so GitHub leaves them out of the count, the
+    /// list and the hoot alike. The bot switch no longer touches GitHub's search: Dependabot and
+    /// Renovate are left out only because the list names them, which it does by default.
+    #[test]
+    fn every_ignored_author_is_left_out_of_the_red_search_and_nothing_else_is() {
+        use crate::portal::types::Rules;
+        let list = ignored(&["app/dependabot", "app/renovate", "octo-intern"]);
+        let q = review_query(Rules::ALL, &list);
+        assert_eq!(q, format!("{REVIEW_QUERY} -author:app/dependabot -author:app/renovate -author:octo-intern"));
+        for rules in [Rules::ALL, Rules { skip_bots: false, ..Rules::ALL }] {
+            let q = review_query(rules, &[]);
+            assert!(!q.contains("dependabot") && !q.contains("renovate") && !q.contains("-author:"), "{q}");
+        }
+        assert_eq!(review_query(Rules { skip_bots: false, ..Rules::ALL }, &list), q, "the bot switch is GitLab's");
+        for axis in [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] {
+            assert!(!pr_query(axis, Rules::ALL, &list).contains("-author:"), "{axis:?}: only your own pull requests there");
+        }
+        assert!(pr_query(PrAxis::ReviewRequested, Rules::ALL, &list).ends_with("-author:octo-intern"));
     }
 
     /// Each bar has its own draft rule, and it shapes only that bar's search: on keeps `draft:false`,
@@ -453,7 +490,7 @@ mod tests {
     fn each_bar_leaves_drafts_out_only_while_its_own_draft_rule_is_on() {
         use crate::portal::types::Rules;
         for axis in PrAxis::ALL {
-            assert!(pr_query(axis, Rules::ALL).contains("draft:false"), "{axis:?}");
+            assert!(pr_query(axis, Rules::ALL, &[]).contains("draft:false"), "{axis:?}");
         }
         let off = [
             (PrAxis::ReviewRequested, Rules { skip_drafts_red: false, ..Rules::ALL }),
@@ -462,11 +499,17 @@ mod tests {
         ];
         for (axis, rules) in off {
             for other in PrAxis::ALL {
-                let q = pr_query(other, rules);
+                let q = pr_query(other, rules, &[]);
                 assert_eq!(q.contains("draft:false"), other != axis, "{axis:?} off, {other:?}: {q}");
                 assert!(q.contains("state:open") && q.contains("archived:false"), "the rest stays: {q}");
             }
         }
+    }
+
+    /// The suggestions' second group is GitHub's user search, on the REST root beside the installations read.
+    #[test]
+    fn user_search_sits_on_the_rest_root() {
+        assert_eq!(Endpoints::for_base(DEFAULT_BASE_URL).user_search, "https://api.github.com/search/users");
     }
 
     /// `review:approved` matches nothing in a repository that requires no reviews — GitHub leaves

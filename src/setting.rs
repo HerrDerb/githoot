@@ -49,6 +49,10 @@ pub enum Kind {
     /// between `whole` and `some` with the boxes under `some`. An unticked list that silently meant
     /// everything was a rule you could only learn from the help text.
     Parts { options: &'static [&'static str], whole: &'static str, some: &'static str },
+    /// GitHub logins, stored comma-separated: a text box the page's script turns into chips with a
+    /// type-ahead (`[data-logins]`). Without the script it is a plain comma list. Only logins pass
+    /// `check`, since each becomes an `-author:` qualifier in a search.
+    Logins { placeholder: &'static str },
 }
 
 /// Whether `value` is one `setting` may hold. The last check before a line is written into a file the
@@ -63,8 +67,39 @@ pub fn check(setting: &Setting, value: &str) -> Result<(), String> {
         Kind::Flag { .. } | Kind::Step { .. } => matches!(value, "on" | "off"),
         Kind::Choice { options } => options.iter().any(|(v, _)| *v == value),
         Kind::Parts { options, .. } => split(value).all(|part| options.contains(&part)),
+        Kind::Logins { .. } => split(value).all(is_login),
     };
     if ok { Ok(()) } else { Err(format!("{:?} is not a value {} can hold", value, setting.key)) }
+}
+
+/// Whether `name` is a GitHub login, or a bot as search names one (`app/<slug>`).
+///
+/// GitHub's own rule: letters, digits and single hyphens, at most 39, no hyphen at either end. Strict
+/// on purpose, as each one is pasted into a search query, where a space or a colon would be a qualifier.
+pub fn is_login(name: &str) -> bool {
+    let name = name.strip_prefix("app/").unwrap_or(name);
+    !name.is_empty()
+        && name.len() <= 39
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+}
+
+/// A submitted login list as it is stored: split on commas or spaces, a bot's `name[bot]` written as
+/// search reads it (`app/name`), and each login once, the first spelling kept.
+pub fn tidy_logins(value: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for part in value.split([',', ' ', '\t']).map(str::trim).filter(|p| !p.is_empty()) {
+        let login = match part.strip_suffix("[bot]") {
+            Some(bot) => format!("app/{bot}"),
+            None => part.to_string(),
+        };
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&login)) {
+            out.push(login);
+        }
+    }
+    out.join(", ")
 }
 
 /// A list setting's parts, trimmed, with empties dropped.
@@ -101,6 +136,7 @@ pub fn from_form(settings: &[&Setting], form: &crate::serve::Form) -> Vec<(&'sta
                 let ticked: Vec<&str> = form.all(s.key).into_iter().filter(|v| options.contains(v)).collect();
                 Some((s.key, ticked.join(", ")))
             }
+            Kind::Logins { .. } => form.get(s.key).map(|v| (s.key, tidy_logins(v))),
             Kind::Text { .. } | Kind::Folder { .. } | Kind::Choice { .. } => form.get(s.key).map(|v| (s.key, v.trim().to_string())),
         })
         .collect()
@@ -188,6 +224,31 @@ mod tests {
         assert!(check(&FOLDER, r"D:\projects").is_ok() && check(&FOLDER, "").is_ok() && check(&FOLDER, "a\nb=c").is_err());
         assert_eq!(from_form(&[&FOLDER], &form("root=+D%3A%5Cprojects+")), [("root", r"D:\projects".to_string())]);
         assert_eq!(from_form(&[&FOLDER], &form("other=x")), [], "absent is left alone");
+    }
+
+    static LOGINS: Setting = s("who", Kind::Logins { placeholder: "Add a GitHub login" }, "People");
+
+    /// A GitHub login is letters, digits and single hyphens, up to 39, not starting or ending with a
+    /// hyphen; a bot is `app/<slug>`, as GitHub's search names it. Anything else would be a broken
+    /// `-author:` qualifier, or a way to smuggle other qualifiers into the search.
+    #[test]
+    fn a_login_list_holds_only_logins() {
+        for ok in ["", "octocat", "octo-cat", "a", "app/dependabot", "app/renovate, octocat", &"x".repeat(39)] {
+            assert!(check(&LOGINS, ok).is_ok(), "{ok:?}");
+        }
+        for bad in ["-octo", "octo-", "octo--cat", "octo cat", "is:pr", "octo,label:x", "app/", "app/-x", &"x".repeat(40)] {
+            assert!(check(&LOGINS, bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The form posts one text box. Commas or spaces both separate, a bot shown as `name[bot]` is
+    /// stored the way search reads it, and the same login twice, in any case, is kept once.
+    #[test]
+    fn a_login_list_is_tidied_on_its_way_in() {
+        let got = from_form(&[&LOGINS], &form("who=+Octocat%2C+dependabot%5Bbot%5D++octocat%2Capp%2Frenovate%2C%2C+"));
+        assert_eq!(got, [("who", "Octocat, app/dependabot, app/renovate".to_string())]);
+        assert_eq!(from_form(&[&LOGINS], &form("who=")), [("who", String::new())], "an empty box is an empty list");
+        assert_eq!(from_form(&[&LOGINS], &form("other=x")), [], "absent is left alone");
     }
 
     static SCOPED: Setting = Setting {
