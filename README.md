@@ -68,7 +68,8 @@ yet, the owl wears a red exclamation and the menu offers **Authenticate GitHub P
 when it suits you. While no portal is signed in, or the GitHub App is installed nowhere, **onboarding**
 opens in your browser: sign in, install the [App](https://github.com/apps/githoot-tray-icon/installations/new)
 (it notices the install by itself), and on Windows keep the owl on the taskbar. Its Continue explains
-what each mark means and which menu entry acts on it. For a private org's repos, the App has to be
+what each mark means and which menu entry acts on it. **Skip for now** goes there without connecting;
+connect later under **Settings ▸ Portals**, and until then onboarding opens again at each start. For a private org's repos, the App has to be
 [**installed** on that org](docs/pr-status.md#why-a-github-app). Onboarding covers the GitHub portal
 only for now; GitLab is in beta.
 
