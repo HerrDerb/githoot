@@ -92,10 +92,20 @@ impl Host for Orca {
                 l.kind
             )));
         };
-        if !ASKING.contains(&args.trim()) {
+        // Some full-access switches are environment variables rather than arguments (goose's
+        // `GOOSE_MODE=auto`), so an asking launch sets nothing there either. Missing counts as set.
+        let env = literal(&created, "agentEnv")
+            .and_then(|v| v.strip_prefix('{'))
+            .and_then(|v| v.find('}').map(|end| v[..end].trim().to_string()));
+        if !ASKING.contains(&args.trim()) || env.as_deref() != Some("") {
             let _ = orca(tool, run, &["terminal", "close", "--terminal", &handle, "--json"]);
+            let with = match env.as_deref() {
+                Some("") => args.clone(),
+                Some(set) => format!("{args} and the environment {{{set}}}"),
+                None => format!("{args} and an environment it did not report"),
+            };
             return Err(Trouble::Setup(format!(
-                "Orca starts {} with {args}, which lets it act without asking you, so it was closed before it got the \
+                "Orca starts {} with {with}, which lets it act without asking you, so it was closed before it got the \
                  pull request. In Orca, set Settings > Agents > Agent permissions to Manual or Ask",
                 l.kind
             )));
@@ -305,6 +315,17 @@ mod tests {
         let ran = ran.borrow();
         assert_eq!(ran[1], format!("{TOOL} terminal close --terminal term_9cde --json"));
         assert!(!ran.iter().any(|l| l.contains("terminal send")), "no prompt: {ran:?}");
+    }
+
+    /// Orca puts some full-access switches in the environment rather than the arguments (goose's
+    /// `GOOSE_MODE=auto`, with no argument at all), so an asking launch also has nothing set there.
+    #[test]
+    fn an_agent_orca_lets_skip_its_prompts_through_its_environment_is_closed() {
+        let env = r#"{"ok": true, "result": {"terminal": {"launchConfig": {"agentArgs": "", "agentEnv": {"GOOSE_MODE": "auto"}}, "handle": "term_9cde"}}}"#;
+        let (mut run, ran) = recorder(move |line| if line.contains("terminal create") { Ok(env.into()) } else { Ok(r#"{"ok": true}"#.into()) });
+        let Err(Trouble::Setup(said)) = Orca.start(&launch(), &mut run) else { panic!() };
+        assert!(said.contains("GOOSE_MODE") && said.contains("Agent permissions"), "{said}");
+        assert!(!ran.borrow().iter().any(|l| l.contains("terminal send")), "no prompt");
     }
 
     /// An agent still asking something at startup gets no prompt pasted into that question.
