@@ -1,10 +1,9 @@
 # The shipped prompts
 
-What the Herdr dispatcher tells an agent, one file per bar plus the nudge an agent gets when its pull
-request changes under it. These four files are compiled into GitHoot and written to
-`~/.githoot/integrations/herdr/prompts/` the first time it starts.
+What GitHoot's Agents tell an agent, one file per bar. These three files are compiled into GitHoot
+and written to `~/.githoot/agents/prompts/` the first time it starts.
 
-**Edit them there, or on Integrations ▸ Herdr dispatcher, not here.** A file in this directory is the
+**Edit them there, or on Settings ▸ Agents, not here.** A file in this directory is the
 shipped default; a file in your own `prompts/` directory is yours and GitHoot will not overwrite it.
 
 | File | When it is used |
@@ -23,12 +22,12 @@ not a cure. Keep it if you rewrite them.
 Each default ends with the pull request's link on its own line, so the bottom of every agent pane is
 something you can click.
 
-Everything else about the dispatcher, including what it costs you and the one guard rail that
-actually holds, is in [`docs/dispatcher.md`](../docs/dispatcher.md).
+Everything else about Agents, including what it costs you and the one guard rail that actually
+holds, is in [`docs/agents.md`](../docs/agents.md).
 
 ---
 
 **This directory used to hold `ght-dispatch`**, a bash script installed by a button and kept alive
 by a systemd user service, plus a PowerShell port for Windows. Both are gone: the dispatcher is a
-thread inside GitHoot now. If you still have the script installed, `docs/dispatcher.md` says how to
-remove it.
+thread inside GitHoot now, Agents. If you still have the script installed, `docs/agents.md` says how
+to remove it.

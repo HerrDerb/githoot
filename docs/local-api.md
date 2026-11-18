@@ -139,8 +139,8 @@ fork's branch lives on the fork. `branch` is the name, for showing.
 
 **`muted` is `true` for a pull request you have muted from the PR page**, and `muted_until_unix` says
 until when. Muted pull requests are still listed, because hiding them would be the API deciding for
-you; they do not count on the icon, and anything acting on a bar should skip them, as the shipped
-dispatcher does → [the PR page](pr-page.md#muting-a-pull-request).
+you; they do not count on the icon, and anything acting on a bar should skip them, as
+[Agents](agents.md) does → [the PR page](pr-page.md#muting-a-pull-request).
 
 ## The one rule that matters
 
@@ -219,10 +219,10 @@ lists owns its own bookkeeping, where it can be inspected and reset. A test asse
 **Not a push.** The poll floor is 60 seconds (→ [Troubleshooting](troubleshooting.md)), so a reader
 learns about a change up to a minute after GitHub did, and no sooner than GitHoot itself.
 
-## The dispatcher does not use this
+## Agents does not use this
 
 Reading the bars is the general thing. Turning them into agents is one particular use of it, and
-GitHoot does that too, in [the dispatcher](dispatcher.md) — but **in process**, reading the same
+GitHoot does that too, in [Agents](agents.md) — but **in process**, reading the same
 snapshot the icon and the pages read. It does not go through this API and does not need `localApi`
 on.
 

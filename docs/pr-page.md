@@ -160,7 +160,7 @@ request that is on the page right now. The icon catches up within seconds, becau
 poll loop.
 
 The [local API](local-api.md) still serves muted pull requests, marked `"muted": true`, and
-[the dispatcher](dispatcher.md) skips them.
+[Agents](agents.md) skips them.
 
 ## When it cannot start
 
