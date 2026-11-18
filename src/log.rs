@@ -94,9 +94,29 @@ pub fn write_line(level: Level, line: &str) {
         let _ = std::fs::write(&*path, "-- log truncated --\n");
     }
 
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&*path) {
+    if let Ok(mut file) = open_log(&path) {
         let _ = writeln!(file, "{} [{tag}] {}", utc_now(), line);
     }
+}
+
+/// Opens the log for appending, readable by its owner only, as `pr_token.txt` is: what GitHoot did
+/// with your accounts and repositories is nobody else's to read. A log an older release created
+/// readable by the group is tightened on the next line written.
+fn open_log(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let file = options.open(path)?;
+        if file.metadata().is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    options.open(path)
 }
 
 /// Appends an `ERROR` line to `~/.githoot/log.txt`: a failure or non-OK response. Written
@@ -147,7 +167,29 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, enabled, set_level, Level};
+    use super::{civil_from_days, enabled, open_log, set_level, Level};
+
+    /// The log holds what GitHoot did with your accounts and repositories, so it is the owner's only,
+    /// like `pr_token.txt`: a new one is made so, and one an older release left readable is tightened.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("githoot-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = dir.join("fresh.txt");
+        let _ = std::fs::remove_file(&fresh);
+        drop(open_log(&fresh).unwrap());
+        let old = dir.join("old.txt");
+        std::fs::write(&old, "x\n").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o664)).unwrap();
+        drop(open_log(&old).unwrap());
+        for path in [&fresh, &old] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parse_reads_the_two_levels_case_and_space_insensitively() {
