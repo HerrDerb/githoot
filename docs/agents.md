@@ -206,7 +206,11 @@ never runs `herdr-app` itself, so the app does not need to be open:
 
 With **Orca** chosen, GitHoot drives [Orca](https://orca.dev) through its own command line, which
 is `orca-ide` on Linux, where `orca` is the GNOME screen reader, and `orca` on Windows and macOS. **Orca must
-be running**: GitHoot never starts it. If it is not, the log says so and the next pass tries again.
+be running**: GitHoot never starts it, since that would mean opening a window on its own. If it is
+not, nothing is done for the pull request yet: GitHoot shows a **desktop notification**, "An agent is
+waiting to start: Orca is not running. Open Orca", once per time Orca goes missing rather than every
+pass, the log says so once, and the agent starts on the first pass after you open Orca. The
+notification is Linux only for now; on Windows and macOS the log line is all there is.
 Every call runs with `ORCA_TELEMETRY_DISABLED=1`, as Orca otherwise reports usage to an analytics
 service.
 

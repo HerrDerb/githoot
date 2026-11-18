@@ -51,6 +51,18 @@ impl Client for Orca {
     /// Every agent Orca lists, by the worktree in its `worktreeId` (`<repo-id>::<path>`). A finished one
     /// stays listed while it sleeps, and still counts: its worktree is still somebody's. Orca not
     /// running (`runtime_unavailable`, its own code) is nobody working; any other failure is unsure.
+    /// Orca is a desktop app, so GitHoot does not start it: not running is absent, said once on the
+    /// desktop, and the pull request waits until you open Orca. Its own `runtime_unavailable` is the
+    /// one answer that means that; anything else is left to the call that meets it.
+    fn ready(&self, run: &mut Run) -> Result<(), Trouble> {
+        match run(self.tool(), &["agent", "list", "--json"]) {
+            Ok(said) | Err(said) if said.contains("runtime_unavailable") => {
+                Err(Trouble::Absent("Orca is not running. Open Orca, and the next pass starts the agent".to_string()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
         let raw = match run(self.tool(), &["agent", "list", "--json"]) {
             Ok(raw) if !is_false(&raw, "ok") => raw,
@@ -236,6 +248,21 @@ mod tests {
         assert_eq!(cwds, ["/w/pr-3-spike-repo", r"C:\w\pr-4-x"]);
         assert!(found.iter().all(|(_, name)| !name.is_empty()), "every one is a claim: {found:?}");
         assert_eq!(ran.borrow().as_slice(), [format!("{TOOL} agent list --json")]);
+    }
+
+    /// Orca not running is the one thing only you can fix, so it is said as absent, which tells you on
+    /// the desktop; anything else is left to the call that meets it.
+    #[test]
+    fn orca_not_running_is_absent_before_anything_is_touched() {
+        let not_running = r#"{"id": "local", "ok": false, "error": {"code": "runtime_unavailable", "message": "Start the Orca app first."}}"#;
+        let (mut run, ran) = recorder(move |_| Err(not_running.into()));
+        let Err(Trouble::Absent(said)) = Orca.ready(&mut run) else { panic!() };
+        assert!(said.contains("Orca is not running") && said.contains("Open Orca"), "{said}");
+        assert_eq!(ran.borrow().as_slice(), [format!("{TOOL} agent list --json")]);
+        let (mut running, _) = recorder(|_| Ok(AGENT_LIST.into()));
+        assert_eq!(Orca.ready(&mut running), Ok(()));
+        let (mut broken, _) = recorder(|_| Err(r#"{"ok": false, "error": {"code": "request_timeout"}}"#.into()));
+        assert_eq!(Orca.ready(&mut broken), Ok(()), "not absent, so the next call says what it is");
     }
 
     /// Orca not running is nobody working; Orca there and failing is nobody can say. Both answers are

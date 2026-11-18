@@ -175,6 +175,71 @@ fn confirm(
     }
 }
 
+/// A desktop notification: `summary` as its title, `body` under it, no buttons and no click action. For
+/// telling you about something only you can do, such as opening Orca, when the log is not where you
+/// would look.
+///
+/// Linux only for now, through the desktop's own notification service on the session bus
+/// (`org.freedesktop.Notifications`), with the GIO that GTK already brings: no new dependency, and every
+/// desktop that shows notifications implements it. Windows would need GitHoot registered with the
+/// shell before a toast shows; until then this says it cannot, and the caller's log line stands.
+pub fn notify(summary: &str, body: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::gio;
+        let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).map_err(|e| e.to_string())?;
+        bus.call_sync(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            Some(&notify_args(summary, body)),
+            None,
+            gio::DBusCallFlags::NONE,
+            5_000,
+            gio::Cancellable::NONE,
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (summary, body);
+        Err("desktop notifications are only shown on Linux for now".to_string())
+    }
+}
+
+/// `Notify`'s arguments, as the specification orders them: app name, the id to replace (0, none), an
+/// icon (none), the summary, the body, the actions (none), the hints (none), and the timeout (-1, the
+/// desktop's own default).
+#[cfg(target_os = "linux")]
+fn notify_args(summary: &str, body: &str) -> gtk::glib::Variant {
+    use gtk::glib::{ToVariant, Variant};
+    let hints: std::collections::HashMap<String, Variant> = std::collections::HashMap::new();
+    ("GitHoot", 0u32, "", summary, body, Vec::<String>::new(), hints, -1i32).to_variant()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod notify_tests {
+    /// The notification service rejects a call whose arguments are not exactly this shape, so the
+    /// shape is pinned here rather than found out on a desktop.
+    #[test]
+    fn notify_sends_exactly_the_arguments_the_specification_names() {
+        let args = super::notify_args("Orca is not running", "Open Orca.");
+        assert_eq!(args.type_().as_str(), "(susssasa{sv}i)");
+        assert_eq!(args.child_value(3).str(), Some("Orca is not running"));
+        assert_eq!(args.child_value(4).str(), Some("Open Orca."));
+    }
+
+    /// A real notification on this desktop, through the real session bus. Run by hand: it pops one up.
+    #[test]
+    #[ignore = "shows a real desktop notification; run on its own"]
+    fn a_real_notification_shows_on_this_desktop() {
+        super::notify("An agent is waiting to start", "Orca is not running. Open Orca, and the next pass starts the agent")
+            .expect("the desktop's notification service answers");
+    }
+}
+
 /// Copies `text` to the system clipboard. Best effort, like everything else here: a clipboard
 /// that cannot be reached (no X11/Wayland session, some sandboxed environment) must not stop the
 /// device flow, since the code is also always shown in the dialog/console text as a fallback.

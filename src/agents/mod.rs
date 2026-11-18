@@ -99,6 +99,8 @@ pub struct Said {
     pub trouble: Vec<String>,
     /// What is wrong with the setup rather than with any pull request. Logged once until it changes.
     pub setup: Vec<String>,
+    /// A client only you can start, missing, once per client: said on the desktop as well, once.
+    pub absent: Vec<String>,
 }
 
 /// The bars as a pass may see them: only `portals`, only confirmed lists, no muted entries.
@@ -217,6 +219,14 @@ pub fn take_flash() -> Option<String> {
     FLASH.lock().ok().and_then(|mut f| f.take())
 }
 
+/// What to say on the desktop about a client that is not there: the first line of a new absence, or
+/// nothing while it is still the same one. `shown` remembers whether this absence was already said.
+fn notice_once(shown: &mut bool, absent: &[String]) -> Option<String> {
+    let new = absent.first().filter(|_| !*shown).cloned();
+    *shown = !absent.is_empty();
+    new
+}
+
 /// One line for the log: `true` for an error, `false` for info.
 type Line = (bool, String);
 
@@ -289,21 +299,36 @@ pub fn start(app_asset_path: PathBuf) {
 
     std::thread::Builder::new()
         .name("agents".to_string())
-        .spawn(move || loop {
-            wait_for_poll();
-            let cfg = Config::load(&app_asset_path).0;
-            if !cfg.agents_enabled() {
-                continue;
-            }
-            let ctx = Context::new(&app_asset_path, &cfg);
-            let Ok(mut last) = LAST_COMPLAINT.lock() else { continue };
-            let missing = dispatch::missing(&ctx);
-            let lines = run_once(&missing, || dispatch::pass(&ctx, &current_batches(), false), || dispatch::problems(&ctx), &mut last);
-            for (error, line) in lines {
-                if error {
-                    crate::errorln!("{line}");
-                } else {
-                    crate::infoln!("{line}");
+        .spawn(move || {
+            // Whether the client now missing was already said on the desktop. This thread's alone.
+            let mut shown = false;
+            loop {
+                wait_for_poll();
+                let cfg = Config::load(&app_asset_path).0;
+                if !cfg.agents_enabled() {
+                    continue;
+                }
+                let ctx = Context::new(&app_asset_path, &cfg);
+                let Ok(mut last) = LAST_COMPLAINT.lock() else { continue };
+                let missing = dispatch::missing(&ctx);
+                let mut absent = Vec::new();
+                let pass = || {
+                    let out = dispatch::pass(&ctx, &current_batches(), false);
+                    absent.clone_from(&out.absent);
+                    out
+                };
+                let lines = run_once(&missing, pass, || dispatch::problems(&ctx), &mut last);
+                for (error, line) in lines {
+                    if error {
+                        crate::errorln!("{line}");
+                    } else {
+                        crate::infoln!("{line}");
+                    }
+                }
+                if let Some(why) = notice_once(&mut shown, &absent)
+                    && let Err(e) = crate::dialog::notify("An agent is waiting to start", &why)
+                {
+                    crate::infoln!("agents: no desktop notification: {e}");
                 }
             }
         })
@@ -433,6 +458,18 @@ mod tests {
         assert_eq!(run_once(&[], Said::default, Vec::new, &mut last), [(false, "agents: everything it needs is back".to_string())]);
         let missing = run_once(&["git"], || panic!("no pass while a tool is missing"), Vec::new, &mut last);
         assert_eq!(missing, [(true, "agents: missing git".to_string())]);
+    }
+
+    /// A client you have to start yourself is said on the desktop once when it goes missing, not every
+    /// pass while it stays missing; once it is back, the next time it goes missing is news again.
+    #[test]
+    fn a_missing_client_is_notified_once_per_absence() {
+        let mut shown = false;
+        let gone = ["Orca is not running. Open Orca.".to_string()];
+        assert_eq!(notice_once(&mut shown, &gone), Some("Orca is not running. Open Orca.".to_string()));
+        assert_eq!(notice_once(&mut shown, &gone), None, "still missing, already said");
+        assert_eq!(notice_once(&mut shown, &[]), None, "back: nothing to say");
+        assert_eq!(notice_once(&mut shown, &gone), Some("Orca is not running. Open Orca.".to_string()), "missing again is news");
     }
 
     /// A flag nobody set is its default, and only an explicit value moves it. A typo leaves the default
