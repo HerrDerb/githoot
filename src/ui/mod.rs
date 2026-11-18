@@ -62,7 +62,7 @@ impl Place {
             ("portals", None) => Place::Portals,
             ("portals", Some(id)) if word(id) => Place::Portal(id.to_string()),
             ("integrations", None) => Place::Integrations,
-            ("integrations", Some(id)) => Place::Integration(crate::integration::find(id)?.info().id),
+            ("integrations", Some(id)) => Place::Integration(crate::agents::find(id)?.info().id),
             ("muted", None) => Place::Muted,
             ("updates", None) => Place::Updates,
             ("advanced", None) => Place::Advanced,
@@ -157,7 +157,7 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
         }
     }
     items.push(link(Place::Integrations, "Integrations", false));
-    for integration in crate::integration::all() {
+    for integration in crate::agents::all() {
         let info = integration.info();
         // Installed, or the page you are on: a sidebar that cannot show where you are is lost.
         if site.installed.contains(&info.id) || *current == Place::Integration(info.id) {

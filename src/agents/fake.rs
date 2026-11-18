@@ -67,7 +67,7 @@ impl Integration for Stuck {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::integration::batches;
+    use crate::agents::batches;
     use crate::portal::fake::FakePortal;
     use crate::portal::types::PrEntry;
     use crate::scheduler::AxisSnapshot;

@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 /// nudge says. The script carries copies of these as its fallback for a hand install; a test
 /// below fails if the two ever drift.
 pub const DEFAULT_PROMPTS: [(&str, &str); 3] = [
-    ("work-required", include_str!("../../../contrib/prompts/work-required.txt")),
-    ("requested-reviews", include_str!("../../../contrib/prompts/requested-reviews.txt")),
-    ("approved", include_str!("../../../contrib/prompts/approved.txt")),
+    ("work-required", include_str!("../../contrib/prompts/work-required.txt")),
+    ("requested-reviews", include_str!("../../contrib/prompts/requested-reviews.txt")),
+    ("approved", include_str!("../../contrib/prompts/approved.txt")),
 ];
 
 

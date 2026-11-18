@@ -1018,15 +1018,15 @@ fn integrations_section() -> String {
          # the enabled line below. Like localApi, a typo leaves it off. Changes here take effect\n\
          # within one pass, no restart. See docs/integrations.md.\n",
     );
-    for integration in crate::integration::all() {
+    for integration in crate::agents::all() {
         let info = integration.info();
         out.push_str(&format!("\n# {}: {}\n{INTEGRATION_PREFIX}{}.enabled=off\n", info.name, info.summary, info.id));
         for setting in info.settings {
             // A flag is written at its default, so the file says which way each one stands. A text
             // setting is written empty, which means its default.
             let value = match setting.kind {
-                crate::integration::Kind::Flag { default_on: true } => "on",
-                crate::integration::Kind::Flag { default_on: false } => "off",
+                crate::agents::Kind::Flag { default_on: true } => "on",
+                crate::agents::Kind::Flag { default_on: false } => "off",
                 _ => "",
             };
             out.push_str(&format!("# {}\n{INTEGRATION_PREFIX}{}.{}={value}\n", setting.help, info.id, setting.key));
@@ -1613,7 +1613,7 @@ mod tests {
         let text = default_config();
         let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| k.starts_with(INTEGRATION_PREFIX)).collect();
         let mut declared: Vec<String> = Vec::new();
-        for integration in crate::integration::all() {
+        for integration in crate::agents::all() {
             let info = integration.info();
             declared.push(format!("{INTEGRATION_PREFIX}{}.enabled", info.id));
             declared.extend(info.settings.iter().map(|s| format!("{INTEGRATION_PREFIX}{}.{}", info.id, s.key)));

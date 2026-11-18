@@ -30,7 +30,9 @@
 //! - **Its own page.** The Integrations tab lists them; each has a page with the generic part (on or
 //!   off, what it is missing, its settings, a dry run) and whatever it adds below.
 
-pub mod herdr;
+pub mod clients;
+pub mod dispatch;
+pub mod prompts;
 
 #[cfg(test)]
 mod fake;
@@ -159,7 +161,7 @@ pub trait Integration: Send + Sync {
 
 /// Every integration this build knows, installed or not, in the order the tab lists them.
 pub fn all() -> &'static [&'static dyn Integration] {
-    &[&herdr::Herdr]
+    &[&dispatch::Herdr]
 }
 
 pub fn find(id: &str) -> Option<&'static dyn Integration> {

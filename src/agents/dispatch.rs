@@ -11,7 +11,7 @@
 //!   * **A console program cannot be a background service on Windows without a trick.** Task
 //!     Scheduler hands a console to whatever it starts, so the loop sat in a terminal on the
 //!     desktop. Every escape is a trade: session 0 cannot reach the Herdr you have open, a script
-//!     host shim is what antivirus flags, and hiding a window still created one. GitHoot is
+//!     client shim is what antivirus flags, and hiding a window still created one. GitHoot is
 //!     already a windowless GUI-subsystem process with a poll thread, so in here the problem does
 //!     not exist rather than being worked around.
 //!   * **One behaviour, two implementations, guaranteed to drift.** Bash for Linux and PowerShell
@@ -34,8 +34,8 @@
 //! judgement the icon and the pages use, with muted pull requests already taken out. Its files live
 //! in `~/.githoot/integrations/herdr/`: one state file per bar and the prompts.
 
-pub mod host;
-pub mod prompts;
+use super::clients;
+use super::prompts;
 
 use super::{Batch, Context, Info, Integration, Kind, Problem, Said, Setting};
 use crate::page::esc;
@@ -109,8 +109,8 @@ pub struct Settings {
     pub clone_root_from: RootFrom,
     pub worktree_root: PathBuf,
     pub agent_kind: String,
-    /// Where the agent's terminal opens. See `host`.
-    pub host: &'static dyn host::Host,
+    /// Where the agent's terminal opens. See `client`.
+    pub client: &'static dyn clients::Client,
     /// Says what it would do and touches nothing, including the state file. What the page's Dry run
     /// button asks for, and never what the runner does.
     pub dry_run: bool,
@@ -211,7 +211,7 @@ pub fn command(exe: &str) -> Command {
 /// caller here wants a value rather than a line.
 pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
     let out = command(exe).args(args).output().map_err(|e| match e.kind() {
-        // Worded once, here, so a host can tell "not installed" from "did not answer". See `host::not_installed`.
+        // Worded once, here, so a client can tell "not installed" from "did not answer". See `clients::not_installed`.
         std::io::ErrorKind::NotFound => format!("{exe}: not installed"),
         _ => format!("{exe}: {e}"),
     })?;
@@ -226,18 +226,18 @@ pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
     Err(said)
 }
 
-/// The tools a tick shells out to: the chosen host's program, and git. Checked before the thread
+/// The tools a tick shells out to: the chosen client's program, and git. Checked before the thread
 /// starts rather than per tick, because a missing tool repeated every poll would bury the log.
 /// No forge tool among them: the dispatcher asks no forge anything. The agent does read the pull
 /// request with one (`gh`, `glab`), under your own login, but which one is its business.
-pub fn required(host: &dyn host::Host) -> [&'static str; 2] {
-    [host.tool(), "git"]
+pub fn required(client: &dyn clients::Client) -> [&'static str; 2] {
+    [client.tool(), "git"]
 }
 
 /// Which of `required` this machine cannot run. A plain `--version` rather than a `PATH` walk, so
 /// the answer is "it runs" rather than "a file with that name exists".
-pub fn missing_tools(host: &dyn host::Host) -> Vec<&'static str> {
-    required(host)
+pub fn missing_tools(client: &dyn clients::Client) -> Vec<&'static str> {
+    required(client)
         .into_iter()
         .filter(|exe| command(exe).arg("--version").output().is_err())
         .collect()
@@ -337,20 +337,20 @@ impl Target {
 
 // ── Asking Herdr who is already working ──────────────────────────────────────
 
-/// Every live, named agent in every host, as `(cwd, name)`. Agents without a name are skipped: only
+/// Every live, named agent in every client, as `(cwd, name)`. Agents without a name are skipped: only
 /// ones this dispatcher started carry a slug, and a hand-started session in your clone is not a claim
-/// on a worktree. Every host, not only the chosen one: an agent you started in the other is still
+/// on a worktree. Every client, not only the chosen one: an agent you started in the other is still
 /// somebody working that pull request.
 ///
 /// Paths are compared case-insensitively with trailing separators stripped, because Herdr answers
 /// in the platform's own shape and a mismatch here would read as "nobody home" and start a second
 /// agent on every comment.
-pub fn live_agents() -> host::Inventory {
-    host::agents_everywhere(&mut |exe, args| output(exe, args))
+pub fn live_agents() -> clients::Inventory {
+    clients::agents_everywhere(&mut |exe, args| output(exe, args))
 }
 
 /// Whether a worktree on disk with no agent in it may be recycled, as far as anyone can say. Not while
-/// a host failed to answer: the agent it did not report may be standing in that worktree, and
+/// a client failed to answer: the agent it did not report may be standing in that worktree, and
 /// removing the folder under it loses nothing git sees but pulls the floor out from under the agent.
 /// Setup, so it is tried again next pass rather than recorded against the pull request.
 pub fn may_recycle(worktree: &str, unsure: &[String]) -> Result<(), Trouble> {
@@ -520,13 +520,13 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
     let worktree_str = worktree.to_string_lossy().to_string();
     let own = format!("githoot/{slug}");
 
-    let host = settings.host;
+    let client = settings.client;
     if settings.dry_run {
         return Ok(format!(
             "would fetch {head} into {clone_str}, cut {own} from it with pushes disabled, \
              open a worktree at {worktree_str} and start a {} agent in {}",
             settings.agent_kind,
-            host.name()
+            client.name()
         ));
     }
     let mut run = |exe: &str, args: &[&str]| output(exe, args);
@@ -534,12 +534,12 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
     output("git", &["-C", &clone_str, "fetch", "--quiet", "origin", &refspec])
         .map_err(|e| Trouble::Passing(format!("could not fetch {head}: {e}")))?;
 
-    // A worktree already on disk with nobody reported in it. Reuse it if the host still knows it;
-    // recycle it only if every host answered and nothing would be lost. A worktree holding work is
+    // A worktree already on disk with nobody reported in it. Reuse it if the client still knows it;
+    // recycle it only if every client answered and nothing would be lost. A worktree holding work is
     // yours to look at.
     let mut place = String::new();
     if worktree.exists() {
-        place = host.reopen(&worktree_str, &mut run).unwrap_or_default();
+        place = client.reopen(&worktree_str, &mut run).unwrap_or_default();
         if place.is_empty() {
             may_recycle(&worktree_str, unsure)?;
             let dirty = output("git", &["-C", &worktree_str, "status", "--porcelain"]).unwrap_or_default();
@@ -558,8 +558,8 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
         if output("git", &["-C", &clone_str, "show-ref", "--verify", "--quiet", &format!("refs/heads/{own}")]).is_ok() {
             let _ = output("git", &["-C", &clone_str, "branch", "-D", &own]);
         }
-        let new = host::NewWorktree { clone: &clone_str, path: &worktree_str, branch: &own, base: &base, slug };
-        place = host.create(&new, &mut run)?;
+        let new = clients::NewWorktree { clone: &clone_str, path: &worktree_str, branch: &own, base: &base, slug };
+        place = client.create(&new, &mut run)?;
     }
 
     // Before the agent exists, and on a reused worktree too: drop any upstream a 3.2.0 worktree was
@@ -571,13 +571,13 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
         .map_err(|e| Trouble::Passing(format!("could not stop {own} from pushing, so no agent was started: {e}")))?;
 
     let prompt = render_prompt(template, t, &own);
-    let launch = host::Launch { slug, kind: &settings.agent_kind, prompt: &prompt, worktree: &worktree_str, place: &place };
-    host.start(&launch, &mut run).map_err(|e| match e {
+    let launch = clients::Launch { slug, kind: &settings.agent_kind, prompt: &prompt, worktree: &worktree_str, place: &place };
+    client.start(&launch, &mut run).map_err(|e| match e {
         Trouble::Setup(m) => Trouble::Setup(format!("worktree {worktree_str} is ready on {own}, but {m}")),
         Trouble::Passing(m) => Trouble::Passing(format!("worktree {worktree_str} is ready on {own}, but {m}")),
     })?;
 
-    Ok(format!("started {slug} in {}, on branch {own}", host.name()))
+    Ok(format!("started {slug} in {}, on branch {own}", client.name()))
 }
 
 /// The last hop: start the agent in `pane` and give it its prompt. `herdr` runs one `herdr` command
@@ -716,9 +716,9 @@ static INFO: Info = Info {
         // Where agents open. A radio rather than a guess from what is installed: both can be, and
         // which window you work in is a preference, not something on the PATH.
         Setting {
-            key: "host",
+            key: "client",
             label: "Agents open in",
-            kind: Kind::Choice { options: host::CHOICES },
+            kind: Kind::Choice { options: clients::CHOICES },
             help: "Where each agent's terminal opens. An agent already working a pull request counts in either.",
             group: "Agents",
             live: true,
@@ -788,7 +788,7 @@ impl Integration for Herdr {
     }
 
     fn missing(&self, ctx: &Context) -> Vec<&'static str> {
-        missing_tools(settings_now(ctx, true).host)
+        missing_tools(settings_now(ctx, true).client)
     }
 
     fn problems(&self, ctx: &Context) -> Vec<Problem> {
@@ -876,7 +876,7 @@ impl Integration for Herdr {
 
     fn page(&self, ctx: &Context, token: &str) -> String {
         let settings = settings_now(ctx, true);
-        let missing = missing_tools(settings.host);
+        let missing = missing_tools(settings.client);
         let rows = prompts::prompts(&ctx.dir);
         page_body(token, &settings, &missing, &rows)
     }
@@ -967,7 +967,7 @@ fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
         clone_root_from,
         worktree_root: pick(ctx.setting("worktreeRoot"), "GITHOOT_WORKTREE_ROOT", home.join("worktrees")).0,
         agent_kind: std::env::var("GITHOOT_AGENT_KIND").unwrap_or_else(|_| "claude".to_string()),
-        host: host::by_id(ctx.setting("host")),
+        client: clients::by_id(ctx.setting("client")),
         dry_run,
     }
 }
@@ -978,14 +978,14 @@ fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
 /// prompts. Whether it is installed, what it is missing and the Dry run button are the generic
 /// card's job, the same for every integration.
 fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prompts::Prompt]) -> String {
-    let host = settings.host;
-    let herdr = if missing.contains(&host.tool()) {
-        format!("<p class=\"sub\"><a href=\"{}\">How to install {}</a></p>", host.install_url(), esc(host.name()))
+    let client = settings.client;
+    let herdr = if missing.contains(&client.tool()) {
+        format!("<p class=\"sub\"><a href=\"{}\">How to install {}</a></p>", client.install_url(), esc(client.name()))
     } else {
         String::new()
     };
     // One chip per tool, so a missing one stands out at a glance instead of hiding in a sentence.
-    let chips: String = required(host)
+    let chips: String = required(client)
         .iter()
         .map(|tool| {
             if missing.contains(tool) {
@@ -1048,7 +1048,7 @@ mod tests {
             clone_root_from: RootFrom::Setting,
             worktree_root: PathBuf::from("/d/worktrees"),
             agent_kind: "claude".to_string(),
-            host: &host::HerdrTui,
+            client: &clients::HerdrTui,
             dry_run: true,
         }
     }
@@ -1231,9 +1231,9 @@ mod tests {
         let ctx = temp_ctx("page-off", "");
         let _ = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
         let root = ctx.dir.parent().unwrap().parent().unwrap().to_path_buf();
-        crate::integration::set(&root, &Herdr, "workRequired", "on").unwrap();
+        crate::agents::set(&root, &Herdr, "workRequired", "on").unwrap();
         assert!(armed(&ctx.dir, PrAxis::ChangesRequested), "saving the form with it still on is not a switch");
-        crate::integration::set(&root, &Herdr, "workRequired", "off").unwrap();
+        crate::agents::set(&root, &Herdr, "workRequired", "off").unwrap();
         assert!(!armed(&ctx.dir, PrAxis::ChangesRequested));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1389,31 +1389,31 @@ mod tests {
     /// The radio picks where agents open, the terminal unless it says otherwise.
     #[test]
     fn the_host_is_a_radio_that_defaults_to_the_terminal() {
-        assert_eq!(settings_now(&ctx(""), true).host.id(), "herdr");
-        assert_eq!(settings_now(&ctx("integration.herdr.host=herdr-app\n"), true).host.id(), "herdr-app");
-        let radio = INFO.settings.iter().find(|s| s.key == "host").expect("a radio for it");
-        assert_eq!(radio.kind, Kind::Choice { options: host::CHOICES });
+        assert_eq!(settings_now(&ctx(""), true).client.id(), "herdr");
+        assert_eq!(settings_now(&ctx("integration.herdr.client=herdr-app\n"), true).client.id(), "herdr-app");
+        let radio = INFO.settings.iter().find(|s| s.key == "client").expect("a radio for it");
+        assert_eq!(radio.kind, Kind::Choice { options: clients::CHOICES });
     }
 
     /// The app needs `hc`, not `herdr`, and the page names the right one when it is missing.
     #[test]
     fn the_tools_it_needs_follow_the_host() {
-        assert_eq!(required(&host::HerdrApp), ["hc", "git"]);
-        let app = Settings { host: &host::HerdrApp, ..settings() };
+        assert_eq!(required(&clients::HerdrApp), ["hc", "git"]);
+        let app = Settings { client: &clients::HerdrApp, ..settings() };
         let html = page_body("tok", &app, &["hc"], &[]);
         assert!(html.contains("hc not found") && !html.contains("herdr not found"), "{html}");
     }
 
-    /// A program that is not there says so in one recognisable way, so a host can tell "not installed"
+    /// A program that is not there says so in one recognisable way, so a client can tell "not installed"
     /// (nobody working) from "did not answer" (nobody can say).
     #[test]
     fn a_program_that_is_not_installed_says_so() {
         let said = output("githoot-no-such-program-for-a-test", &["--version"]).unwrap_err();
-        assert!(host::not_installed(&said), "{said}");
-        assert!(!host::not_installed("connection reset by peer"));
+        assert!(clients::not_installed(&said), "{said}");
+        assert!(!clients::not_installed("connection reset by peer"));
     }
 
-    /// A worktree is recycled only when every host answered.
+    /// A worktree is recycled only when every client answered.
     #[test]
     fn no_worktree_is_recycled_while_a_host_did_not_answer() {
         assert_eq!(may_recycle("/w/pr-1-x", &[]), Ok(()));
@@ -1442,7 +1442,7 @@ mod tests {
     /// ones not written yet.
     #[test]
     fn it_needs_only_herdr_and_git_and_serves_every_portal() {
-        assert_eq!(required(&host::HerdrTui), ["herdr", "git"]);
+        assert_eq!(required(&clients::HerdrTui), ["herdr", "git"]);
         assert_eq!(Herdr.info().portals, &PortalKind::ALL);
         for (name, text) in prompts::DEFAULT_PROMPTS {
             assert!(!text.contains(" gh") && !text.contains("gh "), "{name} names a forge tool");

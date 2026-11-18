@@ -5,7 +5,7 @@
 //! integration adds below, such as the dispatcher's prompts.
 
 use super::{layout, settings_button, Place, Site};
-use crate::integration::Problem;
+use crate::agents::Problem;
 use crate::page::esc;
 
 /// One integration as the list shows it.
@@ -80,7 +80,7 @@ pub fn integrations_page(site: &Site, rows: &[IntegrationRow]) -> String {
          Each is off until you install it, and uninstalling one keeps its settings and files.</p>\n",
     );
     for row in rows {
-        let path = Place::Integration(crate::integration::find(row.id).map(|i| i.info().id).unwrap_or("")).path();
+        let path = Place::Integration(crate::agents::find(row.id).map(|i| i.info().id).unwrap_or("")).path();
         let flash = row.flash.as_deref().map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
         let switch = switch_form(token, row.id, row.switch, Some("list"));
         let alert = problems_alert(matches!(row.switch, Switch::Uninstall), &row.problems, "alert", &format!("/{}/{path}", esc(token)));

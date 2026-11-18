@@ -1,16 +1,16 @@
 //! Herdr in a terminal: the `herdr` server the TUI attaches to. What the dispatcher always drove.
 //!
 //! Herdr makes the worktree and a workspace for it in one step, and remembers it, which is why this
-//! host can reopen a worktree it still knows instead of recycling it. The agent starts in the
+//! client can reopen a worktree it still knows instead of recycling it. The agent starts in the
 //! workspace's first pane and is prompted once it is ready; see `hand_over` for why that takes care.
 
-use super::{Host, Launch, NewWorktree, Run};
-use crate::integration::herdr::{hand_over, json_string, Trouble};
+use super::{Client, Launch, NewWorktree, Run};
+use crate::agents::dispatch::{hand_over, json_string, Trouble};
 
 #[derive(Debug)]
 pub struct HerdrTui;
 
-impl Host for HerdrTui {
+impl Client for HerdrTui {
     fn id(&self) -> &'static str {
         "herdr"
     }

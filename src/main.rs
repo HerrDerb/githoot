@@ -9,7 +9,7 @@ mod autostart;
 mod config;
 mod dialog;
 mod icons;
-mod integration;
+mod agents;
 mod log;
 mod mute;
 mod overview;
@@ -582,7 +582,7 @@ fn main() {
     // The only thread that acts rather than reads. Always started, installed or not: it reads
     // config.txt on every pass, which is what lets Install on the Integrations tab take effect
     // without a restart. Prepares every integration first, which brings unedited prompts up to date.
-    integration::start(app_asset_path.clone());
+    agents::start(app_asset_path.clone());
 
     indicator.set_menu(&mut menu);
 
@@ -1606,7 +1606,7 @@ fn main() {
     // The only thread that acts rather than reads. Always started, installed or not: it reads
     // config.txt on every pass, which is what lets Install on the Integrations tab take effect
     // without a restart. Prepares every integration first, which brings unedited prompts up to date.
-    integration::start(app_asset_path.clone());
+    agents::start(app_asset_path.clone());
 
     let mut app = App {
         tray,

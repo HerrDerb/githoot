@@ -1089,7 +1089,7 @@ fn site_for<'a>(token: &'a str, nonce: &'a str) -> crate::ui::Site<'a> {
         installed: match SETTINGS.get() {
             Some(_) => {
                 let (cfg, _) = crate::config::Config::load(&settings_path());
-                crate::integration::all().iter().map(|i| i.info().id).filter(|id| cfg.integration_enabled(id)).collect()
+                crate::agents::all().iter().map(|i| i.info().id).filter(|id| cfg.integration_enabled(id)).collect()
             }
             None => Vec::new(),
         },
@@ -1194,19 +1194,19 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
             )
         }
         Place::Integrations => {
-            let rows: Vec<crate::ui::integrations::IntegrationRow> = crate::integration::all()
+            let rows: Vec<crate::ui::integrations::IntegrationRow> = crate::agents::all()
                 .iter()
                 .map(|i| {
                     let info = i.info();
                     let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
                     // Only asked while installed: spawning processes to draw a list is waste.
                     let missing = match (&cfg, installed && info.unsupported.is_none()) {
-                        (Some(c), true) => i.missing(&crate::integration::Context::new(&settings_path(), c, info.id)),
+                        (Some(c), true) => i.missing(&crate::agents::Context::new(&settings_path(), c, info.id)),
                         _ => Vec::new(),
                     };
                     // Asked installed or not, as its page does: before Install is when a wrong folder is cheapest to fix.
                     let problems = match (&cfg, info.unsupported) {
-                        (Some(c), None) => i.problems(&crate::integration::Context::new(&settings_path(), c, info.id)),
+                        (Some(c), None) => i.problems(&crate::agents::Context::new(&settings_path(), c, info.id)),
                         _ => Vec::new(),
                     };
                     let tone = crate::ui::integrations::status_tone(installed, info.unsupported, &missing, problems.len());
@@ -1217,7 +1217,7 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
                         status: crate::ui::integrations::integration_status(installed, info.unsupported, &missing, problems.len()),
                         tone,
                         switch: crate::ui::integrations::integration_switch(installed, info.unsupported),
-                        flash: crate::integration::take_flash(info.id),
+                        flash: crate::agents::take_flash(info.id),
                         problems,
                     }
                 })
@@ -1225,7 +1225,7 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
             crate::ui::integrations::integrations_page(&site, &rows)
         }
         Place::Integration(id) => {
-            let (Some(integration), Some(home)) = (crate::integration::find(id), settings_home()) else {
+            let (Some(integration), Some(home)) = (crate::agents::find(id), settings_home()) else {
                 return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
             };
             integration_page(&site, integration, &home, flash.as_ref())
@@ -1489,18 +1489,18 @@ fn sign_in(settings: &Settings, kind: crate::portal::PortalKind, asked: &crate::
 /// One integration's page: the header card, its declared settings as sections, and its own part.
 fn integration_page(
     site: &crate::ui::Site,
-    integration: &'static dyn crate::integration::Integration,
+    integration: &'static dyn crate::agents::Integration,
     home: &std::path::Path,
     flash: Option<&(usize, String)>,
 ) -> String {
     let cfg = crate::config::Config::load(home).0;
     let info = integration.info();
-    let ctx = crate::integration::Context::new(home, &cfg, info.id);
+    let ctx = crate::agents::Context::new(home, &cfg, info.id);
     let installed = cfg.integration_enabled(info.id);
     let missing = if installed && info.unsupported.is_none() { integration.missing(&ctx) } else { Vec::new() };
     let problems = integration.problems(&ctx);
-    let header_flash = crate::integration::take_flash(info.id);
-    let dry_run = crate::integration::last_dry_run(info.id);
+    let header_flash = crate::agents::take_flash(info.id);
+    let dry_run = crate::agents::last_dry_run(info.id);
     let place = crate::ui::Place::Integration(info.id);
     let value = |s: &crate::setting::Setting| ctx.setting(s.key).to_string();
     let view = crate::ui::integrations::IntegrationView {
@@ -1620,7 +1620,7 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
     if !origin_is_ours(request.origin.as_deref(), port) {
         return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
     }
-    let (Some(integration), Some(home)) = (crate::integration::find(id), settings_home()) else {
+    let (Some(integration), Some(home)) = (crate::agents::find(id), settings_home()) else {
         return respond(stream, 503, "text/plain; charset=utf-8", b"No settings directory", true);
     };
     let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
@@ -1641,7 +1641,7 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         };
         let line = crate::setting::from_form(&members, &form)
             .into_iter()
-            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, &value))
+            .try_for_each(|(key, value)| crate::agents::set(&home, integration, key, &value))
             .map(|()| "Saved. The next pass uses it.".to_string())
             .unwrap_or_else(|why| {
                 errorln!("{id}: {why}");
@@ -1655,7 +1655,7 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         // second source of truth for whether the thing is installed.
         "install" | "uninstall" => {
             infoln!("settings page asked to {action} {id}");
-            crate::integration::install(&home, integration, action == "install").map(|problems| {
+            crate::agents::install(&home, integration, action == "install").map(|problems| {
                 if action != "install" {
                     "Uninstalled. Nothing further will be done.".to_string()
                 } else if problems.is_empty() {
@@ -1669,12 +1669,12 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         // Runs a real pass with every effect suppressed, against the lists GitHoot already holds.
         "dryrun" => {
             infoln!("settings page asked for a {id} dry run");
-            crate::integration::dry_run_now(&home, integration);
+            crate::agents::dry_run_now(&home, integration);
             Ok("Dry run only. Nothing was done and nothing was recorded.".to_string())
         }
         other => {
             let cfg = crate::config::Config::load(&home).0;
-            let ctx = crate::integration::Context::new(&home, &cfg, id);
+            let ctx = crate::agents::Context::new(&home, &cfg, id);
             match integration.action(&ctx, other, &form) {
                 Some(outcome) => outcome,
                 None => return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
@@ -1685,7 +1685,7 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
         errorln!("{id}: {why}");
         format!("Failed: {why}")
     });
-    crate::integration::flash(integration, line);
+    crate::agents::flash(integration, line);
     redirect(stream, &after_integration_action(token, id, form.get("from").map(String::as_str)));
 }
 

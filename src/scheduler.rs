@@ -1062,7 +1062,7 @@ fn run_poll_loop(
             };
         }
         // After the lock is released: the integration runner reads these lists as soon as it wakes.
-        crate::integration::poll_published();
+        crate::agents::poll_published();
 
         // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
         // this cycle's responses, and taking them next to the code that produced them is what keeps a

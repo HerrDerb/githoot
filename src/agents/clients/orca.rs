@@ -16,8 +16,8 @@
 //!   * **The prompt is pasted once the agent is ready.** `terminal send --enter` pastes a whole
 //!     multi-line prompt into a recognised agent as one block and reports when its turn started.
 
-use super::{Host, Launch, NewWorktree, Run};
-use crate::integration::herdr::{json_string, Trouble};
+use super::{Client, Launch, NewWorktree, Run};
+use crate::agents::dispatch::{json_string, Trouble};
 
 #[derive(Debug)]
 pub struct Orca;
@@ -31,7 +31,7 @@ const ASKING: &[&str] = &["", "--permission-mode default", "--permission-mode ac
 const READY_WAIT_MS: &str = "120000";
 const SUBMIT_WAIT_S: &str = "30";
 
-impl Host for Orca {
+impl Client for Orca {
     fn id(&self) -> &'static str {
         "orca"
     }

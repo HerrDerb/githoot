@@ -12,13 +12,13 @@
 //!   * **`--no-parent`.** A GitHoot started from inside an app terminal would otherwise make every
 //!     agent that terminal's child, and close them all when it closes.
 
-use super::{Host, Launch, NewWorktree, Run};
-use crate::integration::herdr::{json_string, Trouble};
+use super::{Client, Launch, NewWorktree, Run};
+use crate::agents::dispatch::{json_string, Trouble};
 
 #[derive(Debug)]
 pub struct HerdrApp;
 
-impl Host for HerdrApp {
+impl Client for HerdrApp {
     fn id(&self) -> &'static str {
         "herdr-app"
     }
@@ -32,7 +32,7 @@ impl Host for HerdrApp {
         "https://herdr.dev"
     }
     /// Live terminals only, which is what `hc ls` lists without `--all`. A named one is a claim, as in
-    /// the terminal host, and so is an unnamed one reporting a status, under its address: only an agent
+    /// the terminal client, and so is an unnamed one reporting a status, under its address: only an agent
     /// reports one, so that is an agent you opened yourself, not a shell left behind.
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
         // No "not running" case: `hc` starts its core when none runs.
@@ -89,7 +89,7 @@ mod tests {
         Launch { slug: "pr-1-x", kind, prompt: "Review it", worktree: "/w/pr-1-x", place: "/w/pr-1-x" }
     }
 
-    /// Only a named terminal is a claim, as in the terminal host: an agent you opened yourself is not.
+    /// Only a named terminal is a claim, as in the terminal client: an agent you opened yourself is not.
     #[test]
     fn its_claims_are_its_named_terminals() {
         let (mut run, ran) = recorder(|_| {
