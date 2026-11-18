@@ -11,6 +11,9 @@
 //!     agent's first argument, not a message sent after it has started.
 //!   * **`--no-parent`.** A GitHoot started from inside an app terminal would otherwise make every
 //!     agent that terminal's child, and close them all when it closes.
+//!
+//! Claude is the only agent for now. Codex would need `--no-daemon` here, or its commands run outside
+//! `hc`, as the manual says; that comes back with Codex.
 
 use super::{Client, Launch, NewWorktree, Run};
 use crate::agents::dispatch::{json_string, Trouble};
@@ -30,6 +33,9 @@ impl Client for HerdrApp {
     }
     fn install_url(&self) -> &'static str {
         "https://herdr.dev"
+    }
+    fn note(&self) -> &'static str {
+        "Each agent opens as a space of its own in the Herdr app, the next time the app is open. Claude asks once per new worktree whether to trust it."
     }
     /// Live terminals only, which is what `hc ls` lists without `--all`. A named one is a claim, as in
     /// the terminal client, and so is an unnamed one reporting a status, under its address: only an agent
@@ -63,11 +69,7 @@ impl Client for HerdrApp {
     /// request fails instead of doubling up. `--keep` is what the app gives the terminals it adopts.
     fn start(&self, l: &Launch, run: &mut Run) -> Result<(), Trouble> {
         let space = format!("herdr.space=githoot-{}", l.slug);
-        let mut args = vec!["run", "--bg", "--json", "--no-parent", "--keep", "--name", l.slug, "--cwd", l.worktree, "--label", &space, "--", l.kind];
-        if l.kind == "codex" {
-            args.push("--no-daemon");
-        }
-        args.push(l.prompt);
+        let args = ["run", "--bg", "--json", "--no-parent", "--keep", "--name", l.slug, "--cwd", l.worktree, "--label", &space, "--", l.kind, l.prompt];
         run("hc", &args).map(|_| ()).map_err(|e| {
             Trouble::Passing(format!(
                 "the Herdr app would not start the agent: {e}. Start it yourself: \
@@ -139,14 +141,6 @@ mod tests {
             ran.borrow().as_slice(),
             ["hc run --bg --json --no-parent --keep --name pr-1-x --cwd /w/pr-1-x --label herdr.space=githoot-pr-1-x -- claude Review it"]
         );
-    }
-
-    /// The manual: "Codex must run with --no-daemon, or its commands execute outside hc."
-    #[test]
-    fn codex_runs_without_its_daemon() {
-        let (mut run, ran) = recorder(|_| Ok(String::new()));
-        HerdrApp.start(&launch("codex"), &mut run).unwrap();
-        assert!(ran.borrow()[0].ends_with("-- codex --no-daemon Review it"), "{:?}", ran.borrow());
     }
 
     /// The worktree is ready by now, so the line says how to finish by hand.

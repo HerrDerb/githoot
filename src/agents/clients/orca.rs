@@ -22,10 +22,11 @@ use crate::agents::dispatch::{json_string, Trouble};
 #[derive(Debug)]
 pub struct Orca;
 
-/// The agent arguments Orca may launch with that still ask before acting: none at all (its "Manual",
-/// so the agent's own settings decide), and the explicit ask and accept-edits modes. An allowlist,
+/// The agent arguments Orca may launch Claude with that still ask before acting: none at all (its
+/// "Manual", so Claude's own settings decide), and the explicit ask and accept-edits modes. Claude is
+/// the only agent for now; another one brings its own asking modes. An allowlist,
 /// not a list of the bypass flags, so a mode Orca adds later is refused until somebody looks at it.
-const ASKING: &[&str] = &["", "--permission-mode default", "--permission-mode acceptEdits", "-a on-request -s read-only -c approvals_reviewer=user"];
+const ASKING: &[&str] = &["", "--permission-mode default", "--permission-mode acceptEdits"];
 
 /// How long the agent has to come up before its prompt, and how long the prompt has to be taken up.
 const READY_WAIT_MS: &str = "120000";
@@ -43,6 +44,9 @@ impl Client for Orca {
     }
     fn install_url(&self) -> &'static str {
         "https://orca.dev"
+    }
+    fn note(&self) -> &'static str {
+        "Orca must be running, and its agent permissions set to Manual or Ask (Settings > Agents > Agent permissions). An agent Orca would let act without asking is closed before it gets the pull request."
     }
     /// Every agent Orca lists, by the worktree in its `worktreeId` (`<repo-id>::<path>`). A finished one
     /// stays listed while it sleeps, and still counts: its worktree is still somebody's. Orca not

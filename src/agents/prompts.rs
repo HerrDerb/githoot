@@ -1,6 +1,6 @@
 //! The dispatcher's prompts: what an agent is told, per bar.
 //!
-//! Four files you own, in `~/.githoot/integrations/herdr/prompts/`. They outlived the shipped
+//! Four files you own, in `~/.githoot/agents/prompts/`. They outlived the shipped
 //! scripts that used to read them, because nothing about a prompt was ever shell-specific, and they
 //! keep the promise `config.txt` makes: **a file you have edited is never rewritten.**
 //!
@@ -30,7 +30,7 @@ pub const DEFAULT_PROMPTS: [(&str, &str); 3] = [
 
 
 
-/// `home` is the integration's own directory, `~/.githoot/integrations/herdr/`, not a home directory.
+/// `home` is Agents' own directory, `~/.githoot/agents/`, not a home directory.
 fn prompts_dir(home: &Path) -> PathBuf {
     home.join("prompts")
 }

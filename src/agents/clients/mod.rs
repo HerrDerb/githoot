@@ -47,7 +47,7 @@ pub struct Launch<'a> {
 }
 
 pub trait Client: Sync + std::fmt::Debug {
-    /// The value `integration.herdr.client` holds for it.
+    /// The value `agentsClient` holds for it.
     fn id(&self) -> &'static str;
     /// How the log names it: "started pr-7-x in Herdr app".
     fn name(&self) -> &'static str;
@@ -55,6 +55,9 @@ pub trait Client: Sync + std::fmt::Debug {
     fn tool(&self) -> &'static str;
     /// Where to get that program, for the page when it is missing.
     fn install_url(&self) -> &'static str;
+    /// One sentence for its card on the Agents page: where an agent shows up, and anything it needs from
+    /// you that GitHoot cannot set for you.
+    fn note(&self) -> &'static str;
     /// Every live agent that has a name, as `(cwd, name)`. Empty when its program is not installed or
     /// its server is not running: nobody can be working there. `Err` when it is there and did not
     /// answer, because then nobody can say, and an empty list would read as "nobody home".

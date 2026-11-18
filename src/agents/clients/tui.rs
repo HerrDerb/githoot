@@ -23,6 +23,9 @@ impl Client for HerdrTui {
     fn install_url(&self) -> &'static str {
         "https://herdr.dev/docs/install/"
     }
+    fn note(&self) -> &'static str {
+        "Each agent opens as a workspace of its own in the Herdr you have running in a terminal."
+    }
     /// `server_not_running` is Herdr's own code for no server, part of its JSON error contract.
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
         match run("herdr", &["agent", "list"]) {

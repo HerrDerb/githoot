@@ -48,8 +48,6 @@ const KEY_IGNORE_AUTHORS: &str = "ignoreAuthors";
 /// used to name outright, so moving them into a list changes nobody's red bar.
 const DEFAULT_IGNORE_AUTHORS: [&str; 2] = ["app/dependabot", "app/renovate"];
 const KEY_LOCAL_API: &str = "localApi";
-/// Every integration's settings live under `integration.<id>.`, and only there. See `crate::integration`.
-const INTEGRATION_PREFIX: &str = "integration.";
 /// Every named portal's settings live under `portal.<name>.`. See [`Config::portals`].
 const PORTAL_PREFIX: &str = "portal.";
 
@@ -131,8 +129,9 @@ pub fn all_status_components() -> Vec<String> {
 /// now: the feature they named was removed in 2.0.0, so there is no replacement to point at and an
 /// old line is simply an unknown key, which `parse` has always ignored.
 ///
-/// The dispatcher's three keys, which moved under `integration.herdr.` when it became the first
-/// integration, are deliberately not here: a hard cut, documented in `docs/dispatcher.md`, and quiet.
+/// The dispatcher's keys are deliberately not here: `dispatcher*` (2.4.0, 3.0.0) and then
+/// `integration.herdr.*` were hard cuts, documented in `docs/agents.md`. Only a Herdr dispatcher that
+/// was switched on is said, see `OLD_DISPATCHER_SWITCH`.
 const RENAMED_KEYS: [(&str, &str); 1] = [("update_check", KEY_UPDATE_CHECK)];
 
 /// Whether [`Config::load`] found no `config.txt` and successfully wrote one.
@@ -230,14 +229,12 @@ pub struct Config {
     /// `endpoint.json` so a script can find the ephemeral port and this run's token. Off, the route
     /// answers 404 and nothing is written, which is exactly how the app behaved before it existed.
     pub local_api: bool,
-    /// Each integration's settings, by integration id and then by key: `integration.herdr.cloneRoot=x`
-    /// is `integrations["herdr"]["cloneRoot"] = "x"`.
+    /// The Agents settings, by their full flat key: `agents`, `agentsClient`, `agentsCloneRoot`, ...
     ///
-    /// Kept as text rather than typed here, because the keys belong to the integration and not to this
-    /// module: `config` must not grow a field every time an integration does. What may be *written* is
-    /// checked against what the integration declared, in `integration::set`.
-    pub integrations: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
-    /// Each named portal's settings, by name and then by key, read the way `integrations` is. A
+    /// Kept as text rather than typed here, because the keys belong to `crate::agents` and not to this
+    /// module. What may be *written* is checked against what it declared, in `agents::set`.
+    agents: std::collections::BTreeMap<String, String>,
+    /// Each named portal's settings, by name and then by key. A
     /// `BTreeMap` so the portals come out in name order: `parse` keeps no line order to offer.
     portal_sections: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
@@ -568,22 +565,36 @@ pub fn save_values(app_asset_path: &Path, pairs: &[(&str, String)]) -> Result<Ve
     Ok(changed.into_iter().map(|(key, _)| key).collect())
 }
 
-/// Writes one integration setting, `integration.<id>.<key>`, the same single-line edit every other
-/// setting gets, leaving every other byte of the file alone.
+/// Writes one Agents setting, the same single-line edit every other setting gets, leaving every other
+/// byte of the file alone.
 ///
-/// Only reached through `integration::set`, which has already checked the key is one the integration
-/// declared. The shape is checked again here anyway, because this is the function that writes a line
-/// into a file the user owns: an id or key outside `[A-Za-z]`, or a value with a line break, never
-/// reaches the file whoever the caller is.
-pub fn set_integration(app_asset_path: &Path, id: &str, key: &str, value: &str) -> Result<(), String> {
-    let letters = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic());
-    if !letters(id) || !letters(key) || value.contains(['\n', '\r']) {
-        return Err(format!("refused to write integration setting {id:?}.{key:?}"));
+/// Only reached through `agents::set`, which has already checked the key is one it declared. The shape
+/// is checked again here anyway, because this is the function that writes a line into a file the user
+/// owns: a key that is not `agents` followed by letters, or a value with a line break, never reaches
+/// the file whoever the caller is.
+pub fn set_agents(app_asset_path: &Path, key: &str, value: &str) -> Result<(), String> {
+    if !is_agents_key(key) || !key.chars().all(|c| c.is_ascii_alphabetic()) || value.contains(['\n', '\r']) {
+        return Err(format!("refused to write agents setting {key:?}"));
     }
     let path = config_path(app_asset_path);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = with_value_set(&content, &format!("{INTEGRATION_PREFIX}{id}.{key}"), value);
+    let updated = with_value_set(&content, key, value);
     std::fs::write(&path, updated).map_err(|e| format!("could not write {} ({e})", path.display()))
+}
+
+/// Whether `key` is one of Agents': `agents` itself, or `agents` followed by a capitalised word.
+/// `agentsfoo` and `agents.x` are not.
+fn is_agents_key(key: &str) -> bool {
+    match key.strip_prefix(crate::agents::KEY_PREFIX) {
+        Some("") => true,
+        Some(rest) => rest.starts_with(|c: char| c.is_ascii_uppercase()),
+        None => false,
+    }
+}
+
+/// Every `agents*` line, by its full key.
+fn agents_keys(values: &std::collections::HashMap<&str, &str>) -> std::collections::BTreeMap<String, String> {
+    values.iter().filter(|(k, _)| is_agents_key(k)).map(|(k, v)| (k.to_string(), v.trim().to_string())).collect()
 }
 
 /// Reads the file, replaces one value, writes it back.
@@ -729,20 +740,20 @@ impl Config {
             // puts this run's token on disk. `is_on` rather than `!is_off`, which would read a
             // *missing* key as on and open the door on every install that never asked.
             local_api: values.get(KEY_LOCAL_API).is_some_and(|v| is_on(v)),
-            integrations: sections(values, INTEGRATION_PREFIX),
+            agents: agents_keys(values),
             portal_sections: sections(values, PORTAL_PREFIX),
         }
     }
 
-    /// Whether `integration.<id>.enabled` is on. Default **off**, for the reason `localApi` is: an
-    /// integration acts rather than shows, so a missing key or a typo must leave it off.
-    pub fn integration_enabled(&self, id: &str) -> bool {
-        self.integrations.get(id).and_then(|m| m.get("enabled")).is_some_and(|v| is_on(v))
+    /// Whether Agents is switched on (`agents=on`). Default **off**, for the reason `localApi` is: it
+    /// acts rather than shows, so a missing key or a typo must leave it off.
+    pub fn agents_enabled(&self) -> bool {
+        self.agents.get(crate::agents::SWITCH_KEY).is_some_and(|v| is_on(v))
     }
 
-    /// Every `integration.<id>.*` value, keyed without the prefix. Empty for an id the file never names.
-    pub fn integration_settings(&self, id: &str) -> std::collections::BTreeMap<String, String> {
-        self.integrations.get(id).cloned().unwrap_or_default()
+    /// Every `agents*` value, by its full key.
+    pub fn agents_settings(&self) -> std::collections::BTreeMap<String, String> {
+        self.agents.clone()
     }
 
     /// The mapping `load` does, from text, for tests elsewhere in the crate that need a `Config`
@@ -1003,39 +1014,41 @@ fn default_config() -> String {
          # token, so a script can find the address. Off, nothing is written and the route answers\n\
          # 404. Restart to apply.\n\
          {KEY_LOCAL_API}=off\n"
-    ) + &integrations_section()
+    ) + &agents_section()
 }
 
-/// The integrations part of a fresh `config.txt`, one block per integration, from what each declares.
+/// The Agents part of a fresh `config.txt`, from what it declares: its switch, off, then each setting
+/// at its default.
 ///
-/// Generated rather than written out, so a new integration's keys appear in a fresh file the day it
-/// ships, and a key the integration no longer declares cannot linger in the template.
-fn integrations_section() -> String {
-    let mut out = String::from(
+/// Generated rather than written out, so a new setting appears in a fresh file the day it ships, and
+/// one no longer declared cannot linger in the template.
+fn agents_section() -> String {
+    let mut out = format!(
         "\n\
-         # Integrations: what GitHoot may do with the pull requests it finds, beyond showing them.\n\
-         # Each is off until you install it on the settings page's Integrations tab, which writes\n\
-         # the enabled line below. Like localApi, a typo leaves it off. Changes here take effect\n\
-         # within one pass, no restart. See docs/integrations.md.\n",
+         # {}: {} Creates branches and worktrees and starts\n\
+         # agents, so it is off until you switch it on, on the settings page's Agents tab or here. Like\n\
+         # localApi, a typo leaves it off. Changes take effect within one pass, no restart. See\n\
+         # docs/agents.md.\n\
+         {}=off\n",
+        crate::agents::NAME,
+        crate::agents::SUMMARY,
+        crate::agents::SWITCH_KEY
     );
-    for integration in crate::agents::all() {
-        let info = integration.info();
-        out.push_str(&format!("\n# {}: {}\n{INTEGRATION_PREFIX}{}.enabled=off\n", info.name, info.summary, info.id));
-        for setting in info.settings {
-            // A flag is written at its default, so the file says which way each one stands. A text
-            // setting is written empty, which means its default.
-            let value = match setting.kind {
-                crate::agents::Kind::Flag { default_on: true } => "on",
-                crate::agents::Kind::Flag { default_on: false } => "off",
-                _ => "",
-            };
-            out.push_str(&format!("# {}\n{INTEGRATION_PREFIX}{}.{}={value}\n", setting.help, info.id, setting.key));
-        }
+    for setting in crate::agents::dispatch::SETTINGS {
+        // A flag is written at its default, so the file says which way each one stands. A radio is
+        // written at its first option, its default. A text setting is written empty, its default.
+        let value = match setting.kind {
+            crate::agents::Kind::Flag { default_on: true } => "on",
+            crate::agents::Kind::Flag { default_on: false } => "off",
+            crate::agents::Kind::Choice { options } => options.first().map_or("", |(v, _)| *v),
+            _ => "",
+        };
+        out.push_str(&format!("# {}\n{}={value}\n", setting.help, setting.key));
     }
     out
 }
 
-/// Every `integration.<id>.<key>` line, grouped by id. A line with no key after the id is ignored,
+/// Every `<prefix><name>.<key>` line, grouped by name. A line with no key after the name is ignored,
 /// as an unknown key always has been.
 fn sections(
     values: &std::collections::HashMap<&str, &str>,
@@ -1083,7 +1096,7 @@ fn write_default_if_absent(path: &Path) -> FirstRun {
 /// The old key genuinely has no effect. Without this the only symptom would be a feature quietly
 /// behaving differently after an upgrade, which is the kind of thing people spend an hour on.
 ///
-/// Once per key per run. `load` is called on every integration pass, and a line repeated every thirty
+/// Once per key per run. `load` is called on every Agents pass, and a line repeated every thirty
 /// seconds would bury the log it is meant to be read in.
 fn warn_about_renamed_keys(values: &std::collections::HashMap<&str, &str>) {
     static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -1099,12 +1112,24 @@ fn warn_about_renamed_keys(values: &std::collections::HashMap<&str, &str>) {
 /// What `warn_about_renamed_keys` would say, with no logging. An old line with nothing in it is not
 /// worth a word.
 fn renamed_key_warnings(values: &std::collections::HashMap<&str, &str>) -> Vec<String> {
-    RENAMED_KEYS
+    let mut said: Vec<String> = RENAMED_KEYS
         .iter()
         .filter(|(old, _)| values.get(old).is_some_and(|v| !v.trim().is_empty()))
         .map(|(old, new)| format!("{CONFIG_FILE} uses \"{old}\", which is no longer read. Rename it to \"{new}\"."))
-        .collect()
+        .collect();
+    // The Herdr dispatcher became Agents, a hard cut: none of its keys are read. Only a dispatcher that
+    // was switched on is worth a word, because only that one stopped doing something.
+    if values.get(OLD_DISPATCHER_SWITCH).is_some_and(|v| is_on(v)) {
+        said.push(format!(
+            "{CONFIG_FILE} switches on the Herdr dispatcher (\"{OLD_DISPATCHER_SWITCH}=on\"), which is no longer read. It is \
+             Agents now: switch it on under Agents on the settings page, and set its folders again."
+        ));
+    }
+    said
 }
+
+/// The switch the Herdr dispatcher had before it became Agents. Read only to say it is not read.
+const OLD_DISPATCHER_SWITCH: &str = "integration.herdr.enabled";
 
 /// Whether a value reads as "off".
 ///
@@ -1220,7 +1245,7 @@ mod tests {
         let mut writable: Vec<&str> = declared().map(|s| s.key).collect();
         let text = default_config();
         let mut generated: Vec<&str> =
-            parse(&text).keys().copied().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).collect();
+            parse(&text).keys().copied().filter(|k| !is_agents_key(k)).collect();
         writable.sort_unstable();
         generated.sort_unstable();
         assert_eq!(writable, generated);
@@ -1228,7 +1253,7 @@ mod tests {
 
     /// `live` means "takes effect without a restart", which is what the settings page tells the
     /// user. Everything else here binds at startup, and saying otherwise on the page would be a
-    /// broken promise, not a typo. Integration settings are not in this list at all: they are
+    /// broken promise, not a typo. Agents settings are not in this list at all: they are
     /// written from their own page, and every one of them is live.
     #[test]
     fn exactly_the_settings_that_need_no_restart_are_live() {
@@ -1382,8 +1407,8 @@ mod tests {
             assert_eq!(values.get(rule), Some(&"on"), "{rule}: every green-bar rule ships on");
         }
         // And nothing else, so a key added to the template without being read is caught. The
-        // integration keys are held to the registry by their own test below.
-        let own = values.keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).count();
+        // Agents keys are held to what it declares by their own test below.
+        let own = values.keys().filter(|k| !is_agents_key(k)).count();
         assert_eq!(own, 18, "unexpected keys in the template: {values:?}");
     }
 
@@ -1451,7 +1476,7 @@ mod tests {
             KEY_LOCAL_API,
         ];
         let text = default_config();
-        for key in parse(&text).keys().filter(|k| !k.starts_with(INTEGRATION_PREFIX)) {
+        for key in parse(&text).keys().filter(|k| !is_agents_key(k)) {
             assert!(known.contains(key), "{key:?} is written but never read");
         }
     }
@@ -1558,7 +1583,7 @@ mod tests {
         declared.dedup();
         assert_eq!(declared.len(), before, "a key declared twice");
         let text = default_config();
-        let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| !k.starts_with(INTEGRATION_PREFIX)).collect();
+        let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| !is_agents_key(k)).collect();
         written.sort_unstable();
         assert_eq!(declared, written);
     }
@@ -1604,75 +1629,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── Integrations ────────────────────────────────────────────────────────
+    // ── Agents ──────────────────────────────────────────────────────────────
 
-    /// A fresh file names every integration's switch, off, and every setting it declares, empty, and
-    /// nothing an integration does not declare.
+    /// A fresh file names the Agents switch, off, and every setting it declares at its default, and
+    /// nothing it does not declare.
     #[test]
-    fn the_template_carries_exactly_what_the_integrations_declare() {
+    fn the_template_carries_exactly_what_agents_declares() {
         let text = default_config();
-        let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| k.starts_with(INTEGRATION_PREFIX)).collect();
-        let mut declared: Vec<String> = Vec::new();
-        for integration in crate::agents::all() {
-            let info = integration.info();
-            declared.push(format!("{INTEGRATION_PREFIX}{}.enabled", info.id));
-            declared.extend(info.settings.iter().map(|s| format!("{INTEGRATION_PREFIX}{}.{}", info.id, s.key)));
-        }
+        let mut written: Vec<&str> = parse(&text).keys().copied().filter(|k| is_agents_key(k)).collect();
+        let mut declared: Vec<&str> = std::iter::once(crate::agents::SWITCH_KEY).chain(crate::agents::dispatch::SETTINGS.iter().map(|s| s.key)).collect();
         written.sort_unstable();
         declared.sort_unstable();
         assert_eq!(written, declared);
         let values = parse(&text);
-        assert_eq!(values.get("integration.herdr.enabled"), Some(&"off"));
-        // A flag is written at its default, so the file says which way each one stands.
-        assert_eq!(values.get("integration.herdr.approved"), Some(&"off"));
-        assert_eq!(values.get("integration.herdr.workRequired"), Some(&"on"));
-        assert_eq!(values.get("integration.herdr.cloneRoot"), Some(&""));
-        assert!(!from(&text).integration_enabled("herdr"), "installed by nobody means not installed");
+        assert_eq!(values.get("agents"), Some(&"off"));
+        // A flag is written at its default, a radio at its first option, so the file says which way
+        // each one stands.
+        assert_eq!(values.get("agentsApproved"), Some(&"off"));
+        assert_eq!(values.get("agentsWorkRequired"), Some(&"on"));
+        assert_eq!(values.get("agentsClient"), Some(&"herdr"));
+        assert_eq!(values.get("agentsKind"), Some(&"claude"));
+        assert_eq!(values.get("agentsCloneRoot"), Some(&""));
+        assert!(!from(&text).agents_enabled(), "switched on by nobody means off");
+        assert!(!text.contains("integration."), "the old namespace is gone from a fresh file");
     }
 
     #[test]
-    fn integration_keys_reach_their_integration() {
-        let cfg = from("integration.herdr.enabled=on\nintegration.herdr.cloneRoot= /src \nintegration.other.x=1\n");
-        assert!(cfg.integration_enabled("herdr"));
-        assert_eq!(cfg.integration_settings("herdr").get("cloneRoot").map(String::as_str), Some("/src"));
-        assert!(!cfg.integration_enabled("other"));
-        assert!(cfg.integration_settings("nope").is_empty());
+    fn agents_keys_reach_agents_and_nothing_else_does() {
+        let cfg = from("agents=on\nagentsCloneRoot= /src \nagentsfoo=1\nagents.x=1\nlocalApi=on\n");
+        assert!(cfg.agents_enabled());
+        let settings = cfg.agents_settings();
+        assert_eq!(settings.get("agentsCloneRoot").map(String::as_str), Some("/src"));
+        assert_eq!(settings.keys().map(String::as_str).collect::<Vec<_>>(), ["agents", "agentsCloneRoot"]);
         // A typo leaves it off, as it does localApi.
-        assert!(!from("integration.herdr.enabled=onn\n").integration_enabled("herdr"));
-        assert!(!from("integration.herdr=on\n").integration_enabled("herdr"));
+        assert!(!from("agents=onn\n").agents_enabled());
+        assert!(!from("").agents_enabled());
     }
 
-    /// 2.4.0 and 3.0.0 shipped `dispatcher=on`. It starts nothing.
+    /// The Herdr dispatcher became Agents in a hard cut: its keys switch nothing on and set nothing,
+    /// and neither do the 2.4.0 and 3.0.0 keys before them.
     #[test]
-    fn the_old_dispatcher_keys_install_nothing() {
-        let cfg = from("dispatcher=on\ndispatcherCloneRoot=/src\n");
-        assert!(!cfg.integration_enabled("herdr"));
-        assert!(cfg.integration_settings("herdr").is_empty());
+    fn the_old_dispatcher_keys_switch_nothing_on() {
+        let cfg = from("integration.herdr.enabled=on\nintegration.herdr.cloneRoot=/src\ndispatcher=on\ndispatcherCloneRoot=/src\n");
+        assert!(!cfg.agents_enabled());
+        assert!(cfg.agents_settings().is_empty());
     }
 
     #[test]
-    fn an_integration_setting_is_one_line_edit_and_nothing_else() {
-        let dir = std::env::temp_dir().join(format!("githoot-config-integration-{}", std::process::id()));
+    fn an_agents_setting_is_one_line_edit_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("githoot-config-agents-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(config_path(&dir), "# mine\nsound=off\n").unwrap();
-        set_integration(&dir, "herdr", "enabled", "on").unwrap();
-        set_integration(&dir, "herdr", "cloneRoot", "/src").unwrap();
+        set_agents(&dir, "agents", "on").unwrap();
+        set_agents(&dir, "agentsCloneRoot", "/src").unwrap();
         let text = std::fs::read_to_string(config_path(&dir)).unwrap();
         assert!(text.starts_with("# mine\nsound=off\n"), "got {text:?}");
-        assert!(from(&text).integration_enabled("herdr"));
-        assert!(set_integration(&dir, "herdr", "x\ny", "on").is_err());
-        assert!(set_integration(&dir, "../h", "enabled", "on").is_err());
-        assert!(set_integration(&dir, "herdr", "cloneRoot", "a\nlocalApi=on").is_err());
+        assert!(from(&text).agents_enabled());
+        assert!(set_agents(&dir, "agents\nlocalApi", "on").is_err());
+        assert!(set_agents(&dir, "localApi", "on").is_err(), "not an agents key");
+        assert!(set_agents(&dir, "agents.x", "on").is_err());
+        assert!(set_agents(&dir, "agentsCloneRoot", "a\nlocalApi=on").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── Renamed keys ────────────────────────────────────────────────────────
 
-    /// The dispatcher's old keys are a hard cut, and a quiet one: not read, and not warned about.
+    /// The dispatcher's old keys are a hard cut, and a quiet one: not read, and not warned about, with
+    /// one exception. A Herdr dispatcher that was switched on stopped doing something, so that one
+    /// line says where it went. Switched off, or any of its other keys, is not worth a word.
     #[test]
-    fn the_old_dispatcher_keys_are_not_warned_about() {
-        let text = "dispatcher=on\ndispatcherCloneRoot=/src\ndispatcherWorktreeRoot=/wt\n";
+    fn of_the_old_dispatcher_keys_only_a_switched_on_one_is_warned_about() {
+        let text = "dispatcher=on\ndispatcherCloneRoot=/src\ndispatcherWorktreeRoot=/wt\nintegration.herdr.enabled=off\nintegration.herdr.cloneRoot=/x\n";
         assert!(renamed_key_warnings(&parse(text)).is_empty());
+        let warned = renamed_key_warnings(&parse("integration.herdr.enabled=on\n"));
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("integration.herdr.enabled=on") && warned[0].contains("Agents"), "{warned:?}");
     }
 
     /// `update_check=off` is the case the list exists for: a switched-off updater switching back on.

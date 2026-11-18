@@ -1,41 +1,25 @@
-//! Integrations: what GitHoot may do with the pull requests it has found, beyond showing them.
+//! Agents: GitHoot starting a coding agent for each pull request that needs you, on a branch of its own.
 //!
-//! [`crate::portal`] is where pull requests come from. This is where they can go. Today there is
-//! one integration, the Herdr dispatcher, and this module exists so that is a fact about the
-//! contents of the directory and not about the shape of the program: the core (`config`, `page`,
-//! `serve`, `main`) knows a list of integrations and the [`Integration`] trait below, and nothing
-//! about any one of them. A second integration is a new directory beside `herdr`, not a set of edits
-//! across the crate.
+//! [`crate::portal`] is where pull requests come from; this is the one place GitHoot does something
+//! with them beyond showing them. It creates branches and worktrees and starts agents, so it is off
+//! until you switch it on (`agents=on`), and a typo leaves it off, as `localApi` does.
 //!
-//! ## Installed means switched on
+//! It used to be "the Herdr dispatcher", an integration behind a seam meant for more of them. There
+//! never was a second integration, and where the agent opens became the choice instead: a client, in
+//! [`clients`]. So it is part of GitHoot now, with its own page and flat `agents*` keys, and the seam
+//! is gone. The move was a hard cut: nothing reads `integration.herdr.*` or its old folder.
 //!
-//! Every integration ships inside the binary. Installing one writes `integration.<id>.enabled=on`
-//! to `config.txt`, and uninstalling it writes `off`; its prompts, state and settings stay on disk, so
-//! installing it again picks up where it left off. There is no plugin loading, deliberately: the
-//! dispatcher moved *into* the process in 2.4.0 because an external program was the problem (a
-//! console window on Windows, a script host antivirus flags, bash and PowerShell drifting apart).
-//! Scripts of your own already have the local API.
-//!
-//! ## What the seam carries
-//!
-//! - **Pull requests, already judged.** An integration never polls a forge. It gets the lists the
-//!   icon and the pages use, per bar, with muted pull requests taken out and only from the portal
-//!   kinds it says it understands. The Herdr dispatcher shells out to `gh`, so it declares GitHub,
-//!   and a GitLab pull request never reaches it.
+//! - **Pull requests, already judged.** It never polls a forge. It gets the lists the icon and the
+//!   pages use, per bar, with muted pull requests taken out ([`batches`]).
 //! - **One runner, off the poll thread.** Woken each time a poll publishes, and every thirty seconds
-//!   regardless, so a slow `git fetch` never holds up the icon, and turning an integration on takes
-//!   effect within one pass without a restart.
-//! - **Its own corner of the disk and of `config.txt`.** `~/.githoot/integrations/<id>/` for state,
-//!   `integration.<id>.*` for settings. Only keys it declares can be written from the page.
-//! - **Its own page.** The Integrations tab lists them; each has a page with the generic part (on or
-//!   off, what it is missing, its settings, a dry run) and whatever it adds below.
+//!   regardless, so a slow `git fetch` never holds up the icon, and switching it on takes effect within
+//!   one pass without a restart.
+//! - **Its own corner of the disk and of `config.txt`.** `~/.githoot/agents/` for state and prompts,
+//!   `agents*` for settings. Only keys it declares can be written from the page.
 
 pub mod clients;
 pub mod dispatch;
 pub mod prompts;
-
-#[cfg(test)]
-mod fake;
 
 use crate::config::Config;
 use crate::portal::types::PrEntry;
@@ -45,40 +29,39 @@ use crate::state::PrAxis;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// An integration declares its settings, beyond `enabled`, in the app-wide shape. Every one of them
-/// is live: the runner reads `config.txt` fresh on each pass, so the page never says "restart".
+/// Its settings, beyond the switch, are declared in the app-wide shape. Every one is live: the runner
+/// reads `config.txt` fresh on each pass, so the page never says "restart".
 pub use crate::setting::{Kind, Setting};
 
-/// What the rest of the app needs to know about an integration without running it.
-pub struct Info {
-    /// The config namespace, the URL segment and the directory name. Lowercase ASCII letters only,
-    /// asserted by a test, because it is all three.
-    pub id: &'static str,
-    /// "Herdr dispatcher". What the tab and the page call it.
-    pub name: &'static str,
-    /// One plain sentence for the list and for `config.txt`.
-    pub summary: &'static str,
-    /// The portal kinds whose pull requests it can act on. Everything else is filtered out before
-    /// it is called.
-    pub portals: &'static [PortalKind],
-    pub settings: &'static [Setting],
-    /// `Some(reason)` where this build cannot run it. The page says the reason and offers no Install.
-    pub unsupported: Option<&'static str>,
-}
+/// What the sidebar, the page and `config.txt` call it.
+pub const NAME: &str = "Agents";
+/// One plain sentence for the page and for `config.txt`.
+pub const SUMMARY: &str = "Starts an agent for each pull request that needs you, on a branch of its own.";
+/// The switch: `agents=on`. Default off, for the reason `localApi` is: this acts rather than shows.
+pub const SWITCH_KEY: &str = "agents";
+/// Every key it owns starts with this, the switch included.
+pub const KEY_PREFIX: &str = "agents";
+/// Every portal, including ones not written yet: nothing in it names a forge. The bars come from
+/// GitHoot, the checkout from the portal's head ref and git, and the agent reads the pull request with
+/// whatever tool fits its URL.
+pub const PORTALS: &[PortalKind] = &PortalKind::ALL;
+/// `Some(reason)` where this build cannot run it. The page says the reason and offers no switch.
+pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") { Some("Agents need Linux or Windows.") } else { None };
 
-/// Where an integration keeps its files, and the settings it declared, read fresh for this pass.
+/// Where it keeps its files, and its settings, read fresh for this pass.
 pub struct Context {
-    /// `~/.githoot/integrations/<id>/`. Not created until something writes into it.
+    /// `~/.githoot/agents/`. Not created until something writes into it.
     pub dir: PathBuf,
     settings: BTreeMap<String, String>,
 }
 
 impl Context {
-    pub fn new(app_asset_path: &Path, cfg: &Config, id: &str) -> Self {
-        Context { dir: app_asset_path.join("integrations").join(id), settings: cfg.integration_settings(id) }
+    pub fn new(app_asset_path: &Path, cfg: &Config) -> Self {
+        Context { dir: app_asset_path.join("agents"), settings: cfg.agents_settings() }
     }
 
-    /// A declared setting, trimmed. Empty when it is not set, which each setting defines a meaning for.
+    /// A declared setting by its full key (`agentsClient`), trimmed. Empty when it is not set, which
+    /// each setting defines a meaning for.
     pub fn setting(&self, key: &str) -> &str {
         self.settings.get(key).map(|v| v.trim()).unwrap_or("")
     }
@@ -89,7 +72,7 @@ impl Context {
     }
 }
 
-/// One bar's pull requests, as an integration receives them.
+/// One bar's pull requests, as a pass receives them.
 pub struct Batch {
     pub axis: PrAxis,
     pub entries: Vec<PrEntry>,
@@ -120,64 +103,16 @@ pub struct Said {
     pub setup: Vec<String>,
 }
 
-pub trait Integration: Send + Sync {
-    fn info(&self) -> &'static Info;
-
-    /// Once at startup, installed or not: bring shipped files such as default prompts up to date.
-    fn prepare(&self, _ctx: &Context) {}
-
-    /// Install or Uninstall was pressed. Called after `config.txt` says so.
-    fn installed(&self, _ctx: &Context, _on: bool) {}
-
-    /// One of its settings was written from the page, with the value it now has. Saving the form
-    /// writes every setting on it, so this is called for values that did not change as well.
-    fn setting_changed(&self, _ctx: &Context, _key: &str, _value: &str) {}
-
-    /// Tools it needs that will not run. Empty when it has everything.
-    fn missing(&self, _ctx: &Context) -> Vec<&'static str> {
-        Vec::new()
-    }
-
-    /// What is wrong with its settings on this machine, before any pull request comes along: a folder
-    /// that is not there, say. Shown on its page and by Install, and logged once by the runner.
-    fn problems(&self, _ctx: &Context) -> Vec<Problem> {
-        Vec::new()
-    }
-
-    /// One pass over the bars. `dry_run` touches nothing, state files included, and says what it would do.
-    fn pass(&self, ctx: &Context, batches: &[Batch], dry_run: bool) -> Said;
-
-    /// HTML for its page, below the generic card. Everything interpolated must go through `page::esc`.
-    fn page(&self, _ctx: &Context, _token: &str) -> String {
-        String::new()
-    }
-
-    /// A form it rendered in [`Integration::page`] was posted. `None` for an action it does not know,
-    /// which the server answers with 400. `Ok` carries the line the page shows afterwards.
-    fn action(&self, _ctx: &Context, _action: &str, _form: &crate::serve::Form) -> Option<Result<String, String>> {
-        None
-    }
+/// Whether it is switched on and can run here.
+pub fn enabled(cfg: &Config) -> bool {
+    UNSUPPORTED.is_none() && cfg.agents_enabled()
 }
 
-/// Every integration this build knows, installed or not, in the order the tab lists them.
-pub fn all() -> &'static [&'static dyn Integration] {
-    &[&dispatch::Herdr]
-}
-
-pub fn find(id: &str) -> Option<&'static dyn Integration> {
-    all().iter().copied().find(|i| i.info().id == id)
-}
-
-/// Whether `id` is installed and can run here.
-pub fn enabled(cfg: &Config, integration: &dyn Integration) -> bool {
-    integration.info().unsupported.is_none() && cfg.integration_enabled(integration.info().id)
-}
-
-/// The bars as `info` may see them: only portals it declared, only confirmed lists, no muted entries.
+/// The bars as a pass may see them: only `portals`, only confirmed lists, no muted entries.
 ///
-/// Pure, so the two filters that keep an integration from acting on something it must not are
-/// tested rather than trusted.
-pub fn batches(info: &Info, snapshots: &[(PrAxis, AxisSnapshot)], is_muted: &dyn Fn(&str) -> bool) -> Vec<Batch> {
+/// Pure, so the two filters that keep it from acting on something it must not are tested rather than
+/// trusted.
+pub fn batches(portals: &[PortalKind], snapshots: &[(PrAxis, AxisSnapshot)], is_muted: &dyn Fn(&str) -> bool) -> Vec<Batch> {
     snapshots
         .iter()
         .map(|(axis, snapshot)| {
@@ -185,7 +120,7 @@ pub fn batches(info: &Info, snapshots: &[(PrAxis, AxisSnapshot)], is_muted: &dyn
             let lists: Vec<&Vec<PrEntry>> = snapshot
                 .groups
                 .iter()
-                .filter(|(portal, _)| info.portals.contains(&portal.kind))
+                .filter(|(portal, _)| portals.contains(&portal.kind))
                 .filter_map(|(_, list)| list.as_ref())
                 .collect();
             batch.confirmed = !lists.is_empty();
@@ -201,48 +136,47 @@ pub fn batches(info: &Info, snapshots: &[(PrAxis, AxisSnapshot)], is_muted: &dyn
         .collect()
 }
 
-/// Whether the page may write `key` for `integration`: `enabled`, or one of the settings it declared,
-/// with a value that stays on one line.
-fn check_setting(integration: &dyn Integration, key: &str, value: &str) -> Result<(), String> {
-    let info = integration.info();
-    if key == "enabled" {
-        return if matches!(value, "on" | "off") { Ok(()) } else { Err(format!("{}: enabled is on or off, not {value:?}", info.id)) };
+/// Whether the page may write `key`: the switch, or one of the settings it declared, with a value
+/// that stays on one line.
+fn check_setting(key: &str, value: &str) -> Result<(), String> {
+    if key == SWITCH_KEY {
+        return if matches!(value, "on" | "off") { Ok(()) } else { Err(format!("{SWITCH_KEY} is on or off, not {value:?}")) };
     }
-    let setting = info.settings.iter().find(|s| s.key == key).ok_or_else(|| format!("{} has no setting {key:?}", info.id))?;
-    crate::setting::check(setting, value).map_err(|e| format!("{}: {e}", info.id))
+    let setting = dispatch::SETTINGS.iter().find(|s| s.key == key).ok_or_else(|| format!("{key:?} is not an agents setting"))?;
+    crate::setting::check(setting, value)
 }
 
-/// Writes one of an integration's settings, the same single-line edit every other setting gets.
-pub fn set(app_asset_path: &Path, integration: &dyn Integration, key: &str, value: &str) -> Result<(), String> {
-    check_setting(integration, key, value)?;
-    crate::config::set_integration(app_asset_path, integration.info().id, key, value.trim())?;
-    if key != "enabled" {
+/// Writes one of its settings, the same single-line edit every other setting gets.
+pub fn set(app_asset_path: &Path, key: &str, value: &str) -> Result<(), String> {
+    check_setting(key, value)?;
+    crate::config::set_agents(app_asset_path, key, value.trim())?;
+    if key != SWITCH_KEY {
         let cfg = Config::load(app_asset_path).0;
-        integration.setting_changed(&Context::new(app_asset_path, &cfg, integration.info().id), key, value.trim());
+        dispatch::setting_changed(&Context::new(app_asset_path, &cfg), key, value.trim());
     }
     Ok(())
 }
 
-/// Install or uninstall. Refused where the build cannot run it, so the page cannot switch on something
+/// Switch on or off. Refused where the build cannot run it, so the page cannot switch on something
 /// that would sit there doing nothing.
 ///
-/// Answers with what is wrong with its settings as they stand, so Install can say so at once rather
-/// than leaving it to a log line the first time a pull request arrives. Installed regardless: the
-/// settings are on the same page, and fixing them takes effect on the next pass.
-pub fn install(app_asset_path: &Path, integration: &dyn Integration, on: bool) -> Result<Vec<Problem>, String> {
-    if let (true, Some(why)) = (on, integration.info().unsupported) {
+/// Answers with what is wrong with its settings as they stand, so switching on can say so at once
+/// rather than leaving it to a log line the first time a pull request arrives. Switched on regardless:
+/// the settings are on the same page, and fixing them takes effect on the next pass.
+pub fn switch(app_asset_path: &Path, on: bool) -> Result<Vec<Problem>, String> {
+    if let (true, Some(why)) = (on, UNSUPPORTED) {
         return Err(why.to_string());
     }
-    set(app_asset_path, integration, "enabled", if on { "on" } else { "off" })?;
+    set(app_asset_path, SWITCH_KEY, if on { "on" } else { "off" })?;
     let cfg = Config::load(app_asset_path).0;
-    let ctx = Context::new(app_asset_path, &cfg, integration.info().id);
-    integration.installed(&ctx, on);
-    Ok(if on { integration.problems(&ctx) } else { Vec::new() })
+    let ctx = Context::new(app_asset_path, &cfg);
+    dispatch::switched(&ctx, on);
+    Ok(if on { dispatch::problems(&ctx) } else { Vec::new() })
 }
 
 // ── The runner ───────────────────────────────────────────────────────────────
 
-/// The longest the runner sleeps without a poll to wake it. Also how soon an Install takes effect
+/// The longest the runner sleeps without a poll to wake it. Also how soon switching on takes effect
 /// when no poll happens to come first.
 const EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -270,132 +204,122 @@ fn wait_for_poll() {
     let _ = wake.wait_timeout_while(guard, EVERY, |n| *n == seen);
 }
 
-/// What the last dry run of each integration said, for its page.
-static LAST_DRY_RUN: std::sync::Mutex<BTreeMap<&'static str, Vec<String>>> = std::sync::Mutex::new(BTreeMap::new());
+/// What the last dry run said, for the page.
+static LAST_DRY_RUN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// One line per integration for the page to show once after a button press.
-static FLASH: std::sync::Mutex<BTreeMap<&'static str, String>> = std::sync::Mutex::new(BTreeMap::new());
+/// One line for the page to show once after a button press.
+static FLASH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// The last setup complaint per integration, so an unchanged one is logged once, not every pass.
-static LAST_COMPLAINT: std::sync::Mutex<BTreeMap<&'static str, String>> = std::sync::Mutex::new(BTreeMap::new());
+/// The last setup complaint, so an unchanged one is logged once, not every pass.
+static LAST_COMPLAINT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-pub fn last_dry_run(id: &str) -> Vec<String> {
-    LAST_DRY_RUN.lock().ok().and_then(|m| m.get(id).cloned()).unwrap_or_default()
+pub fn last_dry_run() -> Vec<String> {
+    LAST_DRY_RUN.lock().map(|v| v.clone()).unwrap_or_default()
 }
 
-pub fn flash(integration: &dyn Integration, line: String) {
-    if let Ok(mut m) = FLASH.lock() {
-        m.insert(integration.info().id, line);
+pub fn flash(line: String) {
+    if let Ok(mut f) = FLASH.lock() {
+        *f = Some(line);
     }
 }
 
-/// The line left for this page, once: a reload does not repeat it.
-pub fn take_flash(id: &str) -> Option<String> {
-    FLASH.lock().ok().and_then(|mut m| m.remove(id))
+/// The line left for the page, once: a reload does not repeat it.
+pub fn take_flash() -> Option<String> {
+    FLASH.lock().ok().and_then(|mut f| f.take())
 }
 
 /// One line for the log: `true` for an error, `false` for info.
 type Line = (bool, String);
 
-/// What changed about `id`'s setup complaint, if anything. An unchanged one says nothing.
-fn complain_once(last: &mut BTreeMap<&'static str, String>, id: &'static str, said: String) -> Option<Line> {
-    let before = last.insert(id, said.clone()).unwrap_or_default();
+/// What changed about the setup complaint, if anything. An unchanged one says nothing.
+fn complain_once(last: &mut String, said: String) -> Option<Line> {
+    let before = std::mem::replace(last, said.clone());
     if before == said {
         None
     } else if !said.is_empty() {
-        Some((true, format!("{id}: {said}")))
+        Some((true, format!("{KEY_PREFIX}: {said}")))
     } else {
-        Some((false, format!("{id}: everything it needs is back")))
+        Some((false, format!("{KEY_PREFIX}: everything it needs is back")))
     }
 }
 
-/// One real pass of one installed integration, and what it leaves for the log.
-///
-/// Pure apart from the pass itself, so that "said once until it changes" is tested rather than trusted:
-/// a wrong clone root once wrote the same line every thirty seconds.
-fn run_once(
-    integration: &dyn Integration,
-    ctx: &Context,
-    batches: &[Batch],
-    last: &mut BTreeMap<&'static str, String>,
-) -> Vec<Line> {
-    let id = integration.info().id;
+/// One real pass, and what it leaves for the log. Takes what the pass found as values, and the pass
+/// itself as a closure, so that "said once until it changes" is tested rather than trusted: a wrong
+/// clone root once wrote the same line every thirty seconds.
+fn run_once(missing: &[&str], pass: impl FnOnce() -> Said, problems: impl FnOnce() -> Vec<Problem>, last: &mut String) -> Vec<Line> {
     let mut lines = Vec::new();
     // One complaint per pass, never two: a "missing nothing" said first would overwrite what the
     // pass said last time, and the pass would then say it again as if it were news.
-    let missing = integration.missing(ctx);
     if !missing.is_empty() {
-        lines.extend(complain_once(last, id, format!("missing {}", missing.join(", "))));
+        lines.extend(complain_once(last, format!("missing {}", missing.join(", "))));
         return lines;
     }
-    let out = integration.pass(ctx, batches, false);
-    lines.extend(out.said.into_iter().map(|l| (false, format!("{id}: {l}"))));
-    lines.extend(out.trouble.into_iter().map(|l| (true, format!("{id}: {l}"))));
+    let out = pass();
+    lines.extend(out.said.into_iter().map(|l| (false, format!("{KEY_PREFIX}: {l}"))));
+    lines.extend(out.trouble.into_iter().map(|l| (true, format!("{KEY_PREFIX}: {l}"))));
     // What is wrong before any pull request arrives, as well as what the pass ran into, so a wrong
     // folder is in the log from the first pass and not only once a pull request needs it.
-    let mut setup: Vec<String> = integration.problems(ctx).into_iter().map(|p| p.text).collect();
+    let mut setup: Vec<String> = problems().into_iter().map(|p| p.text).collect();
     setup.extend(out.setup);
-    lines.extend(complain_once(last, id, setup.join("; ")));
+    lines.extend(complain_once(last, setup.join("; ")));
     lines
 }
 
-/// The bars as they stand, filtered for `integration`.
-fn current_batches(integration: &dyn Integration) -> Vec<Batch> {
+/// The bars as they stand, filtered.
+fn current_batches() -> Vec<Batch> {
     let now = crate::mute::unix_now();
     let snapshots: Vec<(PrAxis, AxisSnapshot)> =
         PrAxis::ALL.into_iter().map(|axis| (axis, crate::scheduler::pr_snapshot(axis))).collect();
-    batches(integration.info(), &snapshots, &|key| crate::mute::until(key, now).is_some())
+    batches(PORTALS, &snapshots, &|key| crate::mute::until(key, now).is_some())
 }
 
-/// A pass with every effect suppressed, kept for the integration's page. Writes no state either, so
-/// pressing Dry run can never change what the next real pass does.
-pub fn dry_run_now(app_asset_path: &Path, integration: &'static dyn Integration) {
+/// A pass with every effect suppressed, kept for the page. Writes no state either, so pressing Dry run
+/// can never change what the next real pass does.
+pub fn dry_run_now(app_asset_path: &Path) {
     let cfg = Config::load(app_asset_path).0;
-    let ctx = Context::new(app_asset_path, &cfg, integration.info().id);
-    let out = integration.pass(&ctx, &current_batches(integration), true);
+    let ctx = Context::new(app_asset_path, &cfg);
+    let out = dispatch::pass(&ctx, &current_batches(), true);
     let mut lines = out.said;
     lines.extend(out.trouble);
     lines.extend(out.setup);
     if lines.is_empty() {
         lines.push("nothing to do".to_string());
     }
-    if let Ok(mut m) = LAST_DRY_RUN.lock() {
-        m.insert(integration.info().id, lines);
+    if let Ok(mut last) = LAST_DRY_RUN.lock() {
+        *last = lines;
     }
 }
 
-/// Prepares every integration, then starts the one thread that runs the installed ones.
+/// Brings the shipped prompts up to date, then starts the one thread that runs passes while it is on.
 ///
-/// Always started, installed or not: it reads `config.txt` on every pass, which is what lets Install
-/// take effect without a restart. With nothing installed a pass is one file read.
+/// Always started, on or not: it reads `config.txt` on every pass, which is what lets the switch take
+/// effect without a restart. Switched off, a pass is one file read.
 pub fn start(app_asset_path: PathBuf) {
     let cfg = Config::load(&app_asset_path).0;
-    for integration in all() {
-        integration.prepare(&Context::new(&app_asset_path, &cfg, integration.info().id));
-    }
+    dispatch::prepare(&Context::new(&app_asset_path, &cfg));
 
     std::thread::Builder::new()
-        .name("integrations".to_string())
+        .name("agents".to_string())
         .spawn(move || loop {
             wait_for_poll();
             let cfg = Config::load(&app_asset_path).0;
-            for integration in all() {
-                if !enabled(&cfg, *integration) {
-                    continue;
-                }
-                let ctx = Context::new(&app_asset_path, &cfg, integration.info().id);
-                let Ok(mut last) = LAST_COMPLAINT.lock() else { continue };
-                for (error, line) in run_once(*integration, &ctx, &current_batches(*integration), &mut last) {
-                    if error {
-                        crate::errorln!("{line}");
-                    } else {
-                        crate::infoln!("{line}");
-                    }
+            if !enabled(&cfg) {
+                continue;
+            }
+            let ctx = Context::new(&app_asset_path, &cfg);
+            let Ok(mut last) = LAST_COMPLAINT.lock() else { continue };
+            let missing = dispatch::missing(&ctx);
+            let lines = run_once(&missing, || dispatch::pass(&ctx, &current_batches(), false), || dispatch::problems(&ctx), &mut last);
+            for (error, line) in lines {
+                if error {
+                    crate::errorln!("{line}");
+                } else {
+                    crate::infoln!("{line}");
                 }
             }
         })
         .map(|_| ())
-        .unwrap_or_else(|e| crate::errorln!("integrations: could not start their thread: {e}"));
+        .unwrap_or_else(|e| crate::errorln!("agents: could not start their thread: {e}"));
 }
 
 #[cfg(test)]
@@ -418,45 +342,28 @@ mod tests {
         AxisSnapshot { groups, polled_at: None, version: 1 }
     }
 
-    const GITHUB_ONLY: Info =
-        Info { id: "test", name: "Test", summary: "", portals: &[PortalKind::GitHub], settings: &[], unsupported: None };
-    const NO_PORTALS: Info =
-        Info { id: "test", name: "Test", summary: "", portals: &[], settings: &[], unsupported: None };
+    const GITHUB_ONLY: &[PortalKind] = &[PortalKind::GitHub];
+    const NO_PORTALS: &[PortalKind] = &[];
 
-    /// The id is a config namespace, a URL segment and a directory name at once, so anything but
-    /// lowercase letters is a way to escape one of the three.
     #[test]
-    fn every_id_is_unique_and_safe_as_a_key_a_path_and_a_url() {
-        let ids: Vec<&str> = all().iter().map(|i| i.info().id).collect();
-        for id in &ids {
-            assert!(!id.is_empty() && id.chars().all(|c| c.is_ascii_lowercase()), "{id:?}");
-            assert_eq!(ids.iter().filter(|other| *other == id).count(), 1, "{id:?} twice");
-            assert!(find(id).is_some());
-        }
-        assert!(find("nope").is_none() && find("").is_none() && find("../herdr").is_none());
+    fn it_acts_on_every_portal() {
+        assert_eq!(PORTALS, &PortalKind::ALL);
     }
 
     #[test]
-    fn the_herdr_dispatcher_is_registered_and_acts_on_every_portal() {
-        let herdr = find("herdr").expect("herdr must be registered");
-        assert_eq!(herdr.info().portals, &PortalKind::ALL);
-    }
-
-    #[test]
-    fn an_integration_sees_only_the_portals_it_declared() {
+    fn a_pass_sees_only_the_portals_it_is_given() {
         let github = fake_info(PortalKind::GitHub);
         let snaps = vec![(PrAxis::ReviewRequested, snapshot(vec![(github, Some(vec![entry("a")]))]))];
-        let seen = batches(&GITHUB_ONLY, &snaps, &|_| false);
+        let seen = batches(GITHUB_ONLY, &snaps, &|_| false);
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].entries.len(), 1);
-        assert!(batches(&NO_PORTALS, &snaps, &|_| false).iter().all(|b| b.entries.is_empty()));
+        assert!(batches(NO_PORTALS, &snaps, &|_| false).iter().all(|b| b.entries.is_empty()));
     }
 
-    /// The dispatcher asks `gh` about every pull request it is handed, so a GitLab merge request
-    /// reaching it would be a command run against the wrong forge. Nor does a GitLab list confirm
-    /// anything for an integration that cannot see it.
+    /// A GitLab list does not confirm anything for a pass that cannot see GitLab, and none of its merge
+    /// requests reach it.
     #[test]
-    fn a_gitlab_merge_request_never_reaches_a_github_only_integration() {
+    fn a_portal_it_is_not_given_neither_reaches_it_nor_confirms_anything() {
         let snaps = vec![(
             PrAxis::ReviewRequested,
             snapshot(vec![
@@ -464,23 +371,23 @@ mod tests {
                 (fake_info(PortalKind::GitHub), Some(vec![entry("pr")])),
             ]),
         )];
-        let seen = batches(&GITHUB_ONLY, &snaps, &|_| false);
+        let seen = batches(GITHUB_ONLY, &snaps, &|_| false);
         let keys: Vec<&str> = seen[0].entries.iter().map(|e| e.key()).collect();
         assert_eq!(keys, ["https://example.invalid/pr"]);
 
         let gitlab_only = vec![(PrAxis::ReviewRequested, snapshot(vec![(fake_info(PortalKind::GitLab), Some(Vec::new()))]))];
-        assert!(!batches(&GITHUB_ONLY, &gitlab_only, &|_| false)[0].confirmed);
+        assert!(!batches(GITHUB_ONLY, &gitlab_only, &|_| false)[0].confirmed);
     }
 
     /// A muted pull request is one you asked to stop hearing about. Starting an agent for it would be
     /// the loudest possible way to ignore that.
     #[test]
-    fn muted_pull_requests_never_reach_an_integration() {
+    fn muted_pull_requests_never_reach_a_pass() {
         let github = fake_info(PortalKind::GitHub);
         let a = entry("a");
         let muted_key = a.key().to_string();
         let snaps = vec![(PrAxis::ChangesRequested, snapshot(vec![(github, Some(vec![a, entry("b")]))]))];
-        let seen = batches(&GITHUB_ONLY, &snaps, &|key| key == muted_key);
+        let seen = batches(GITHUB_ONLY, &snaps, &|key| key == muted_key);
         assert_eq!(seen[0].entries.len(), 1);
         assert_ne!(seen[0].entries[0].key(), muted_key);
         assert_eq!(seen[0].muted, 1);
@@ -490,7 +397,7 @@ mod tests {
     #[test]
     fn an_unconfirmed_list_is_not_handed_over() {
         let snaps = vec![(PrAxis::ReadyToMerge, snapshot(vec![(fake_info(PortalKind::GitHub), None)]))];
-        let seen = batches(&GITHUB_ONLY, &snaps, &|_| false);
+        let seen = batches(GITHUB_ONLY, &snaps, &|_| false);
         assert!(seen.iter().all(|b| b.entries.is_empty()));
         // And it says so: an empty list nobody confirmed must never pass for a quiet bar.
         assert!(seen.iter().all(|b| !b.confirmed));
@@ -499,19 +406,28 @@ mod tests {
     #[test]
     fn a_confirmed_list_is_marked_confirmed_even_when_it_is_empty() {
         let snaps = vec![(PrAxis::ReadyToMerge, snapshot(vec![(fake_info(PortalKind::GitHub), Some(Vec::new()))]))];
-        assert!(batches(&GITHUB_ONLY, &snaps, &|_| false)[0].confirmed);
-        assert!(!batches(&NO_PORTALS, &snaps, &|_| false)[0].confirmed, "a portal it cannot see confirms nothing");
+        assert!(batches(GITHUB_ONLY, &snaps, &|_| false)[0].confirmed);
+        assert!(!batches(NO_PORTALS, &snaps, &|_| false)[0].confirmed, "a portal it cannot see confirms nothing");
     }
 
-    /// Install and Uninstall tell the integration, so it can treat the next pass as a fresh start.
+    /// Switching on, and on again after off, is "from now on": every bar's baseline is forgotten, so
+    /// nothing already waiting gets an agent.
+    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn install_and_uninstall_tell_the_integration() {
-        let dir = std::env::temp_dir().join(format!("githoot-integration-install-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let before = fake::INSTALLS.load(std::sync::atomic::Ordering::SeqCst);
-        install(&dir, &fake::Echo, true).unwrap();
-        install(&dir, &fake::Echo, false).unwrap();
-        assert_eq!(fake::INSTALLS.load(std::sync::atomic::Ordering::SeqCst), before + 2);
+    fn switching_on_or_off_forgets_every_bars_baseline() {
+        let dir = std::env::temp_dir().join(format!("githoot-agents-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        for on in [true, false] {
+            for axis in PrAxis::ALL {
+                std::fs::write(dir.join("agents").join(format!("{}.armed", axis.slug())), "").unwrap();
+            }
+            switch(&dir, on).unwrap();
+            assert_eq!(Config::load(&dir).0.agents_enabled(), on);
+            for axis in PrAxis::ALL {
+                assert!(!dir.join("agents").join(format!("{}.armed", axis.slug())).exists(), "{on} {axis:?}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -519,53 +435,43 @@ mod tests {
     /// it needs is not news either, so it must not make the next pass forget what it already said.
     #[test]
     fn the_same_setup_trouble_is_logged_once_not_every_pass() {
-        let cfg = Config::from_text("");
-        let ctx = Context::new(Path::new("/nonexistent"), &cfg, "stuck");
-        let mut last = BTreeMap::new();
-        let first = run_once(&fake::Stuck, &ctx, &[], &mut last);
-        assert_eq!(first, [(true, "stuck: no clone at /nowhere/thing".to_string())]);
+        let stuck = || vec![Problem { key: "agentsCloneRoot", text: "no clone at /nowhere/thing".to_string() }];
+        let mut last = String::new();
+        let first = run_once(&[], Said::default, stuck, &mut last);
+        assert_eq!(first, [(true, "agents: no clone at /nowhere/thing".to_string())]);
         for _ in 0..3 {
-            assert_eq!(run_once(&fake::Stuck, &ctx, &[], &mut last), [], "said again");
+            assert_eq!(run_once(&[], Said::default, stuck, &mut last), [], "said again");
         }
+        assert_eq!(run_once(&[], Said::default, Vec::new, &mut last), [(false, "agents: everything it needs is back".to_string())]);
+        let missing = run_once(&["git"], || panic!("no pass while a tool is missing"), Vec::new, &mut last);
+        assert_eq!(missing, [(true, "agents: missing git".to_string())]);
     }
 
-    static FLAGGED: Info = Info {
-        id: "test",
-        name: "Test",
-        summary: "",
-        portals: &[PortalKind::GitHub],
-        settings: &[
-            Setting { key: "loud", label: "Loud", kind: Kind::Flag { default_on: true }, help: "", group: "", live: true },
-            Setting { key: "quiet", label: "Quiet", kind: Kind::Flag { default_on: false }, help: "", group: "", live: true },
-            Setting { key: "root", label: "Root", kind: Kind::Text { placeholder: "~" }, help: "", group: "", live: true },
-        ],
-        unsupported: None,
-    };
-
-    /// A flag nobody set is its default, and only an explicit value moves it. A typo leaves the
-    /// default standing, in either direction, as every other switch in `config.txt` does.
+    /// A flag nobody set is its default, and only an explicit value moves it. A typo leaves the default
+    /// standing, in either direction, as every other switch in `config.txt` does.
     #[test]
     fn a_flag_reads_its_default_until_it_is_set() {
         let flag = |text: &str, key: &str| {
             let cfg = Config::from_text(text);
-            let ctx = Context::new(Path::new("/x"), &cfg, "test");
-            ctx.flag(FLAGGED.settings.iter().find(|s| s.key == key).unwrap())
+            let ctx = Context::new(Path::new("/x"), &cfg);
+            ctx.flag(dispatch::SETTINGS.iter().find(|s| s.key == key).unwrap())
         };
-        assert!(flag("", "loud") && !flag("", "quiet"));
-        assert!(!flag("integration.test.loud=off\n", "loud") && flag("integration.test.quiet=on\n", "quiet"));
-        assert!(flag("integration.test.loud=offf\n", "loud") && !flag("integration.test.quiet=onn\n", "quiet"));
+        assert!(flag("", "agentsWorkRequired") && !flag("", "agentsApproved"));
+        assert!(!flag("agentsWorkRequired=off\n", "agentsWorkRequired") && flag("agentsApproved=on\n", "agentsApproved"));
+        assert!(flag("agentsWorkRequired=offf\n", "agentsWorkRequired") && !flag("agentsApproved=onn\n", "agentsApproved"));
     }
 
     #[test]
     fn only_declared_settings_can_be_written() {
-        let herdr = find("herdr").unwrap();
-        assert!(check_setting(herdr, "enabled", "on").is_ok());
-        assert!(check_setting(herdr, "cloneRoot", "/home/me/src").is_ok());
-        assert!(check_setting(herdr, "localApi", "on").is_err(), "not its key");
-        assert!(check_setting(herdr, "cloneRoot\nlocalApi", "on").is_err());
-        assert!(check_setting(herdr, "cloneRoot", "/x\nlocalApi=on").is_err(), "a value must stay on one line");
-        assert!(check_setting(herdr, "enabled", "maybe").is_err());
-        assert!(check_setting(herdr, "approved", "on").is_ok() && check_setting(herdr, "approved", "off").is_ok());
-        assert!(check_setting(herdr, "approved", "yes please").is_err(), "a flag is on or off");
+        assert!(check_setting("agents", "on").is_ok());
+        assert!(check_setting("agentsCloneRoot", "/home/me/src").is_ok());
+        assert!(check_setting("localApi", "on").is_err(), "not its key");
+        assert!(check_setting("agentsCloneRoot\nlocalApi", "on").is_err());
+        assert!(check_setting("agentsCloneRoot", "/x\nlocalApi=on").is_err(), "a value must stay on one line");
+        assert!(check_setting("agents", "maybe").is_err());
+        assert!(check_setting("agentsApproved", "on").is_ok() && check_setting("agentsApproved", "off").is_ok());
+        assert!(check_setting("agentsApproved", "yes please").is_err(), "a flag is on or off");
+        assert!(check_setting("agentsKind", "claude").is_ok() && check_setting("agentsKind", "codex").is_err(), "Claude only, for now");
+        assert!(check_setting("agentsClient", "orca").is_ok() && check_setting("agentsClient", "tmux").is_err());
     }
 }

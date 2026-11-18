@@ -3,15 +3,15 @@
 //! ```text
 //! General        what the tray shows and does: the three bars, the hoot
 //! Portals        where pull requests come from   ▸ GitHub
-//! Integrations   where pull requests go          ▸ Herdr dispatcher
+//! Agents         what GitHoot starts for them    which client, which agent, the prompts
 //! Muted          pull requests you silenced
 //! Updates        this version, Check now, the automatic check
 //! Advanced       the local API, log detail
 //! ```
 //!
-//! Portals and Integrations are symmetric on purpose: they are the two seams of the code,
-//! `crate::portal` and `crate::integration`, shown as two collections. Each collection has a list
-//! page (one card per item, its state, its main action, ⚙ Settings) and a page per item.
+//! Portals is the one collection, because `crate::portal` is the one seam: a list page (one card per
+//! portal, its state, its main action, ⚙ Settings) and a page per portal. Agents is a page of its
+//! own: `crate::agents` is part of GitHoot, and where an agent opens is a setting on it, not a seam.
 //!
 //! ## Two page shapes, and one rule
 //!
@@ -27,7 +27,7 @@
 //! The PR pages the tray opens are not part of this site. They are `crate::page`'s, and they link to
 //! the muted page, nothing else.
 
-pub mod integrations;
+pub mod agents;
 pub mod welcome;
 pub mod portals;
 pub mod updates;
@@ -44,9 +44,8 @@ pub enum Place {
     /// A portal by its id. Whether one by that id is configured is the handler's question; the shape
     /// is checked here, so the segment can never be more than a word.
     Portal(String),
-    Integrations,
-    /// Only an id the registry knows.
-    Integration(&'static str),
+    /// The agents GitHoot starts for pull requests, and where they open.
+    Agents,
     Muted,
     Updates,
     Advanced,
@@ -61,8 +60,7 @@ impl Place {
             ("general", None) => Place::General,
             ("portals", None) => Place::Portals,
             ("portals", Some(id)) if word(id) => Place::Portal(id.to_string()),
-            ("integrations", None) => Place::Integrations,
-            ("integrations", Some(id)) => Place::Integration(crate::agents::find(id)?.info().id),
+            ("agents", None) => Place::Agents,
             ("muted", None) => Place::Muted,
             ("updates", None) => Place::Updates,
             ("advanced", None) => Place::Advanced,
@@ -76,8 +74,7 @@ impl Place {
             Place::General => "general".to_string(),
             Place::Portals => "portals".to_string(),
             Place::Portal(id) => format!("portals/{id}"),
-            Place::Integrations => "integrations".to_string(),
-            Place::Integration(id) => format!("integrations/{id}"),
+            Place::Agents => "agents".to_string(),
             Place::Muted => "muted".to_string(),
             Place::Updates => "updates".to_string(),
             Place::Advanced => "advanced".to_string(),
@@ -88,21 +85,19 @@ impl Place {
     fn parent(&self) -> Option<Place> {
         match self {
             Place::Portal(_) => Some(Place::Portals),
-            Place::Integration(_) => Some(Place::Integrations),
             _ => None,
         }
     }
 
-    /// Whether a POST here is something the page offers. The integrations list carries buttons that
-    /// post to the integration they are about, so a POST to it is the wrong method. The portals list
-    /// takes one: Install is for a portal that has no page of its own yet.
+    /// Whether a POST here is something the page offers. Every page does: each one's forms post back
+    /// to it, and the portals list takes Install for a portal that has no page of its own yet.
     pub fn takes_posts(&self) -> bool {
-        !matches!(self, Place::Integrations)
+        true
     }
 }
 
-/// What the sidebar needs to know that is not fixed: which portals you are signed in to, which
-/// integrations are installed, how many pull requests are muted, and whether a newer release is waiting.
+/// What the sidebar needs to know that is not fixed: which portals you are signed in to, how many pull
+/// requests are muted, and whether a newer release is waiting.
 pub struct Site<'a> {
     pub token: &'a str,
     /// This response's script nonce. Empty means no script on the page, and every control still
@@ -111,9 +106,6 @@ pub struct Site<'a> {
     /// `(id, display name, signed in)`, in configuration order. The sidebar lists only the portals
     /// you are signed in to; the list page is where the rest are found and signed in to.
     pub portals: Vec<(String, String, bool)>,
-    /// The ids of the integrations that are installed. The sidebar lists only these; the list page
-    /// is where the rest are found and installed.
-    pub installed: Vec<&'static str>,
     pub muted: usize,
     /// The version a check found, when it is newer than this one.
     pub update: Option<String>,
@@ -142,7 +134,6 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
         // pills and "GitHub" would otherwise read as an equal of "General". Hidden when wide.
         let up = match (&place, child) {
             (Place::Portal(_), true) => "<span class=\"up-name\">Portals › </span>",
-            (Place::Integration(_), true) => "<span class=\"up-name\">Integrations › </span>",
             _ => "",
         };
         // The label is already HTML where it carries a badge; every part of it was escaped on the way in.
@@ -151,19 +142,12 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
     let mut items = vec![link(Place::General, "General", false), link(Place::Portals, "Portals", false)];
     for (id, name, signed_in) in &site.portals {
         let place = Place::Portal(id.clone());
-        // Signed in, or the page you are on, for the same reason as the integrations below.
+        // Signed in, or the page you are on: a sidebar that cannot show where you are is lost.
         if *signed_in || place == *current {
             items.push(link(place, &esc(name), true));
         }
     }
-    items.push(link(Place::Integrations, "Integrations", false));
-    for integration in crate::agents::all() {
-        let info = integration.info();
-        // Installed, or the page you are on: a sidebar that cannot show where you are is lost.
-        if site.installed.contains(&info.id) || *current == Place::Integration(info.id) {
-            items.push(link(Place::Integration(info.id), &esc(info.name), true));
-        }
-    }
+    items.push(link(Place::Agents, crate::agents::NAME, false));
     let muted = if site.muted > 0 { format!("Muted ({})", site.muted) } else { "Muted".to_string() };
     items.push(link(Place::Muted, &muted, false));
     let updates = match &site.update {
@@ -191,10 +175,9 @@ pub fn layout(site: &Site, place: &Place, title: &str, refresh: Option<u32>, bod
 pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option<u32>, body: &str, note: &str) -> String {
     let mut trail: Vec<(String, Option<String>)> = vec![("Settings".to_string(), Some(Place::General.path()))];
     if let Some(parent) = place.parent() {
-        let label = match parent {
-            Place::Portals => "Portals",
-            _ => "Integrations",
-        };
+        // Portals is the only collection: every other page stands on its own.
+        let label = "Portals";
+        debug_assert_eq!(parent, Place::Portals);
         trail.push((label.to_string(), Some(parent.path())));
     }
     trail.push((title.to_string(), None));
@@ -772,7 +755,7 @@ pub(crate) mod tests {
     use super::*;
 
     pub fn site() -> Site<'static> {
-        Site { token: "tok", nonce: "", portals: vec![("github".into(), "GitHub".into(), true)], installed: vec!["herdr"], muted: 2, update: None }
+        Site { token: "tok", nonce: "", portals: vec![("github".into(), "GitHub".into(), true)], muted: 2, update: None }
     }
 
     /// A muted pull request that left every bar keeps the title and link it had when it was muted,
@@ -861,7 +844,7 @@ pub(crate) mod tests {
     fn an_item_in_the_sidebar_carries_its_collections_name_for_the_narrow_row() {
         let html = sidebar(&site(), &Place::General);
         assert!(html.contains(r#"href="/tok/portals/github"><span class="up-name">Portals › </span>GitHub</a>"#), "{html}");
-        assert!(html.contains(r#"<span class="up-name">Integrations › </span>Herdr dispatcher</a>"#), "{html}");
+        assert!(html.contains(r#"href="/tok/agents">Agents</a>"#), "a page of its own, no collection to name: {html}");
     }
 
     /// The green bar's rules are drawn as the path a pull request walks to green: two fixed steps,
@@ -975,8 +958,7 @@ pub(crate) mod tests {
             Place::General,
             Place::Portals,
             Place::Portal("github".into()),
-            Place::Integrations,
-            Place::Integration("herdr"),
+            Place::Agents,
             Place::Muted,
             Place::Updates,
             Place::Advanced,
@@ -1013,7 +995,7 @@ pub(crate) mod tests {
     #[test]
     fn the_sidebar_lists_every_page_with_items_under_their_collection() {
         let html = sidebar(&site(), &Place::General);
-        let order = ["/tok/general\"", "/tok/portals\"", "/tok/portals/github\"", "/tok/integrations\"", "/tok/integrations/herdr\"", "/tok/muted\"", "/tok/updates\"", "/tok/advanced\""];
+        let order = ["/tok/general\"", "/tok/portals\"", "/tok/portals/github\"", "/tok/agents\"", "/tok/muted\"", "/tok/updates\"", "/tok/advanced\""];
         let mut at = 0;
         for href in order {
             let found = html[at..].find(href).unwrap_or_else(|| panic!("{href} missing or out of order in {html}"));
@@ -1027,22 +1009,22 @@ pub(crate) mod tests {
     /// Where you are is marked twice: the page itself, and the collection it sits in.
     #[test]
     fn the_sidebar_marks_the_page_and_the_collection_it_sits_in() {
-        let html = sidebar(&site(), &Place::Integration("herdr"));
-        assert!(html.contains(r#"<a class="child on" aria-current="page" href="/tok/integrations/herdr">"#), "{html}");
-        assert!(html.contains(r#"<a class="up" href="/tok/integrations">Integrations</a>"#), "{html}");
+        let html = sidebar(&site(), &Place::Portal("github".into()));
+        assert!(html.contains(r#"<a class="child on" aria-current="page" href="/tok/portals/github">"#), "{html}");
+        assert!(html.contains(r#"<a class="up" href="/tok/portals">Portals</a>"#), "{html}");
         assert_eq!(html.matches("aria-current").count(), 1);
     }
 
-    /// Under Integrations only what is installed: the list page shows everything else. The one
-    /// exception is the page you are on, so the sidebar can always say where you are.
+    /// Agents is always in the sidebar, on or off, between Portals and Muted: it is part of GitHoot, and
+    /// its page is where you switch it on. There is no Integrations entry any more.
     #[test]
-    fn the_sidebar_lists_only_installed_integrations_and_the_one_you_are_on() {
-        let none = Site { installed: vec![], ..site() };
-        assert!(!sidebar(&none, &Place::General).contains("/tok/integrations/herdr"));
-        assert!(sidebar(&none, &Place::Integrations).contains(r#"href="/tok/integrations""#), "the collection itself always shows");
-        let here = sidebar(&none, &Place::Integration("herdr"));
-        assert!(here.contains(r#"<a class="child on" aria-current="page" href="/tok/integrations/herdr">"#), "{here}");
-        assert!(sidebar(&site(), &Place::General).contains("/tok/integrations/herdr"), "installed shows everywhere");
+    fn the_sidebar_has_agents_between_portals_and_muted_and_no_integrations() {
+        let html = sidebar(&site(), &Place::General);
+        let portals = html.find("/tok/portals\"").unwrap();
+        let agents = html.find(r#"href="/tok/agents">Agents</a>"#).expect("always there");
+        let muted = html.find("/tok/muted").unwrap();
+        assert!(portals < agents && agents < muted, "{html}");
+        assert!(!html.contains("integrations"), "{html}");
     }
 
     /// The same for portals: only those you are signed in to, plus the page you are on. The list page
@@ -1149,7 +1131,7 @@ pub(crate) mod tests {
     fn a_folder_is_a_text_box_with_a_browse_button_the_script_reveals() {
         static FOLDERS: [Setting; 1] =
             [Setting { key: "root", label: "Root", kind: Kind::Folder { placeholder: "~/src" }, help: "", group: "G", live: true }];
-        let html = sections("tok", &Place::Integration("herdr"), &FOLDERS, &|_| r"D:\src".to_string(), None);
+        let html = sections("tok", &Place::Agents, &FOLDERS, &|_| r"D:\src".to_string(), None);
         assert!(html.contains(r#"<input type="text" name="root" value="D:\src" placeholder="~/src" spellcheck="false">"#), "{html}");
         assert!(html.contains(r#"<button class="small ghost" type="button" data-browse="root" hidden>Browse…</button>"#), "{html}");
         assert!(!html.contains("data-autosave"), "{html}");
@@ -1183,11 +1165,11 @@ pub(crate) mod tests {
     /// The title is where you are, as a trail from Settings: every step a link, except the page itself.
     #[test]
     fn the_title_is_a_breadcrumb_trail_from_settings() {
-        let html = layout(&site(), &Place::Integration("herdr"), "Herdr dispatcher", None, "");
+        let html = layout(&site(), &Place::Portal("github".into()), "GitHub", None, "");
         assert!(html.contains(
-            r#"<h1 class="crumbs"><a href="/tok/general">Settings</a><span class="sep" aria-hidden="true">›</span><a href="/tok/integrations">Integrations</a><span class="sep" aria-hidden="true">›</span><span>Herdr dispatcher</span></h1>"#
+            r#"<h1 class="crumbs"><a href="/tok/general">Settings</a><span class="sep" aria-hidden="true">›</span><a href="/tok/portals">Portals</a><span class="sep" aria-hidden="true">›</span><span>GitHub</span></h1>"#
         ), "{html}");
-        assert!(html.contains("<title>Settings › Integrations › Herdr dispatcher — GitHoot</title>"), "{html}");
+        assert!(html.contains("<title>Settings › Portals › GitHub — GitHoot</title>"), "{html}");
         let html = layout(&site(), &Place::General, "General", None, "");
         assert!(html.contains(r#"<h1 class="crumbs"><a href="/tok/general">Settings</a><span class="sep" aria-hidden="true">›</span><span>General</span></h1>"#), "{html}");
         let html = layout(&site(), &Place::Portal("github".into()), "<GitHub>", None, "");

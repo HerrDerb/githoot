@@ -364,8 +364,8 @@ struct PullRequestNode {
     /// `UNKNOWN` and the next one sees the truth. Only `CONFLICTING` is ever treated as a conflict
     /// — see `is_conflicting`.
     mergeable: Option<String>,
-    /// The pull request's branch by name. On a fork it lives on the fork, which is why an
-    /// integration fetches `head_ref` instead and this is only for saying.
+    /// The pull request's branch by name. On a fork it lives on the fork, which is why
+    /// Agents fetches `head_ref` instead and this is only for saying.
     head_ref_name: Option<String>,
     additions: Option<u64>,
     deletions: Option<u64>,
@@ -1896,7 +1896,7 @@ mod tests {
         assert_eq!(e.checks, CheckRollup::Success);
         assert_eq!(e.verdicts, vec![Verdict { login: "alice".into(), state: ReviewState::Approved }]);
         assert!(e.pending.is_empty());
-        // What an integration needs to check the pull request out, without asking GitHub again:
+        // What Agents needs to check the pull request out, without asking GitHub again:
         // its branch by name, and the ref GitHub publishes on the base repository for every pull
         // request, forks included.
         assert_eq!(e.branch.as_deref(), Some("fix-debounce"));
