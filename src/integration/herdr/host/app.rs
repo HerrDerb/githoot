@@ -34,9 +34,14 @@ impl Host for HerdrApp {
     /// Live terminals only, which is what `hc ls` lists without `--all`. A named one is a claim, as in
     /// the terminal host, and so is an unnamed one reporting a status, under its address: only an agent
     /// reports one, so that is an agent you opened yourself, not a shell left behind.
-    fn agents(&self, run: &mut Run) -> Vec<(String, String)> {
-        let Ok(raw) = run("hc", &["ls", "--json"]) else { return Vec::new() };
-        raw.split("{\"address\":\"")
+    fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
+        // No "not running" case: `hc` starts its core when none runs.
+        let raw = match run("hc", &["ls", "--json"]) {
+            Ok(raw) => raw,
+            Err(e) if super::not_installed(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        Ok(raw.split("{\"address\":\"")
             .skip(1)
             .filter_map(|entry| {
                 let cwd = json_string(entry, "cwd")?.replace("\\\\", "\\");
@@ -45,7 +50,7 @@ impl Host for HerdrApp {
                     .or_else(|| json_string(entry, "status").and(entry.split('"').next().map(str::to_string)))?;
                 Some((cwd, name))
             })
-            .collect()
+            .collect())
     }
 
     fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, String> {
@@ -89,7 +94,7 @@ mod tests {
         let (mut run, ran) = recorder(|_| {
             Ok(r#"{"terminals":[{"address":"t3","agent":"claude-code","cwd":"/p/x","state":"live"},{"address":"t4","agent":"claude-code","cwd":"/w/pr-1-x","name":"pr-1-x","state":"live"}]}"#.into())
         });
-        assert_eq!(HerdrApp.agents(&mut run), [("/w/pr-1-x".to_string(), "pr-1-x".to_string())]);
+        assert_eq!(HerdrApp.agents(&mut run), Ok(vec![("/w/pr-1-x".to_string(), "pr-1-x".to_string())]));
         assert_eq!(ran.borrow().as_slice(), ["hc ls --json"]);
     }
 
@@ -101,7 +106,17 @@ mod tests {
         let (mut run, _) = recorder(|_| {
             Ok(r#"{"terminals":[{"address":"t18","agent":"claude-code","cwd":"/w/pr-5-y","state":"live","status":"idle","turn":0},{"address":"t19","agent":"bash","cwd":"/w/pr-6-z","state":"live","turn":0}]}"#.into())
         });
-        assert_eq!(HerdrApp.agents(&mut run), [("/w/pr-5-y".to_string(), "t18".to_string())]);
+        assert_eq!(HerdrApp.agents(&mut run), Ok(vec![("/w/pr-5-y".to_string(), "t18".to_string())]));
+    }
+
+    /// `hc` starts its core when none runs, so it has no "not running" answer: not installed is
+    /// nobody working, and any other failure is nobody can say.
+    #[test]
+    fn not_installed_is_nobody_working_and_a_failed_answer_is_unsure() {
+        let (mut missing, _) = recorder(|_| Err("hc: not installed".into()));
+        assert_eq!(HerdrApp.agents(&mut missing), Ok(vec![]));
+        let (mut broken, _) = recorder(|_| Err(r#"{"error":{"kind":"io","message":"broken pipe"}}"#.into()));
+        assert!(HerdrApp.agents(&mut broken).is_err());
     }
 
     /// Plain git, because the app has no worktree command and shows whatever git has.
