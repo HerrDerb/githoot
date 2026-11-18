@@ -986,17 +986,17 @@ fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
 
 // ── Its page ─────────────────────────────────────────────────────────────────
 
-/// The card for `client`, under the client radio: its tools as chips, so a missing one stands out at a
-/// glance instead of hiding in a sentence, how to get the one that is missing, and what it needs from
-/// you.
+/// The card for `client`, under the client radio: its tools as tinted tags on the name's line, so a
+/// missing one stands out at a glance instead of hiding in a sentence, how to get the one that is
+/// missing, and what it needs from you.
 fn client_card_for(client: &dyn clients::Client, missing: &[&str]) -> String {
-    let chips: String = required(client)
+    let tags: String = required(client)
         .iter()
         .map(|tool| {
             if missing.contains(tool) {
-                format!("<span class=\"chip chip-no\">{} not found</span>", esc(tool))
+                format!("<span class=\"tag tag-no\">✗ {} not found</span>", esc(tool))
             } else {
-                format!("<span class=\"chip chip-ok\">{}</span>", esc(tool))
+                format!("<span class=\"tag tag-ok\">✓ {}</span>", esc(tool))
             }
         })
         .collect();
@@ -1006,8 +1006,7 @@ fn client_card_for(client: &dyn clients::Client, missing: &[&str]) -> String {
         String::new()
     };
     format!(
-        "<div class=\"card client-card\"><div class=\"row\"><strong>{}</strong> <div class=\"chips\">{chips}</div></div>\
-         <p class=\"sub\">{}</p>{install}</div>",
+        "<div class=\"card client-card\"><div class=\"head\"><strong>{}</strong>{tags}</div><p class=\"sub\">{}</p>{install}</div>",
         esc(client.name()),
         esc(client.note()),
     )
@@ -1093,12 +1092,13 @@ mod tests {
         assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
     }
 
-    /// What it needs is a row of chips, one per tool, so a missing one stands out at a glance.
+    /// What it needs is a tinted tag per tool on the name's own line, green when it runs and red when
+    /// it does not, so a missing one stands out at a glance in a dark theme as in a light one.
     #[test]
-    fn the_tools_it_needs_are_chips_that_say_which_are_missing() {
+    fn the_tools_it_needs_are_tags_on_the_names_line_that_say_which_are_missing() {
         let html = client_card_for(&clients::HerdrTui, &["git"]);
-        assert!(html.contains(r#"<span class="chip chip-ok">herdr</span>"#), "{html}");
-        assert!(html.contains(r#"<span class="chip chip-no">git not found</span>"#), "{html}");
+        assert!(html.contains(r#"<div class="head"><strong>Herdr</strong><span class="tag tag-ok">✓ herdr</span><span class="tag tag-no">✗ git not found</span></div>"#), "{html}");
+        assert!(!html.contains("chip"), "not the login chips' look: {html}");
         assert!(!html.contains("\">gh") && !html.contains("gh not found"), "no chip for a forge tool: none is required");
     }
 

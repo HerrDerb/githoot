@@ -305,6 +305,10 @@ white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .chip{font-size:.82rem;padding:.12rem .65rem;border-radius:999px;border:1px solid var(--line)}\
 .chip-ok::before{content:'✓ ';color:var(--ok)}\
 .chip-no{color:var(--bad);border-color:var(--bad)}\
+.client-card .head{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}\
+.tag{font-size:.78rem;line-height:1;padding:.3rem .55rem;border-radius:6px;font-weight:600}\
+.tag-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}\
+.tag-no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}\
 .alert{display:flex;gap:.7rem;align-items:flex-start;color:var(--ink);background:color-mix(in srgb,var(--bad) 7%,var(--card));border:1px solid color-mix(in srgb,var(--bad) 35%,var(--line));border-left:4px solid var(--bad);border-radius:8px}\
 .card .alert{margin:.7rem 0 0;padding:.7rem .85rem}\
 .alert-icon{flex:none;color:var(--bad);margin-top:.1rem}\
@@ -1492,6 +1496,15 @@ mod tests {
     #[test]
     fn the_hidden_attribute_always_hides() {
         assert!(STYLESHEET.contains("[hidden]{display:none!important}"));
+    }
+
+    /// The client card's tools are tinted tags, not outlined chips: a grey outline all but vanishes on
+    /// a dark card. The tint is mixed from the theme's own green and red, so both themes get one.
+    #[test]
+    fn the_client_cards_tags_are_tinted_from_the_themes_own_colours() {
+        assert!(STYLESHEET.contains(".client-card .head{display:flex;align-items:center"), "on the name's line");
+        assert!(STYLESHEET.contains(".tag-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}"));
+        assert!(STYLESHEET.contains(".tag-no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}"));
     }
 
     /// Every link a page renders is caught by a rule that names its container: `.card a`,
