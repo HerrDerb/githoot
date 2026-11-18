@@ -532,6 +532,10 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
     output("git", &["-C", &clone_str, "fetch", "--quiet", "origin", &refspec])
         .map_err(|e| Trouble::Passing(format!("could not fetch {head}: {e}")))?;
 
+    // The client first, before any worktree is reused, recycled or made: one that is not there yet would
+    // otherwise turn a missing server into a failed start, recorded against the pull request.
+    client.ready(&mut run)?;
+
     // A worktree already on disk with nobody reported in it. Reuse it if the client still knows it;
     // recycle it only if every client answered and nothing would be lost. A worktree holding work is
     // yours to look at.

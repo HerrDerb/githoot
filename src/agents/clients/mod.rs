@@ -62,6 +62,12 @@ pub trait Client: Sync + std::fmt::Debug {
     /// its server is not running: nobody can be working there. `Err` when it is there and did not
     /// answer, because then nobody can say, and an empty list would read as "nobody home".
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String>;
+    /// Before anything is touched for a pull request: make sure the client is there to take it. A client
+    /// that can start itself does so here. `Trouble::Setup` when it is not there, so nothing is done for
+    /// the pull request yet and it is tried again on the next pass.
+    fn ready(&self, _run: &mut Run) -> Result<(), Trouble> {
+        Ok(())
+    }
     /// A worktree already on disk that this client still knows, as the place to start in. `None`
     /// means it does not, and the worktree is recycled if nothing would be lost.
     fn reopen(&self, _worktree: &str, _run: &mut Run) -> Option<String> {

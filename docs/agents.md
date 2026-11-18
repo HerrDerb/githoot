@@ -161,10 +161,18 @@ explicit push asks you first, in its terminal. That holds only while the agent i
 What GitHoot does **not** hand over: its own credential. GitHoot's token is read-only and never
 leaves it. The agent reads the diff and the comments itself, with `gh` or `glab`, under your credential.
 
+## Herdr in a terminal
+
+The default client: the `herdr` server the TUI attaches to. Each agent opens as a workspace of its own,
+made together with its worktree. **When no Herdr server is running, the first pull request that needs an
+agent starts one**, headless (`herdr server`), the way the Herdr app's `hc` starts its core: the agent's
+workspace is there the next time you open `herdr`. If the server still does not answer after about ten
+seconds, nothing is done for that pull request yet, the log says so once, and the next pass tries again.
+
 ## The Herdr app
 
-**Agents open in** on its page picks the client: **Herdr in a terminal** (the `herdr` server the TUI
-attaches to, the default), the **Herdr app** or **Orca**. The two Herdrs are separate programs with
+**Agents open in** on its page picks the client: **Herdr in a terminal** (above, the default), the
+**Herdr app** or **Orca**. The two Herdrs are separate programs with
 separate lists of terminals, so an agent started in one never shows up in the other.
 
 In the app, GitHoot drives `hc`, the command line of herdr-core, which runs the app's terminals. It
