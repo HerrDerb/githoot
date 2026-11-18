@@ -45,8 +45,6 @@ pub const KEY_PREFIX: &str = "agents";
 /// GitHoot, the checkout from the portal's head ref and git, and the agent reads the pull request with
 /// whatever tool fits its URL.
 pub const PORTALS: &[PortalKind] = &PortalKind::ALL;
-/// `Some(reason)` where this build cannot run it. The page says the reason and offers no switch.
-pub const UNSUPPORTED: Option<&str> = if cfg!(target_os = "macos") { Some("Agents need Linux or Windows.") } else { None };
 
 /// Where it keeps its files, and its settings, read fresh for this pass.
 pub struct Context {
@@ -103,11 +101,6 @@ pub struct Said {
     pub setup: Vec<String>,
 }
 
-/// Whether it is switched on and can run here.
-pub fn enabled(cfg: &Config) -> bool {
-    UNSUPPORTED.is_none() && cfg.agents_enabled()
-}
-
 /// The bars as a pass may see them: only `portals`, only confirmed lists, no muted entries.
 ///
 /// Pure, so the two filters that keep it from acting on something it must not are tested rather than
@@ -157,16 +150,12 @@ pub fn set(app_asset_path: &Path, key: &str, value: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Switch on or off. Refused where the build cannot run it, so the page cannot switch on something
-/// that would sit there doing nothing.
+/// Switch on or off.
 ///
 /// Answers with what is wrong with its settings as they stand, so switching on can say so at once
 /// rather than leaving it to a log line the first time a pull request arrives. Switched on regardless:
 /// the settings are on the same page, and fixing them takes effect on the next pass.
 pub fn switch(app_asset_path: &Path, on: bool) -> Result<Vec<Problem>, String> {
-    if let (true, Some(why)) = (on, UNSUPPORTED) {
-        return Err(why.to_string());
-    }
     set(app_asset_path, SWITCH_KEY, if on { "on" } else { "off" })?;
     let cfg = Config::load(app_asset_path).0;
     let ctx = Context::new(app_asset_path, &cfg);
@@ -303,7 +292,7 @@ pub fn start(app_asset_path: PathBuf) {
         .spawn(move || loop {
             wait_for_poll();
             let cfg = Config::load(&app_asset_path).0;
-            if !enabled(&cfg) {
+            if !cfg.agents_enabled() {
                 continue;
             }
             let ctx = Context::new(&app_asset_path, &cfg);
@@ -412,7 +401,6 @@ mod tests {
 
     /// Switching on, and on again after off, is "from now on": every bar's baseline is forgotten, so
     /// nothing already waiting gets an agent.
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn switching_on_or_off_forgets_every_bars_baseline() {
         let dir = std::env::temp_dir().join(format!("githoot-agents-switch-{}", std::process::id()));

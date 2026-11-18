@@ -7,49 +7,29 @@ use super::{layout, Place, Site};
 use crate::agents::Problem;
 use crate::page::esc;
 
-/// Which way the switch goes, or that there is none: where the build cannot run agents and they are
-/// off, there is nothing to offer.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Switch {
-    On,
-    Off,
-    None,
-}
-
-/// Switch off whenever it is on, even where it cannot run, so a hand-edited `config.txt` can always be
-/// undone from the page; switch on only where it can run.
-pub fn agents_switch(on: bool, unsupported: Option<&str>) -> Switch {
-    match (on, unsupported) {
-        (true, _) => Switch::Off,
-        (false, None) => Switch::On,
-        (false, Some(_)) => Switch::None,
-    }
-}
-
 /// "On", "Off", and the two states that must not read as either.
-pub fn agents_status(on: bool, unsupported: Option<&str>, missing: &[&str], problems: usize) -> String {
-    match (unsupported, on, missing.is_empty()) {
-        (Some(_), _, _) => "Not available here".to_string(),
-        (None, false, _) => "Off".to_string(),
-        (None, true, true) if problems > 0 => "On, but check its settings".to_string(),
-        (None, true, true) => "On".to_string(),
+pub fn agents_status(on: bool, missing: &[&str], problems: usize) -> String {
+    match (on, missing.is_empty()) {
+        (false, _) => "Off".to_string(),
+        (true, true) if problems > 0 => "On, but check its settings".to_string(),
+        (true, true) => "On".to_string(),
         // On but unable to do anything is not "on" in any sense that matters to the reader.
-        (None, true, false) => format!("On, but idle: missing {}", missing.join(", ")),
+        (true, false) => format!("On, but idle: missing {}", missing.join(", ")),
     }
 }
 
 /// The status in red when it is on and cannot do its job, so it does not read as fine.
-pub fn status_tone(on: bool, unsupported: Option<&str>, missing: &[&str], problems: usize) -> &'static str {
-    if on && unsupported.is_none() && (!missing.is_empty() || problems > 0) { " status-bad" } else { "" }
+pub fn status_tone(on: bool, missing: &[&str], problems: usize) -> &'static str {
+    if on && (!missing.is_empty() || problems > 0) { " status-bad" } else { "" }
 }
 
 /// Switch on is the one thing a visitor came to do while it is off, so it is the filled button. Switch
 /// off is outlined, like Settings: the way out must not be the loudest thing on the card.
-fn switch_form(token: &str, switch: Switch) -> String {
-    let (action, button) = match switch {
-        Switch::On => ("on", "<button type=\"submit\">Switch on</button>"),
-        Switch::Off => ("off", "<button class=\"ghost\" type=\"submit\">Switch off</button>"),
-        Switch::None => return String::new(),
+fn switch_form(token: &str, on: bool) -> String {
+    let (action, button) = if on {
+        ("off", "<button class=\"ghost\" type=\"submit\">Switch off</button>")
+    } else {
+        ("on", "<button type=\"submit\">Switch on</button>")
     };
     format!(
         "<form method=\"post\" action=\"/{}/{}\"><input type=\"hidden\" name=\"action\" value=\"{action}\">{button}</form>",
@@ -86,8 +66,6 @@ stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linej
 /// Everything the Agents page shows, as plain data.
 pub struct AgentsView<'a> {
     pub on: bool,
-    /// Why this build cannot run it. No switch then, and the reason instead.
-    pub unsupported: Option<&'a str>,
     /// Tools the chosen client needs that will not run. Only ever asked while it is on.
     pub missing: &'a [&'a str],
     /// What is wrong with its settings on this machine, such as a folder that is not there.
@@ -126,12 +104,10 @@ fn in_first_section(sections: &str, card: &str) -> String {
 /// Dry run is offered on or off, and that is the point: the only safe way to learn what switching it on
 /// would do is to ask first.
 fn header_card(token: &str, v: &AgentsView) -> String {
-    let status = agents_status(v.on, v.unsupported, v.missing, v.problems.len());
-    let tone = status_tone(v.on, v.unsupported, v.missing, v.problems.len());
+    let status = agents_status(v.on, v.missing, v.problems.len());
+    let tone = status_tone(v.on, v.missing, v.problems.len());
     let mut notes = String::new();
-    if let Some(why) = v.unsupported {
-        notes.push_str(&format!("<p class=\"sub\">{}</p>", esc(why)));
-    } else if v.on && !v.missing.is_empty() {
+    if v.on && !v.missing.is_empty() {
         notes.push_str(&format!(
             "<p class=\"sub\">Put <code>{}</code> on your PATH. Until then it does nothing.</p>",
             v.missing.iter().map(|m| esc(m)).collect::<Vec<_>>().join("</code>, <code>")
@@ -139,19 +115,15 @@ fn header_card(token: &str, v: &AgentsView) -> String {
     }
     // A card of its own, ahead of everything, and shown while off too: that is the moment a wrong folder
     // is cheapest to fix. Each line jumps to the box at fault, which is marked as well.
-    let alert = if v.unsupported.is_none() { problems_alert(v.on, v.problems) } else { String::new() };
+    let alert = problems_alert(v.on, v.problems);
     let flash = v.flash.map(|m| format!("<p class=\"sub\"><strong>{}</strong></p>", esc(m))).unwrap_or_default();
-    let switch = switch_form(token, agents_switch(v.on, v.unsupported));
-    let dry = if v.unsupported.is_some() {
-        String::new()
-    } else {
-        format!(
-            "<form method=\"post\" action=\"/{}/{}\"><input type=\"hidden\" name=\"action\" value=\"dryrun\">\
-             <button class=\"ghost\" type=\"submit\">Dry run</button></form>",
-            esc(token),
-            Place::Agents.path()
-        )
-    };
+    let switch = switch_form(token, v.on);
+    let dry = format!(
+        "<form method=\"post\" action=\"/{}/{}\"><input type=\"hidden\" name=\"action\" value=\"dryrun\">\
+         <button class=\"ghost\" type=\"submit\">Dry run</button></form>",
+        esc(token),
+        Place::Agents.path()
+    );
     let said = if v.dry_run.is_empty() {
         String::new()
     } else {
@@ -173,7 +145,6 @@ mod tests {
     fn view(on: bool, missing: &'static [&'static str]) -> AgentsView<'static> {
         AgentsView {
             on,
-            unsupported: None,
             missing,
             problems: &[],
             flash: None,
@@ -229,14 +200,7 @@ mod tests {
         let html = page(&AgentsView { problems: &problems, ..view(false, &[]) });
         assert!(html.contains("portal-status\">Off<") && html.contains("Fix these before you switch it on"), "{html}");
         assert!(!page(&view(true, &[])).contains("card alert"), "nothing wrong, nothing shown");
-        assert_eq!(agents_status(true, None, &["git"], 1), "On, but idle: missing git", "a missing tool still comes first");
-    }
-
-    #[test]
-    fn unsupported_offers_no_switch_and_says_why() {
-        let html = page(&AgentsView { unsupported: Some("Agents need Linux or Windows."), ..view(false, &[]) });
-        assert!(html.contains("Not available here") && html.contains("Agents need Linux or Windows."));
-        assert!(!html.contains(r#"value="on""#) && !html.contains(">Dry run<"));
+        assert_eq!(agents_status(true, &["git"], 1), "On, but idle: missing git", "a missing tool still comes first");
     }
 
     /// The chosen client's card sits in the Client section, under its radio, and before the Agent

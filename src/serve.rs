@@ -1448,18 +1448,17 @@ fn sign_in(settings: &Settings, kind: crate::portal::PortalKind, asked: &crate::
 /// The Agents page: the header card, its settings as sections with the chosen client's card in the
 /// first, then where it looks and its prompts.
 fn agents_page(site: &crate::ui::Site, home: &std::path::Path, flash: Option<&(usize, String)>) -> String {
-    use crate::agents::{dispatch, Context, UNSUPPORTED};
+    use crate::agents::{dispatch, Context};
     let cfg = crate::config::Config::load(home).0;
     let ctx = Context::new(home, &cfg);
     let on = cfg.agents_enabled();
-    let missing = if on && UNSUPPORTED.is_none() { dispatch::missing(&ctx) } else { Vec::new() };
+    let missing = if on { dispatch::missing(&ctx) } else { Vec::new() };
     let problems = dispatch::problems(&ctx);
     let header_flash = crate::agents::take_flash();
     let dry_run = crate::agents::last_dry_run();
     let value = |s: &crate::setting::Setting| ctx.setting(s.key).to_string();
     let view = crate::ui::agents::AgentsView {
         on,
-        unsupported: UNSUPPORTED,
         missing: &missing,
         problems: &problems,
         flash: header_flash.as_deref(),
@@ -2742,7 +2741,6 @@ mod tests {
     /// nothing is switched on. Prints the page so `--nocapture` shows what a user would see.
     ///
     /// `#[ignore]`d for the same reason as the test above: it installs the process-wide `SETTINGS`.
-    #[cfg(not(target_os = "macos"))]
     #[test]
     #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
     fn the_agents_page_renders_for_this_machine_over_a_real_connection() {
