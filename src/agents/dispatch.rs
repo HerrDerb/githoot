@@ -866,11 +866,24 @@ pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
     out
 }
 
-/// The chosen client's card, for the page to put under the client radio: its tools as chips, how to
-/// get the one that is missing, and what it needs from you.
-pub fn client_card(ctx: &Context) -> String {
-    let settings = settings_now(ctx, true);
-    client_card_for(settings.client, &missing_tools(settings.client))
+/// Every client's card, for the page to put under the client radio: its tools as chips, how to get the
+/// one that is missing, and what it needs from you. Only the chosen one shows; the page's script swaps
+/// them as the radio changes, so a click shows the new client's card in place, with no reload. Each
+/// says which radio value shows it (`data-shown-by`, `data-shown-for`).
+pub fn client_cards(ctx: &Context) -> String {
+    let chosen = settings_now(ctx, true).client.id();
+    clients::CLIENTS
+        .iter()
+        .map(|client| {
+            let card = client_card_for(*client, &missing_tools(*client));
+            let shows = format!(
+                "<div class=\"card client-card\" data-shown-by=\"agentsClient\" data-shown-for=\"{}\"{}>",
+                esc(client.id()),
+                if client.id() == chosen { "" } else { " hidden" }
+            );
+            card.replacen("<div class=\"card client-card\">", &shows, 1)
+        })
+        .collect()
 }
 
 /// What the page shows below its settings: where it will look, and the prompts.
@@ -1415,6 +1428,20 @@ mod tests {
         }
         let src = include_str!("dispatch.rs");
         assert!(!src.contains(&["GITHOOT", "AGENT_KIND"].join("_")), "the variable is read nowhere");
+    }
+
+    /// One card per client, each saying which radio value shows it; only the chosen one is visible, so
+    /// the script can swap them in place when the radio changes.
+    #[test]
+    fn every_client_has_a_card_and_only_the_chosen_one_shows() {
+        let html = client_cards(&ctx("agentsClient=orca\n"));
+        for (id, _) in clients::CHOICES {
+            let tag = format!(r#"<div class="card client-card" data-shown-by="agentsClient" data-shown-for="{id}""#);
+            let at = html.find(&tag).unwrap_or_else(|| panic!("no card for {id}: {html}"));
+            let hidden = html[at + tag.len()..].starts_with(" hidden>");
+            assert_eq!(hidden, *id != "orca", "{id}: {html}");
+        }
+        assert!(html.contains("Agent permissions"), "Orca's card says what it needs: {html}");
     }
 
     /// The app needs `hc`, not `herdr`, and the page names the right one when it is missing.

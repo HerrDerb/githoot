@@ -1468,7 +1468,7 @@ fn agents_page(site: &crate::ui::Site, home: &std::path::Path, flash: Option<&(u
         sections: crate::ui::sections_with(site.token, &crate::ui::Place::Agents, dispatch::SETTINGS, &value, flash, &|s| {
             problems.iter().find(|p| p.key == s.key).map(|p| p.text.clone())
         }),
-        client_card: dispatch::client_card(&ctx),
+        client_card: dispatch::client_cards(&ctx),
         body: dispatch::page(&ctx, site.token),
     };
     crate::ui::agents::agents_page(site, &view)

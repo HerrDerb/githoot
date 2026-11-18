@@ -242,11 +242,13 @@ const SITE_SCRIPT: &str = "(function(){\
 document.querySelectorAll('form[data-autosave]').forEach(function(f){f.classList.add('auto');});\
 function parts(){document.querySelectorAll('[data-parts]').forEach(function(p){var some=p.querySelector('input[value=\"some\"]');\
 var boxes=p.querySelector('.boxes');if(some&&boxes)boxes.hidden=!some.checked;});}parts();\
+function shown(){document.querySelectorAll('[data-shown-by]').forEach(function(e){\
+var c=document.querySelector('input[name=\"'+e.getAttribute('data-shown-by')+'\"]:checked');if(c)e.hidden=c.value!==e.getAttribute('data-shown-for');});}shown();\
 function counts(){document.querySelectorAll('[data-gates-count]').forEach(function(c){var boxes=c.closest('details').querySelectorAll('.gates input[type=checkbox]');\
 var on=0;boxes.forEach(function(b){if(b.checked)on++;});c.textContent=on+' of '+boxes.length+' '+(c.getAttribute('data-noun')||'rules')+' on';});}\
 function mirror(t){if(t.type!=='checkbox'||!t.form)return;document.querySelectorAll('input[type=checkbox]').forEach(function(o){\
 if(o!==t&&o.form===t.form&&o.name===t.name)o.checked=t.checked;});}/* same name, same form: a data-mirror box and its original */\
-document.addEventListener('change',function(ev){mirror(ev.target);parts();counts();var f=ev.target.form;if(!f||!f.hasAttribute('data-autosave'))return;\
+document.addEventListener('change',function(ev){mirror(ev.target);parts();shown();counts();var f=ev.target.form;if(!f||!f.hasAttribute('data-autosave'))return;\
 var lines=[f.querySelector('.save-line')];document.querySelectorAll('[data-save-for=\"'+f.id+'\"]').forEach(function(l){lines.push(l);});\
 function say(t){lines.forEach(function(l){if(l)l.textContent=t;});}say('Saving…');clearTimeout(f.fade);\
 var body=new URLSearchParams(new FormData(f));body.append('reply','json');\
