@@ -197,12 +197,41 @@ pub fn command(exe: &str) -> Command {
     // Orca's CLI reports usage to a US analytics service unless told not to. Said to every program,
     // which costs the others nothing and cannot be forgotten on one call.
     cmd.env("ORCA_TELEMETRY_DISABLED", "1");
+    // Set on the command, so the program itself is looked up in it and the agent it starts inherits it.
+    if cfg!(target_os = "macos") {
+        cmd.env("PATH", mac_tool_path(std::env::var_os("PATH").as_deref(), dirs::home_dir().as_deref()));
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+/// The PATH every program it runs gets on macOS: the inherited one, then the folders installers use
+/// that it lacks.
+///
+/// An app started from the Dock, Finder or a login item gets launchd's `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// not your shell's PATH, so `hc` and `claude` in `~/.local/bin` and anything from Homebrew would read
+/// as not installed. Appended rather than put first, so a PATH you started it with keeps its order.
+/// Not a login shell per call: that would run your shell profile on every tick. Pure, so it is tested
+/// on every platform although only a Mac uses it.
+pub fn mac_tool_path(inherited: Option<&std::ffi::OsStr>, home: Option<&Path>) -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = match inherited {
+        Some(path) => std::env::split_paths(path).collect(),
+        // Without a PATH the system searches its own default; replacing that with the added folders
+        // alone would lose git.
+        None => ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from).to_vec(),
+    };
+    let local = home.map(|h| h.join(".local/bin"));
+    for dir in local.into_iter().chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    // Only fails on a folder containing the separator, which no inherited PATH can hold.
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 /// Runs a command and returns its stdout, or `Err` with whatever it said. Trimmed, because every
@@ -1488,6 +1517,53 @@ mod tests {
         let cmd = command("orca-ide");
         let off = cmd.get_envs().any(|(k, v)| k == "ORCA_TELEMETRY_DISABLED" && v == Some(std::ffi::OsStr::new("1")));
         assert!(off);
+    }
+
+    fn path_of(dirs: &[&str]) -> std::ffi::OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    fn dirs_of(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+        std::env::split_paths(path).collect()
+    }
+
+    /// An app started from the Dock gets `/usr/bin:/bin:/usr/sbin:/sbin`, so the folders installers
+    /// use are added after it: `hc` and `claude` in `~/.local/bin`, Homebrew on either chip.
+    #[test]
+    fn a_mac_app_finds_tools_where_installers_put_them() {
+        let path = path_of(&["/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
+        let got = mac_tool_path(Some(&path), Some(Path::new("/Users/u")));
+        let want = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/Users/u/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"];
+        assert_eq!(dirs_of(&got), want.map(PathBuf::from));
+    }
+
+    /// Started from a terminal, the PATH is already yours: its order wins and nothing is listed twice.
+    #[test]
+    fn a_path_that_has_them_keeps_its_own_order() {
+        let path = path_of(&["/opt/homebrew/bin", "/usr/bin", "/Users/u/.local/bin"]);
+        let got = mac_tool_path(Some(&path), Some(Path::new("/Users/u")));
+        assert_eq!(dirs_of(&got), ["/opt/homebrew/bin", "/usr/bin", "/Users/u/.local/bin", "/usr/local/bin"].map(PathBuf::from));
+    }
+
+    /// No PATH at all must not become a PATH of only the added folders, which would lose git.
+    /// No home leaves out the one folder under it rather than guessing.
+    #[test]
+    fn no_path_starts_from_the_system_default_and_no_home_skips_local_bin() {
+        let got = mac_tool_path(None, None);
+        let want = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
+        assert_eq!(dirs_of(&got), want.map(PathBuf::from));
+    }
+
+    /// Only a Mac needs it. Linux and Windows apps inherit the PATH you set, so it is left alone there.
+    #[test]
+    fn only_a_mac_widens_the_path_of_what_it_runs() {
+        let cmd = command("git");
+        let path = cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v);
+        if cfg!(target_os = "macos") {
+            assert!(dirs_of(path.expect("a PATH on macOS")).contains(&PathBuf::from("/opt/homebrew/bin")));
+        } else {
+            assert_eq!(path, None);
+        }
     }
 
     /// Nothing in it names a forge: it needs only herdr and git, and serves every portal, including

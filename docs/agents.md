@@ -64,7 +64,7 @@ name also makes an accidental push obvious.
 **Settings ▸ Agents** has the **Switch on** button, the client and agent choices, the bars, the two
 folders, and a line saying where it will look right now. There is no restart: the runner reads
 `config.txt` on every pass. **Switch off** keeps its prompts, state and settings, so switching it on
-later picks up where it left off. Not on macOS, where the page says so and offers no switch.
+later picks up where it left off.
 
 **Press Dry run first.** It runs a real pass with every effect suppressed and writes no state, so it
 cannot change what the next real pass would do. It explains every outcome, including the quiet ones
@@ -114,10 +114,23 @@ shortcut or autostart, none of which carry a shell's environment.
 ### What it needs
 
 The chosen client's program and `git`, on `PATH`: `herdr` for Herdr in a terminal, `hc` for the Herdr
-app, `orca-ide` for Orca (`orca` on Windows). The client card shows each as a chip and names any that
+app, `orca-ide` for Orca (`orca` on Windows and macOS). The client card shows each as a chip and names any that
 will not run, and nothing is started until they all do. No forge tool is required by GitHoot; the agent reads
 its pull request with the one that fits (`gh` for GitHub, `glab` for GitLab), signed in as you, so
 have that installed for the portals you use.
+
+### On macOS
+
+An app started from the Dock, Finder or a login item does not get your shell's `PATH`, only
+`/usr/bin:/bin:/usr/sbin:/sbin`. So on macOS every program Agents runs gets that `PATH` with
+`~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` added after it, where they are missing. The
+agent it starts inherits the same `PATH`. A tool installed anywhere else is reported as missing; link
+it into one of those folders.
+
+**Agents has not been run on a Mac yet.** The macOS build compiles and the tests pass on Linux, but
+nothing has been tried on macOS itself: not the `PATH` above, not the CLI names (`herdr`, `hc`,
+`orca`) or where their installers put them, and not the first-run prompts Claude shows in a new
+folder. Press Dry run first, and expect rough edges.
 
 ## The prompts
 
@@ -192,7 +205,7 @@ never runs `herdr-app` itself, so the app does not need to be open:
 ## Orca
 
 With **Orca** chosen, GitHoot drives [Orca](https://orca.dev) through its own command line, which
-is `orca-ide` on Linux, where `orca` is the GNOME screen reader, and `orca` on Windows. **Orca must
+is `orca-ide` on Linux, where `orca` is the GNOME screen reader, and `orca` on Windows and macOS. **Orca must
 be running**: GitHoot never starts it. If it is not, the log says so and the next pass tries again.
 Every call runs with `ORCA_TELEMETRY_DISABLED=1`, as Orca otherwise reports usage to an analytics
 service.
