@@ -1200,7 +1200,10 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
                     let info = i.info();
                     let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
                     // Only asked while installed: spawning processes to draw a list is waste.
-                    let missing = if installed && info.unsupported.is_none() { i.missing() } else { Vec::new() };
+                    let missing = match (&cfg, installed && info.unsupported.is_none()) {
+                        (Some(c), true) => i.missing(&crate::integration::Context::new(&settings_path(), c, info.id)),
+                        _ => Vec::new(),
+                    };
                     // Asked installed or not, as its page does: before Install is when a wrong folder is cheapest to fix.
                     let problems = match (&cfg, info.unsupported) {
                         (Some(c), None) => i.problems(&crate::integration::Context::new(&settings_path(), c, info.id)),
@@ -1494,7 +1497,7 @@ fn integration_page(
     let info = integration.info();
     let ctx = crate::integration::Context::new(home, &cfg, info.id);
     let installed = cfg.integration_enabled(info.id);
-    let missing = if installed && info.unsupported.is_none() { integration.missing() } else { Vec::new() };
+    let missing = if installed && info.unsupported.is_none() { integration.missing(&ctx) } else { Vec::new() };
     let problems = integration.problems(&ctx);
     let header_flash = crate::integration::take_flash(info.id);
     let dry_run = crate::integration::last_dry_run(info.id);

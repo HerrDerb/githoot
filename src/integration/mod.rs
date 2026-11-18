@@ -132,7 +132,7 @@ pub trait Integration: Send + Sync {
     fn setting_changed(&self, _ctx: &Context, _key: &str, _value: &str) {}
 
     /// Tools it needs that will not run. Empty when it has everything.
-    fn missing(&self) -> Vec<&'static str> {
+    fn missing(&self, _ctx: &Context) -> Vec<&'static str> {
         Vec::new()
     }
 
@@ -321,7 +321,7 @@ fn run_once(
     let mut lines = Vec::new();
     // One complaint per pass, never two: a "missing nothing" said first would overwrite what the
     // pass said last time, and the pass would then say it again as if it were news.
-    let missing = integration.missing();
+    let missing = integration.missing(ctx);
     if !missing.is_empty() {
         lines.extend(complain_once(last, id, format!("missing {}", missing.join(", "))));
         return lines;

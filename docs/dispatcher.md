@@ -77,6 +77,7 @@ a real pass does not bother to say, which is the whole point of pressing it.
 | Key | Default | Meaning |
 |---|---|---|
 | `integration.herdr.enabled` | `off` | Installed or not. What Install and Uninstall write. An unrecognised value leaves it off |
+| `integration.herdr.host` | `herdr` | Where agents open: `herdr` (Herdr in a terminal) or `herdr-app` (the Herdr app). An unrecognised value is `herdr`. See [Herdr app](#the-herdr-app) |
 | `integration.herdr.workRequired` | `on` | Start agents for the amber bar: your pull requests that need work |
 | `integration.herdr.requestedReviews` | `on` | Start agents for the red bar: reviews requested of you |
 | `integration.herdr.approved` | `off` | Start agents for the green bar: your approved pull requests |
@@ -109,10 +110,12 @@ started from a shell. The settings come first, deliberately: GitHoot is started 
 shortcut or autostart, none of which carry a shell's environment.
 
 `GITHOOT_AGENT_KIND` picks the agent (`claude` by default; any kind `herdr agent start --kind` accepts).
+In the Herdr app it is the program to run, and it must take its first prompt as an argument, as
+`claude` and `codex` do.
 
 ### What it needs
 
-`herdr` and `git`, on `PATH`. The page shows each as a chip and names any that will not run, and
+The chosen host's program and `git`, on `PATH`: `herdr` for Herdr in a terminal, `hc` for the Herdr app. The page shows each as a chip and names any that will not run, and
 nothing is dispatched until they all do. No forge tool is required by the dispatcher; the agent reads
 its pull request with the one that fits (`gh` for GitHub, `glab` for GitLab), signed in as you, so
 have that installed for the portals you use.
@@ -158,14 +161,40 @@ with `--dangerously-skip-permissions`.
 What GitHoot does **not** hand over: its own credential. GitHoot's token is read-only and never
 leaves it. The agent reads the diff and the comments itself, with `gh` or `glab`, under your credential.
 
+## The Herdr app
+
+**Agents open in** on its page picks between **Herdr in a terminal** (the `herdr` server the TUI
+attaches to, the default) and the **Herdr app**. They are two separate programs with separate lists
+of terminals, so an agent started in one never shows up in the other.
+
+In the app, GitHoot drives `hc`, the command line of herdr-core, which runs the app's terminals. It
+never runs `herdr-app` itself, so the app does not need to be open:
+
+- **The worktree** is made with plain `git worktree add`. The app has no worktree command; it shows
+  any git worktree, nested under its repository, which is what its own New worktree does too.
+- **The agent** starts with one `hc run --bg --no-parent --keep --name <slug> --cwd <worktree>
+  --label herdr.space=githoot-<slug> -- <agent> "<prompt>"`. The label puts it in a space of its
+  own, named after the worktree, the next time the app is open. The prompt is the agent's first
+  argument, because the app's manual warns that a message sent to an agent still starting can be
+  lost. `--no-parent` keeps the agent alive if GitHoot itself was started from an app terminal.
+  Codex gets `--no-daemon`, which the manual requires.
+- **No folder trust is skipped.** The terminal host passes `--trust-repository`; `hc` has no such
+  switch, so Claude asks whether to trust each new worktree once. The app shows that agent as
+  waiting for you.
+
+Adding another agent workspace is one new file in `src/integration/herdr/host/` and one more
+option on the radio.
+
 ## Who is already working a pull request
 
-Herdr answers that. A live agent sitting in the worktree is the claim, and only an agent the
-dispatcher started counts: a session you opened yourself in your own clone is not a claim on a
-dispatcher worktree.
+Both hosts answer that, **whichever one is chosen**: an agent you started in the other one is still
+somebody working that pull request. A live agent sitting in the worktree is the claim, and only an
+agent counts, not a shell: in Herdr in a terminal that is a named agent, one the dispatcher started,
+because Herdr keeps a plain shell pane in a worktree after its agent has gone. In the app it is a
+named terminal or any terminal reporting an agent status, since there only an agent reports one.
 
-When the agent has gone but its worktree is still on disk, the worktree is reused if Herdr still
-knows it, recycled if Herdr has forgotten it **and** it holds no uncommitted changes and no unpushed
+When the agent has gone but its worktree is still on disk, the worktree is reused if Herdr in a
+terminal still knows it, recycled if it does not (the app never does) **and** it holds no uncommitted changes and no unpushed
 commits, and **left alone with a line in the log** if it holds either. The dispatcher never deletes
 work.
 

@@ -572,6 +572,8 @@ fn field(s: &Setting, value: &str, trouble: Option<&str>) -> String {
             esc(placeholder)
         ),
         Kind::Choice { options } => {
+            // Nothing in the file, or a value it does not offer, is the first option: the default.
+            let value = if options.iter().any(|(v, _)| *v == value) { value } else { options.first().map_or("", |(v, _)| *v) };
             let radios: String = options
                 .iter()
                 .map(|(v, label)| {
@@ -1102,6 +1104,18 @@ pub(crate) mod tests {
         assert!(html.contains(r#"<input type="radio" name="level" value="error"> Errors"#));
         assert!(html.contains(r#"<input type="checkbox" name="parts" value="Pages" checked> Pages"#));
         assert!(html.contains(r#"<input type="checkbox" name="parts" value="API"> API"#));
+    }
+
+    /// A radio with nothing in the file, or a value it does not offer, shows its first option ticked:
+    /// the default, which is what the code reading it falls back to as well. None ticked would say
+    /// "nothing chosen" about a setting that always has an answer.
+    #[test]
+    fn an_unset_radio_ticks_its_first_option() {
+        for unset in ["", "typo"] {
+            let html = sections("tok", &Place::General, DECLARED, &|s: &Setting| if s.key == "level" { unset.into() } else { values(s) }, None);
+            assert!(html.contains(r#"<input type="radio" name="level" value="error" checked> Errors"#), "{unset:?}: {html}");
+            assert!(html.contains(r#"<input type="radio" name="level" value="info"> All"#), "{unset:?}");
+        }
     }
 
     /// A folder is its text box plus a Browse button the script reveals: without the script the button
