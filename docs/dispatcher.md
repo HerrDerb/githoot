@@ -77,7 +77,7 @@ a real pass does not bother to say, which is the whole point of pressing it.
 | Key | Default | Meaning |
 |---|---|---|
 | `integration.herdr.enabled` | `off` | Installed or not. What Install and Uninstall write. An unrecognised value leaves it off |
-| `integration.herdr.host` | `herdr` | Where agents open: `herdr` (Herdr in a terminal) or `herdr-app` (the Herdr app). An unrecognised value is `herdr`. See [Herdr app](#the-herdr-app) |
+| `integration.herdr.host` | `herdr` | Where agents open: `herdr` (Herdr in a terminal), `herdr-app` (the Herdr app) or `orca` ([Orca](https://orca.dev)). An unrecognised value is `herdr`. See [Herdr app](#the-herdr-app) and [Orca](#orca) |
 | `integration.herdr.workRequired` | `on` | Start agents for the amber bar: your pull requests that need work |
 | `integration.herdr.requestedReviews` | `on` | Start agents for the red bar: reviews requested of you |
 | `integration.herdr.approved` | `off` | Start agents for the green bar: your approved pull requests |
@@ -115,7 +115,7 @@ In the Herdr app it is the program to run, and it must take its first prompt as 
 
 ### What it needs
 
-The chosen host's program and `git`, on `PATH`: `herdr` for Herdr in a terminal, `hc` for the Herdr app. The page shows each as a chip and names any that will not run, and
+The chosen host's program and `git`, on `PATH`: `herdr` for Herdr in a terminal, `hc` for the Herdr app, `orca-ide` for Orca (`orca` on Windows). The page shows each as a chip and names any that will not run, and
 nothing is dispatched until they all do. No forge tool is required by the dispatcher; the agent reads
 its pull request with the one that fits (`gh` for GitHub, `glab` for GitLab), signed in as you, so
 have that installed for the portals you use.
@@ -181,6 +181,37 @@ never runs `herdr-app` itself, so the app does not need to be open:
 - **No folder trust is skipped.** The terminal host passes `--trust-repository`; `hc` has no such
   switch, so Claude asks whether to trust each new worktree once. The app shows that agent as
   waiting for you.
+
+## Orca
+
+With **Orca** chosen, GitHoot drives [Orca](https://orca.dev) through its own command line, which
+is `orca-ide` on Linux, where `orca` is the GNOME screen reader, and `orca` on Windows. **Orca must
+be running**: GitHoot never starts it. If it is not, the log says so and the next pass tries again.
+Every call runs with `ORCA_TELEMETRY_DISABLED=1`, as Orca otherwise reports usage to an analytics
+service.
+
+**Set Orca's agent permissions to Manual or Ask first** (Settings ▸ Agents ▸ Agent permissions).
+Orca chooses the agent's permission flags itself, on every launch, and its default, Yolo, starts
+Claude with `--dangerously-skip-permissions`. That would take away the guard rail above: the agent
+would push or merge without asking you. Orca has no command to change or read that setting, but
+each launch reports the arguments it used. So GitHoot checks them, and an agent Orca would let act
+without asking (Yolo, or Auto) is closed again before it is given the pull request, with this in
+the log until the setting is changed:
+
+> `Orca starts claude with --dangerously-skip-permissions, which lets it act without asking you, so it was closed before it got the pull request. In Orca, set Settings > Agents > Agent permissions to Manual or Ask`
+
+What a dispatch does there:
+
+- **The repository** is added to Orca (`repo add`, harmless when it is already there) and set to
+  show worktrees made outside Orca (`repo set --external-worktree-visibility show`).
+- **The worktree** is made with plain `git worktree add`, as for the Herdr app. Orca's own
+  `worktree create` chooses its own path and may rename a taken branch, which would break the
+  folders and the push guard.
+- **The agent** starts in an Orca terminal in that worktree (`terminal create --command claude`).
+  Once it is ready (`terminal wait --for tui-idle`), the prompt is pasted as one block
+  (`terminal send --enter`), and it counts as delivered only when the agent is seen starting a turn.
+- **Who is working:** every agent `agent list` shows in a dispatcher worktree, finished ones
+  included, since Orca keeps those listed while they sleep.
 
 Adding another agent workspace is one new file in `src/integration/herdr/host/` and one more
 option on the radio.

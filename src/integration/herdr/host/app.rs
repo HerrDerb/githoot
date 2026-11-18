@@ -48,8 +48,9 @@ impl Host for HerdrApp {
             .collect()
     }
 
-    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, String> {
-        run("git", &["-C", w.clone, "worktree", "add", "-b", w.branch, w.path, w.base])?;
+    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, Trouble> {
+        run("git", &["-C", w.clone, "worktree", "add", "-b", w.branch, w.path, w.base])
+            .map_err(|e| Trouble::Passing(format!("could not create the worktree: {e}")))?;
         Ok(w.path.to_string())
     }
 

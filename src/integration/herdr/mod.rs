@@ -196,6 +196,9 @@ pub fn setup_problems(settings: &Settings) -> Vec<Problem> {
 pub fn command(exe: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(exe);
+    // Orca's CLI reports usage to a US analytics service unless told not to. Said to every program,
+    // which costs the others nothing and cannot be forgotten on one call.
+    cmd.env("ORCA_TELEMETRY_DISABLED", "1");
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -364,9 +367,18 @@ fn fold(path: &str) -> String {
 /// Every use here reads one short, known field out of a Herdr reply whose shape Herdr controls.
 /// A real parse would buy correctness this does not need and a crate this binary does not have.
 pub(crate) fn json_string(haystack: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":\"");
-    let rest = &haystack[haystack.find(&needle)? + needle.len()..];
-    Some(rest[..rest.find('"')?].to_string())
+    let needle = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(&needle) {
+        from += at + needle.len();
+        // A key, not the same text as a value: it is followed by a colon. Spaces either side are fine,
+        // for Orca prints its JSON indented and Herdr does not.
+        if let Some(value) = haystack[from..].trim_start().strip_prefix(':') {
+            let value = value.trim_start().strip_prefix('"')?;
+            return Some(value[..value.find('"')?].to_string());
+        }
+    }
+    None
 }
 
 /// Substitutes the `{braced}` placeholders. Plain replacement, never a format string, so a stray
@@ -527,9 +539,7 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<
             let _ = output("git", &["-C", &clone_str, "branch", "-D", &own]);
         }
         let new = host::NewWorktree { clone: &clone_str, path: &worktree_str, branch: &own, base: &base, slug };
-        place = host
-            .create(&new, &mut run)
-            .map_err(|e| Trouble::Passing(format!("could not create the worktree: {e}")))?;
+        place = host.create(&new, &mut run)?;
     }
 
     // Before the agent exists, and on a reused worktree too: drop any upstream a 3.2.0 worktree was
@@ -1371,6 +1381,23 @@ mod tests {
         let app = Settings { host: &host::HerdrApp, ..settings() };
         let html = page_body("tok", &app, &["hc"], &[]);
         assert!(html.contains("hc not found") && !html.contains("herdr not found"), "{html}");
+    }
+
+    /// Orca answers pretty-printed JSON, with a space after every colon; Herdr answers compact JSON.
+    #[test]
+    fn a_json_field_is_read_with_or_without_spaces() {
+        assert_eq!(json_string(r#"{"handle":"t1"}"#, "handle"), Some("t1".to_string()));
+        assert_eq!(json_string("{\n  \"handle\": \"t1\",", "handle"), Some("t1".to_string()));
+        assert_eq!(json_string(r#"{"handle": null}"#, "handle"), None, "not a string");
+    }
+
+    /// Orca's CLI reports usage to a US analytics service unless told not to. Every program the
+    /// dispatcher runs is told, which costs the others nothing.
+    #[test]
+    fn every_program_it_runs_has_orca_telemetry_off() {
+        let cmd = command("orca-ide");
+        let off = cmd.get_envs().any(|(k, v)| k == "ORCA_TELEMETRY_DISABLED" && v == Some(std::ffi::OsStr::new("1")));
+        assert!(off);
     }
 
     /// Nothing in it names a forge: it needs only herdr and git, and serves every portal, including
