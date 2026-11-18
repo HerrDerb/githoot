@@ -32,7 +32,9 @@ Everything stays on your computer, in the `.githoot` folder in your home directo
 
 Start at sign-in, when you agree to it, adds an entry to your system's startup list. The hoot sound is
 unpacked once into your system's temporary folder. Uninstalling GitHoot means deleting the program, the
-`.githoot` folder and that startup entry.
+`.githoot` folder and that startup entry. On Windows, a desktop notification from [Agents](agents.md#orca)
+also leaves GitHoot's name under `HKCU\Software\Classes\AppUserModelId\HerrDerb.GitHoot`, so Windows
+shows it; delete that key too.
 
 ## Local pages
 

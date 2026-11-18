@@ -181,6 +181,24 @@ pub fn set_enabled(on: bool) -> Result<(), String> {
     enable(&exe)
 }
 
+/// Lets Windows show GitHoot's toasts: a toast is shown only from a sender registered under
+/// `HKCU\Software\Classes\AppUserModelId`, and its `DisplayName` is the name the toast carries. Per
+/// user, no elevation, and written again on every toast, which is cheap and puts it back if something
+/// cleaned it away. Lives here because the registry code does.
+#[cfg(target_os = "windows")]
+pub fn register_notification_sender(app_id: &str) -> Result<(), String> {
+    register_notification_sender_under(NOTIFICATION_SENDERS, app_id)
+}
+
+#[cfg(target_os = "windows")]
+const NOTIFICATION_SENDERS: &str = "Software\\Classes\\AppUserModelId";
+
+#[cfg(target_os = "windows")]
+fn register_notification_sender_under(root: &str, app_id: &str) -> Result<(), String> {
+    use winapi::um::winnt::KEY_SET_VALUE;
+    Key::create(&format!("{root}\\{app_id}"), KEY_SET_VALUE)?.set_string("DisplayName", "GitHoot")
+}
+
 // ─── Windows: the little bit of registry this needs ──────────────────────────
 //
 // Hand-rolled on `winapi`, which is already a dependency, rather than adding `windows-registry` for
@@ -836,6 +854,16 @@ mod windows_tests {
                 .expect("a subkey must be creatable");
         }
         (key, cleanup)
+    }
+
+    /// The sender a toast is shown from: its own key, named GitHoot, which is what the toast says.
+    #[test]
+    fn a_notification_sender_is_registered_under_its_id_as_githoot() {
+        let (_key, _cleanup) = fresh_test_key("toast", &["HerrDerb.GitHoot"]);
+        register_notification_sender_under(&test_root("toast"), "HerrDerb.GitHoot").expect("registered");
+        let sender = Key::open(&format!("{}\\HerrDerb.GitHoot", test_root("toast")), KEY_READ).expect("there");
+        assert_eq!(sender.string("DisplayName").as_deref(), Some("GitHoot"));
+        assert_eq!(NOTIFICATION_SENDERS, "Software\\Classes\\AppUserModelId");
     }
 
     #[test]

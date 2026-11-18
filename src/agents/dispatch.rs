@@ -918,6 +918,21 @@ pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
 /// one that is missing, and what it needs from you. Only the chosen one shows; the page's script swaps
 /// them as the radio changes, so a click shows the new client's card in place, with no reload. Each
 /// says which radio value shows it (`data-shown-by`, `data-shown-for`).
+/// How the chosen client is opened from the notification that says it is absent.
+#[derive(Debug)]
+pub struct Opener {
+    /// The button: "Open Orca".
+    pub label: String,
+    pub tool: &'static str,
+    pub args: &'static [&'static str],
+}
+
+/// The chosen client's [`Opener`], `None` when it has none.
+pub fn opener(ctx: &Context) -> Option<Opener> {
+    let client = settings_now(ctx, true).client;
+    client.opener().map(|args| Opener { label: format!("Open {}", client.name()), tool: client.tool(), args })
+}
+
 pub fn client_cards(ctx: &Context) -> String {
     let chosen = settings_now(ctx, true).client.id();
     clients::CLIENTS
@@ -1490,6 +1505,19 @@ mod tests {
             assert_eq!(hidden, *id != "orca", "{id}: {html}");
         }
         assert!(html.contains("Agent permissions"), "Orca's card says what it needs: {html}");
+    }
+
+    /// Only a client you have to open yourself gets a button on its notification. Orca opens with its
+    /// own command line; the Herdr server is started by GitHoot, so it is never absent.
+    #[test]
+    fn only_orca_offers_to_open_itself_from_its_notification() {
+        let orca = opener(&ctx("agentsClient=orca\n")).expect("Orca can be opened");
+        assert_eq!(orca.label, "Open Orca");
+        assert_eq!(orca.tool, clients::by_id("orca").tool());
+        assert_eq!(orca.args, ["open"]);
+        for id in ["herdr", "herdr-app", ""] {
+            assert!(opener(&ctx(&format!("agentsClient={id}\n"))).is_none(), "{id}");
+        }
     }
 
     /// The app needs `hc`, not `herdr`, and the page names the right one when it is missing.

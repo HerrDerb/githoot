@@ -209,8 +209,13 @@ is `orca-ide` on Linux, where `orca` is the GNOME screen reader, and `orca` on W
 be running**: GitHoot never starts it, since that would mean opening a window on its own. If it is
 not, nothing is done for the pull request yet: GitHoot shows a **desktop notification**, "An agent is
 waiting to start: Orca is not running. Open Orca", once per time Orca goes missing rather than every
-pass, the log says so once, and the agent starts on the first pass after you open Orca. The
-notification is Linux only for now; on Windows and macOS the log line is all there is.
+pass, the log says so once, and the agent starts on the first pass after you open Orca. Click the
+notification, or its **Open Orca** button, and GitHoot opens Orca for you with `orca open`; the log
+says whether that worked. The notification is shown on Linux and Windows; on macOS the log line is
+all there is. On Windows it is a toast from GitHoot, which Windows only shows from a sender it knows,
+so the first one registers GitHoot as one under `HKCU\Software\Classes\AppUserModelId\HerrDerb.GitHoot`.
+A click reaches GitHoot while the toast is on screen; one clicked later from the notification centre
+may do nothing.
 Every call runs with `ORCA_TELEMETRY_DISABLED=1`, as Orca otherwise reports usage to an analytics
 service.
 

@@ -63,6 +63,11 @@ impl Client for Orca {
         }
     }
 
+    /// Its own command line opens it, and returns once it is ready to take an agent.
+    fn opener(&self) -> Option<&'static [&'static str]> {
+        Some(&["open"])
+    }
+
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
         let raw = match run(self.tool(), &["agent", "list", "--json"]) {
             Ok(raw) if !is_false(&raw, "ok") => raw,

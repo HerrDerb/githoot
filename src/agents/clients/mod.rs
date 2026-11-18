@@ -68,6 +68,11 @@ pub trait Client: Sync + std::fmt::Debug {
     fn ready(&self, _run: &mut Run) -> Result<(), Trouble> {
         Ok(())
     }
+    /// Its tool's arguments that open it, for a client only you can start: the notification that says
+    /// it is absent then offers to open it. `None` for a client GitHoot starts itself or cannot open.
+    fn opener(&self) -> Option<&'static [&'static str]> {
+        None
+    }
     /// A worktree already on disk that this client still knows, as the place to start in. `None`
     /// means it does not, and the worktree is recycled if nothing would be lost.
     fn reopen(&self, _worktree: &str, _run: &mut Run) -> Option<String> {

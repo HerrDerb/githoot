@@ -289,6 +289,18 @@ pub fn dry_run_now(app_asset_path: &Path) {
     }
 }
 
+/// The notification's click: runs the opener, and logs what came of it, since nobody is watching.
+fn click(open: dispatch::Opener) -> crate::dialog::Click {
+    let dispatch::Opener { label, tool, args } = open;
+    crate::dialog::Click {
+        label,
+        run: Box::new(move || match dispatch::output(tool, args) {
+            Ok(_) => crate::infoln!("agents: opened {tool} from the notification"),
+            Err(e) => crate::errorln!("agents: could not open {tool} from the notification: {e}"),
+        }),
+    }
+}
+
 /// Brings the shipped prompts up to date, then starts the one thread that runs passes while it is on.
 ///
 /// Always started, on or not: it reads `config.txt` on every pass, which is what lets the switch take
@@ -326,7 +338,7 @@ pub fn start(app_asset_path: PathBuf) {
                     }
                 }
                 if let Some(why) = notice_once(&mut shown, &absent)
-                    && let Err(e) = crate::dialog::notify("An agent is waiting to start", &why)
+                    && let Err(e) = crate::dialog::notify("An agent is waiting to start", &why, dispatch::opener(&ctx).map(click))
                 {
                     crate::infoln!("agents: no desktop notification: {e}");
                 }

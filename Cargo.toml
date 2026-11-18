@@ -73,4 +73,7 @@ winit = "0.30.12"
 # feature flag rather than a new dependency. `/dev/urandom` covers Linux and macOS from std alone.
 # `combaseapi`, `objbase`, `shobjidl`, `shobjidl_core` and `wtypesbase` are `dialog::pick_folder`: the
 # settings page's Browse button, Explorer's own `IFileOpenDialog` in folder mode. Feature flags again.
+# `dialog::notify`: a toast with a click. A thin wrapper over WinRT's own toast API, from the Tauri
+# project; winapi predates WinRT and cannot reach it.
+tauri-winrt-notification = "0.8.1"
 winapi = { version = "0.3.9", features = ["winuser", "synchapi", "errhandlingapi", "processthreadsapi", "handleapi", "winnt", "winver", "winreg", "winerror", "bcrypt", "combaseapi", "objbase", "shobjidl", "shobjidl_core", "wtypesbase"] }

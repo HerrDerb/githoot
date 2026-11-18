@@ -175,48 +175,136 @@ fn confirm(
     }
 }
 
-/// A desktop notification: `summary` as its title, `body` under it, no buttons and no click action. For
-/// telling you about something only you can do, such as opening Orca, when the log is not where you
-/// would look.
+/// What clicking a notification does: `label` names it on its button, `run` does it, on a thread of its
+/// own so a slow program never holds up the desktop's answer or the tray.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub struct Click {
+    pub label: String,
+    pub run: Box<dyn Fn() + Send + Sync>,
+}
+
+/// A desktop notification: `summary` as its title, `body` under it, and, with a `click`, a button and a
+/// click on the notification itself that both run it. For telling you about something only you can do,
+/// such as opening Orca, when the log is not where you would look.
 ///
-/// Linux only for now, through the desktop's own notification service on the session bus
-/// (`org.freedesktop.Notifications`), with the GIO that GTK already brings: no new dependency, and every
-/// desktop that shows notifications implements it. Windows would need GitHoot registered with the
-/// shell before a toast shows; until then this says it cannot, and the caller's log line stands.
-pub fn notify(summary: &str, body: &str) -> Result<(), String> {
+/// On Linux through the desktop's own notification service on the session bus
+/// (`org.freedesktop.Notifications`), with the GIO that GTK already brings. On Windows a toast, sent
+/// as GitHoot once GitHoot is registered as a sender (see `autostart::register_notification_sender`).
+/// macOS says it cannot, and the caller's log line stands.
+pub fn notify(summary: &str, body: &str, click: Option<Click>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         use gtk::gio;
         let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).map_err(|e| e.to_string())?;
-        bus.call_sync(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            "org.freedesktop.Notifications",
-            "Notify",
-            Some(&notify_args(summary, body)),
-            None,
-            gio::DBusCallFlags::NONE,
-            5_000,
-            gio::Cancellable::NONE,
-        )
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        if click.is_some() {
+            listen_for_clicks(&bus);
+        }
+        let reply = bus
+            .call_sync(
+                Some("org.freedesktop.Notifications"),
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "Notify",
+                Some(&notify_args(summary, body, click.as_ref().map(|c| c.label.as_str()))),
+                None,
+                gio::DBusCallFlags::NONE,
+                5_000,
+                gio::Cancellable::NONE,
+            )
+            .map_err(|e| e.to_string())?;
+        if let (Some(click), Some((id,))) = (click, reply.get::<(u32,)>())
+            && let Ok(mut waiting) = CLICKS.lock()
+        {
+            waiting.push((id, std::sync::Arc::from(click.run)));
+        }
+        Ok(())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        let _ = (summary, body);
-        Err("desktop notifications are only shown on Linux for now".to_string())
+        use tauri_winrt_notification::Toast;
+        crate::autostart::register_notification_sender(TOAST_SENDER)?;
+        let mut toast = Toast::new(TOAST_SENDER).title(summary).text1(body);
+        if let Some(click) = click {
+            let run: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::from(click.run);
+            // The button's argument is `open`, a click on the toast itself has none: either runs it.
+            toast = toast.add_button(&click.label, "open").on_activated(move |_| {
+                let run = run.clone();
+                std::thread::spawn(move || run());
+                Ok(())
+            });
+        }
+        toast.show().map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (summary, body, click);
+        Err("desktop notifications are not shown on macOS yet".to_string())
+    }
+}
+
+/// The name toasts are sent under, and the one registered for them. Windows shows a toast only from a
+/// sender it knows, and names the sender on it.
+#[cfg(target_os = "windows")]
+pub const TOAST_SENDER: &str = "HerrDerb.GitHoot";
+
+/// Notifications that can still be clicked, by the id the desktop gave them. Forgotten when the
+/// desktop says one was clicked or closed.
+#[cfg(target_os = "linux")]
+#[allow(clippy::type_complexity)]
+static CLICKS: std::sync::Mutex<Vec<(u32, std::sync::Arc<dyn Fn() + Send + Sync>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Listens, once, for the desktop's answers to our notifications. Called from any thread: with no
+/// main context of its own, the answers arrive on GTK's, which the tray already runs.
+#[cfg(target_os = "linux")]
+fn listen_for_clicks(bus: &gtk::gio::DBusConnection) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        bus.signal_subscribe(
+            Some("org.freedesktop.Notifications"),
+            Some("org.freedesktop.Notifications"),
+            None,
+            Some("/org/freedesktop/Notifications"),
+            None,
+            gtk::gio::DBusSignalFlags::NONE,
+            |_, _, _, _, member, args| {
+                let Some((id, clicked)) = answered(member, args) else { return };
+                let Ok(mut waiting) = CLICKS.lock() else { return };
+                let Some(at) = waiting.iter().position(|(n, _)| *n == id) else { return };
+                let (_, run) = waiting.remove(at);
+                if clicked {
+                    std::thread::spawn(move || run());
+                }
+            },
+        );
+    });
+}
+
+/// The actions a notification with a click offers: `default` is a click on the notification itself,
+/// which desktops do not draw as a button, and `open` is the button, for desktops that only offer
+/// buttons.
+#[cfg(target_os = "linux")]
+const CLICK_ACTIONS: [&str; 2] = ["default", "open"];
+
+/// What one of the desktop's signals says about a notification: its id, and whether it was clicked
+/// (`true`) or is gone without a click (`false`). `None` for anything else.
+#[cfg(target_os = "linux")]
+fn answered(member: &str, args: &gtk::glib::Variant) -> Option<(u32, bool)> {
+    match member {
+        "ActionInvoked" => args.get::<(u32, String)>().map(|(id, key)| (id, CLICK_ACTIONS.contains(&key.as_str()))),
+        "NotificationClosed" => args.get::<(u32, u32)>().map(|(id, _)| (id, false)),
+        _ => None,
     }
 }
 
 /// `Notify`'s arguments, as the specification orders them: app name, the id to replace (0, none), an
-/// icon (none), the summary, the body, the actions (none), the hints (none), and the timeout (-1, the
-/// desktop's own default).
+/// icon (none), the summary, the body, the actions (each a key and its label), the hints (none), and
+/// the timeout (-1, the desktop's own default).
 #[cfg(target_os = "linux")]
-fn notify_args(summary: &str, body: &str) -> gtk::glib::Variant {
+fn notify_args(summary: &str, body: &str, click: Option<&str>) -> gtk::glib::Variant {
     use gtk::glib::{ToVariant, Variant};
     let hints: std::collections::HashMap<String, Variant> = std::collections::HashMap::new();
-    ("GitHoot", 0u32, "", summary, body, Vec::<String>::new(), hints, -1i32).to_variant()
+    let actions: Vec<String> = click.map_or_else(Vec::new, |label| CLICK_ACTIONS.iter().flat_map(|key| [key.to_string(), label.to_string()]).collect());
+    ("GitHoot", 0u32, "", summary, body, actions, hints, -1i32).to_variant()
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -225,17 +313,40 @@ mod notify_tests {
     /// shape is pinned here rather than found out on a desktop.
     #[test]
     fn notify_sends_exactly_the_arguments_the_specification_names() {
-        let args = super::notify_args("Orca is not running", "Open Orca.");
+        let args = super::notify_args("Orca is not running", "Open Orca.", None);
         assert_eq!(args.type_().as_str(), "(susssasa{sv}i)");
         assert_eq!(args.child_value(3).str(), Some("Orca is not running"));
         assert_eq!(args.child_value(4).str(), Some("Open Orca."));
+        assert_eq!(args.child_value(5).get::<Vec<String>>(), Some(vec![]), "nothing to click, no actions");
+    }
+
+    /// A click on the notification itself is the `default` action, which desktops do not draw as a
+    /// button; the second pair is the button, for desktops that only offer buttons. Both do the same.
+    #[test]
+    fn a_click_is_offered_as_the_notification_itself_and_as_a_button() {
+        let args = super::notify_args("Orca is not running", "Open Orca.", Some("Open Orca"));
+        assert_eq!(args.child_value(5).get::<Vec<String>>(), Some(vec!["default".into(), "Open Orca".into(), "open".into(), "Open Orca".into()]));
+    }
+
+    /// What the desktop answers: a click on either action runs it, any other action or the
+    /// notification closing only forgets it.
+    #[test]
+    fn a_click_on_either_action_runs_it_and_closing_only_forgets_it() {
+        use gtk::glib::ToVariant;
+        let answered = |member: &str, args: gtk::glib::Variant| super::answered(member, &args);
+        assert_eq!(answered("ActionInvoked", (7u32, "default").to_variant()), Some((7, true)));
+        assert_eq!(answered("ActionInvoked", (7u32, "open").to_variant()), Some((7, true)));
+        assert_eq!(answered("ActionInvoked", (7u32, "something-else").to_variant()), Some((7, false)));
+        assert_eq!(answered("NotificationClosed", (7u32, 2u32).to_variant()), Some((7, false)));
+        assert_eq!(answered("ActivationToken", (7u32, "token").to_variant()), None, "not an answer");
+        assert_eq!(answered("ActionInvoked", ("no id",).to_variant()), None, "not the shape the specification names");
     }
 
     /// A real notification on this desktop, through the real session bus. Run by hand: it pops one up.
     #[test]
     #[ignore = "shows a real desktop notification; run on its own"]
     fn a_real_notification_shows_on_this_desktop() {
-        super::notify("An agent is waiting to start", "Orca is not running. Open Orca, and the next pass starts the agent")
+        super::notify("An agent is waiting to start", "Orca is not running. Open Orca, and the next pass starts the agent", None)
             .expect("the desktop's notification service answers");
     }
 }
