@@ -76,8 +76,16 @@ impl Host for Orca {
             .map_err(|e| Trouble::Passing(format!("Orca would not open a terminal for the agent: {e}")))?;
         let handle = json_string(&created, "handle").ok_or_else(|| Trouble::Passing("Orca opened no terminal".to_string()))?;
 
-        // Before anything else, and before it is told what the pull request is.
-        let args = json_string(&created, "agentArgs").unwrap_or_default();
+        // Before anything else, and before it is told what the pull request is. Missing is not "": Orca
+        // leaves `launchConfig` out when it has none, and "" is Manual, so only a reported "" passes.
+        let Some(args) = json_string(&created, "agentArgs") else {
+            let _ = orca(tool, run, &["terminal", "close", "--terminal", &handle, "--json"]);
+            return Err(Trouble::Setup(format!(
+                "Orca did not say how it starts {}, so whether it asks before acting is unknown, and it was closed before it \
+                 got the pull request. Check that Orca knows {0} as an agent",
+                l.kind
+            )));
+        };
         if !ASKING.contains(&args.trim()) {
             let _ = orca(tool, run, &["terminal", "close", "--terminal", &handle, "--json"]);
             return Err(Trouble::Setup(format!(
@@ -264,6 +272,19 @@ mod tests {
             assert_eq!(ran[1], format!("{TOOL} terminal close --terminal term_9cde --json"), "{args}");
             assert!(!ran.iter().any(|l| l.contains("terminal send")), "no prompt: {ran:?}");
         }
+    }
+
+    /// No word on how Orca started the agent is no word that it asks: Orca leaves `launchConfig` out
+    /// of a reply that has none, and "" is Manual, so reading a missing one as "" would wave it through.
+    #[test]
+    fn an_agent_orca_does_not_say_how_it_started_is_closed_before_its_prompt() {
+        let unsaid = r#"{"ok": true, "result": {"terminal": {"launchAgent": "claude", "handle": "term_9cde"}}}"#;
+        let (mut run, ran) = recorder(move |line| if line.contains("terminal create") { Ok(unsaid.into()) } else { Ok(r#"{"ok": true}"#.into()) });
+        let Err(Trouble::Setup(said)) = Orca.start(&launch(), &mut run) else { panic!() };
+        assert!(said.contains("did not say how it starts claude"), "{said}");
+        let ran = ran.borrow();
+        assert_eq!(ran[1], format!("{TOOL} terminal close --terminal term_9cde --json"));
+        assert!(!ran.iter().any(|l| l.contains("terminal send")), "no prompt: {ran:?}");
     }
 
     /// An agent still asking something at startup gets no prompt pasted into that question.
