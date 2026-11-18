@@ -23,8 +23,13 @@ impl Host for HerdrTui {
     fn install_url(&self) -> &'static str {
         "https://herdr.dev/docs/install/"
     }
-    fn agents(&self, run: &mut Run) -> Vec<(String, String)> {
-        run("herdr", &["agent", "list"]).map(|raw| super::named_agents(&raw)).unwrap_or_default()
+    /// `server_not_running` is Herdr's own code for no server, part of its JSON error contract.
+    fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
+        match run("herdr", &["agent", "list"]) {
+            Ok(raw) => Ok(super::named_agents(&raw)),
+            Err(e) if super::not_installed(&e) || e.contains("server_not_running") => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     fn reopen(&self, worktree: &str, run: &mut Run) -> Option<String> {
@@ -97,7 +102,19 @@ mod tests {
     #[test]
     fn its_claims_are_herdrs_named_agents() {
         let (mut run, ran) = recorder(|_| Ok(r#"{"result":{"agents":[{"cwd":"/w/pr-1-x","name":"pr-1-x"},{"cwd":"/p/x"}]}}"#.into()));
-        assert_eq!(HerdrTui.agents(&mut run), [("/w/pr-1-x".to_string(), "pr-1-x".to_string())]);
+        assert_eq!(HerdrTui.agents(&mut run), Ok(vec![("/w/pr-1-x".to_string(), "pr-1-x".to_string())]));
         assert_eq!(ran.borrow()[0], "herdr agent list");
+    }
+
+    /// No server is nobody working; a server that does not answer is nobody can say.
+    #[test]
+    fn no_server_is_nobody_working_and_a_failed_answer_is_unsure() {
+        let no_server = r#"{"id":"cli:agent:list","error":{"code":"server_not_running","message":"no herdr server is running at /x/herdr.sock"}}"#;
+        let (mut run, _) = recorder(move |_| Err(no_server.into()));
+        assert_eq!(HerdrTui.agents(&mut run), Ok(vec![]));
+        let (mut missing, _) = recorder(|_| Err("herdr: not installed".into()));
+        assert_eq!(HerdrTui.agents(&mut missing), Ok(vec![]));
+        let (mut broken, _) = recorder(|_| Err(r#"{"error":{"code":"timeout"}}"#.into()));
+        assert!(HerdrTui.agents(&mut broken).is_err());
     }
 }

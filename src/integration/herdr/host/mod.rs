@@ -53,9 +53,10 @@ pub trait Host: Sync + std::fmt::Debug {
     fn tool(&self) -> &'static str;
     /// Where to get that program, for the page when it is missing.
     fn install_url(&self) -> &'static str;
-    /// Every live agent that has a name, as `(cwd, name)`. Empty when the program is missing or
-    /// answers nothing: a host you do not run has nobody working.
-    fn agents(&self, run: &mut Run) -> Vec<(String, String)>;
+    /// Every live agent that has a name, as `(cwd, name)`. Empty when its program is not installed or
+    /// its server is not running: nobody can be working there. `Err` when it is there and did not
+    /// answer, because then nobody can say, and an empty list would read as "nobody home".
+    fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String>;
     /// A worktree already on disk that this host still knows, as the place to start in. `None`
     /// means it does not, and the worktree is recycled if nothing would be lost.
     fn reopen(&self, _worktree: &str, _run: &mut Run) -> Option<String> {
@@ -80,8 +81,29 @@ pub fn by_id(id: &str) -> &'static dyn Host {
 }
 
 /// Every live, named agent across every host.
-pub fn agents_everywhere(run: &mut Run) -> Vec<(String, String)> {
-    HOSTS.iter().flat_map(|h| h.agents(run)).collect()
+pub fn agents_everywhere(run: &mut Run) -> Inventory {
+    let mut all = Inventory::default();
+    for host in HOSTS {
+        match host.agents(run) {
+            Ok(agents) => all.agents.extend(agents),
+            Err(e) => all.unsure.push(format!("{}: {e}", host.name())),
+        }
+    }
+    all
+}
+
+/// Who is working, as far as every host could say.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Inventory {
+    pub agents: Vec<(String, String)>,
+    /// Hosts that are there but did not answer, each with what it said. Non-empty means an agent
+    /// may be working somewhere this list does not show.
+    pub unsure: Vec<String>,
+}
+
+/// Whether a failed run means its program is not installed, as `super::output` words it.
+pub fn not_installed(said: &str) -> bool {
+    said.ends_with(": not installed")
 }
 
 /// Every `{"cwd":"…", … "name":"…"}` in a JSON list, as `(cwd, name)`, skipping the nameless.
@@ -146,10 +168,23 @@ mod tests {
             _ => Err("no such program".into()),
         });
         let found = agents_everywhere(&mut run);
-        assert_eq!(found, [("/w/pr-1-a".to_string(), "pr-1-a".to_string()), ("/w/pr-2-b".to_string(), "pr-2-b".to_string())]);
+        assert_eq!(found.agents, [("/w/pr-1-a".to_string(), "pr-1-a".to_string()), ("/w/pr-2-b".to_string(), "pr-2-b".to_string())]);
         assert_eq!(ran.borrow().len(), 2, "{:?}", ran.borrow());
 
-        let (mut none, _) = recorder(|_| Err("not found".into()));
-        assert!(agents_everywhere(&mut none).is_empty());
+        let (mut none, _) = recorder(|line| Err(format!("{}: not installed", line.split(' ').next().unwrap())));
+        assert_eq!(agents_everywhere(&mut none), Inventory::default(), "a host you do not have is nobody working");
+    }
+
+    /// A host that is there and does not answer is not "nobody working": the claim says it is unsure,
+    /// and which host and why, so nothing is recycled on the strength of a list that is missing part.
+    #[test]
+    fn a_host_that_does_not_answer_makes_the_claim_unsure() {
+        let (mut run, _) = recorder(|line| match line {
+            l if l.starts_with("herdr agent list") => Err("connection reset by peer".into()),
+            l => Err(format!("{}: not installed", l.split(' ').next().unwrap())),
+        });
+        let found = agents_everywhere(&mut run);
+        assert!(found.agents.is_empty());
+        assert_eq!(found.unsure, ["Herdr: connection reset by peer"]);
     }
 }

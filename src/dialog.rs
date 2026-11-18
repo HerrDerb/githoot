@@ -264,10 +264,11 @@ pub fn message(title: &str, msg: &str) {
 /// polling GitHub for the token, and blocking that thread on a dialog would mean no token ever
 /// arrives no matter what the user does in the browser.
 ///
-/// The details also go to the log, because this is reachable from the poll thread long after
-/// startup — and on Linux launched from a desktop entry there is no terminal to print to.
+/// Where to sign in also goes to the log, because this is reachable from the poll thread long after
+/// startup — and on Linux launched from a desktop entry there is no terminal to print to. The code
+/// does not: see `sign_in_line`.
 pub fn show_device_code_prompt(subject: &str, user_code: &str, verification_uri: &str) {
-    crate::infoln!("{subject}: authorization required — open {verification_uri} and enter code {user_code}");
+    crate::infoln!("{}", sign_in_line(subject, verification_uri, None));
     copy_to_clipboard(user_code);
 
     let title = format!("{subject}: Authorization Required");
@@ -557,6 +558,34 @@ mod tests {
     #[test]
     fn newlines_survive_untouched() {
         assert_eq!(escape("one\ntwo"), "one\ntwo");
+    }
+}
+
+/// The log line for a sign-in prompt: who is asking, where to go and, when known, how long the code
+/// lasts. Never the code itself, while it is live: the log is a file that gets pasted into bug
+/// reports, and the code is already on the clipboard and on the page or dialog that asked.
+pub fn sign_in_line(who: &str, url: &str, expires_in: Option<u64>) -> String {
+    let line = format!("{who}: sign in at {url} with the code on your clipboard");
+    match expires_in {
+        Some(s) => format!("{line} (expires in {s}s)"),
+        None => line,
+    }
+}
+
+#[cfg(test)]
+mod sign_in_line_tests {
+    use super::sign_in_line;
+
+    #[test]
+    fn the_sign_in_line_says_where_but_never_the_code() {
+        assert_eq!(
+            sign_in_line("GitHub PR Status", "https://github.com/login/device", Some(899)),
+            "GitHub PR Status: sign in at https://github.com/login/device with the code on your clipboard (expires in 899s)"
+        );
+        assert_eq!(
+            sign_in_line("github_app", "https://github.com/login/device", None),
+            "github_app: sign in at https://github.com/login/device with the code on your clipboard"
+        );
     }
 }
 

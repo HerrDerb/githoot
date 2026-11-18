@@ -207,7 +207,11 @@ pub fn command(exe: &str) -> Command {
 /// Runs a command and returns its stdout, or `Err` with whatever it said. Trimmed, because every
 /// caller here wants a value rather than a line.
 pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
-    let out = command(exe).args(args).output().map_err(|e| format!("{exe}: {e}"))?;
+    let out = command(exe).args(args).output().map_err(|e| match e.kind() {
+        // Worded once, here, so a host can tell "not installed" from "did not answer". See `host::not_installed`.
+        std::io::ErrorKind::NotFound => format!("{exe}: not installed"),
+        _ => format!("{exe}: {e}"),
+    })?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
@@ -338,8 +342,22 @@ impl Target {
 /// Paths are compared case-insensitively with trailing separators stripped, because Herdr answers
 /// in the platform's own shape and a mismatch here would read as "nobody home" and start a second
 /// agent on every comment.
-pub fn live_agents() -> Vec<(String, String)> {
+pub fn live_agents() -> host::Inventory {
     host::agents_everywhere(&mut |exe, args| output(exe, args))
+}
+
+/// Whether a worktree on disk with no agent in it may be recycled, as far as anyone can say. Not while
+/// a host failed to answer: the agent it did not report may be standing in that worktree, and
+/// removing the folder under it loses nothing git sees but pulls the floor out from under the agent.
+/// Setup, so it is tried again next pass rather than recorded against the pull request.
+pub fn may_recycle(worktree: &str, unsure: &[String]) -> Result<(), Trouble> {
+    match unsure.first() {
+        None => Ok(()),
+        Some(why) => Err(Trouble::Setup(format!(
+            "a worktree is already at {worktree} and {why}, so nobody can say whether an agent is in it. It was left \
+             alone and is tried again next pass"
+        ))),
+    }
 }
 
 /// Whether an agent is sitting in this worktree, and what it is called.
@@ -470,7 +488,7 @@ pub fn push_guard(slug: &str) -> (String, String) {
 /// Returns the line to log either way. Nothing here is retried inside a pass: by the rule at the
 /// top of the module the version is recorded as looked at whatever happened, and the retry that
 /// can actually go differently is the one that comes when the pull request changes.
-fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<String, Trouble> {
+fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[String]) -> Result<String, Trouble> {
     let clone = settings.clone_of(&t.repo);
     if !clone.join(".git").exists() {
         // Not recorded, so that correcting `integration.herdr.cloneRoot` takes effect on the next
@@ -504,12 +522,14 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str) -> Result<
     output("git", &["-C", &clone_str, "fetch", "--quiet", "origin", &refspec])
         .map_err(|e| Trouble::Passing(format!("could not fetch {head}: {e}")))?;
 
-    // A worktree already on disk means its agent has gone. Reuse it if the host still knows it;
-    // recycle it only if nothing would be lost. A worktree holding work is yours to look at.
+    // A worktree already on disk with nobody reported in it. Reuse it if the host still knows it;
+    // recycle it only if every host answered and nothing would be lost. A worktree holding work is
+    // yours to look at.
     let mut place = String::new();
     if worktree.exists() {
         place = host.reopen(&worktree_str, &mut run).unwrap_or_default();
         if place.is_empty() {
+            may_recycle(&worktree_str, unsure)?;
             let dirty = output("git", &["-C", &worktree_str, "status", "--porcelain"]).unwrap_or_default();
             let ahead = output("git", &["-C", &worktree_str, "rev-list", "--count", &format!("{base}..HEAD")])
                 .unwrap_or_else(|_| "1".to_string());
@@ -618,7 +638,8 @@ const PROMPT_WAIT_MS: &str = "30000";
 /// writes nothing at all so that a hand run can never change what the real one would do next.
 pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, template: &str) -> Report {
     let mut report = Report::default();
-    let agents = live_agents();
+    let inventory = live_agents();
+    let agents = inventory.agents;
     let previous = read_state(dir, axis);
     let mut next = std::collections::BTreeMap::new();
 
@@ -640,7 +661,7 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
                 next.insert(t.key.clone(), Handled { updated: t.updated.clone(), dispatched: true });
                 report.lines.push(format!("{}#{}: an agent is already there", t.repo, t.number));
             }
-            Action::Start => match start(t, &slug, settings, template) {
+            Action::Start => match start(t, &slug, settings, template, &inventory.unsure) {
                 Ok(said) => {
                     next.insert(t.key.clone(), Handled { updated: t.updated.clone(), dispatched: true });
                     report.started += 1;
@@ -1371,6 +1392,23 @@ mod tests {
         let app = Settings { host: &host::HerdrApp, ..settings() };
         let html = page_body("tok", &app, &["hc"], &[]);
         assert!(html.contains("hc not found") && !html.contains("herdr not found"), "{html}");
+    }
+
+    /// A program that is not there says so in one recognisable way, so a host can tell "not installed"
+    /// (nobody working) from "did not answer" (nobody can say).
+    #[test]
+    fn a_program_that_is_not_installed_says_so() {
+        let said = output("githoot-no-such-program-for-a-test", &["--version"]).unwrap_err();
+        assert!(host::not_installed(&said), "{said}");
+        assert!(!host::not_installed("connection reset by peer"));
+    }
+
+    /// A worktree is recycled only when every host answered.
+    #[test]
+    fn no_worktree_is_recycled_while_a_host_did_not_answer() {
+        assert_eq!(may_recycle("/w/pr-1-x", &[]), Ok(()));
+        let Err(Trouble::Setup(said)) = may_recycle("/w/pr-1-x", &["Herdr app: broken pipe".to_string()]) else { panic!() };
+        assert!(said.contains("/w/pr-1-x") && said.contains("Herdr app: broken pipe") && said.contains("left alone"), "{said}");
     }
 
     /// Nothing in it names a forge: it needs only herdr and git, and serves every portal, including

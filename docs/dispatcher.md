@@ -198,6 +198,12 @@ terminal still knows it, recycled if it does not (the app never does) **and** it
 commits, and **left alone with a line in the log** if it holds either. The dispatcher never deletes
 work.
 
+A host that is installed but **does not answer** the question is not taken as "nobody there". A
+host that is not installed, or whose server is not running, has nobody working and is skipped. But
+one that is there and fails to answer (a timeout, a server restarting) might be hiding the agent
+standing in that worktree. So while any host fails to answer, no worktree is recycled: the pull
+request waits, the log says which host and why, and the next pass tries again.
+
 ## When something goes wrong
 
 Anything about a specific pull request is logged at **error** level, so it survives the default

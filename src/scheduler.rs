@@ -188,13 +188,7 @@ struct PageProgress {
 
 impl SignInProgress for PageProgress {
     fn prompt(&self, prompt: SignInPrompt) {
-        infoln!(
-            "{}: sign in at {} with code {} (expires in {}s)",
-            self.name,
-            prompt.url,
-            prompt.code,
-            prompt.expires_at.saturating_sub(unix_now())
-        );
+        infoln!("{}", crate::dialog::sign_in_line(&self.name, &prompt.url, Some(prompt.expires_at.saturating_sub(unix_now()))));
         crate::dialog::copy_to_clipboard(&prompt.code);
         if !crate::serve::is_available() {
             crate::dialog::show_device_code_prompt(&format!("{} PR Status", self.name), &prompt.code, &prompt.url);
@@ -903,13 +897,7 @@ struct JobProgress {
 
 impl SignInProgress for JobProgress {
     fn prompt(&self, prompt: SignInPrompt) {
-        infoln!(
-            "{}: sign in at {} with code {} (expires in {}s)",
-            self.name,
-            prompt.url,
-            prompt.code,
-            prompt.expires_at.saturating_sub(unix_now())
-        );
+        infoln!("{}", crate::dialog::sign_in_line(&self.name, &prompt.url, Some(prompt.expires_at.saturating_sub(unix_now()))));
         crate::dialog::copy_to_clipboard(&prompt.code);
         if let Some(job) = JOBS.lock().expect("sign-in jobs lock poisoned").get_mut(&self.portal) {
             job.prompt = Some(prompt);
