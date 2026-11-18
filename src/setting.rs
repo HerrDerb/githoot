@@ -43,7 +43,7 @@ pub enum Kind {
     /// A flag drawn as a step on a rule line, with what happens to a pull request that fails it
     /// (`otherwise`: "else amber", "else waits"). Stored, checked and read exactly like `Flag`.
     Step { default_on: bool, otherwise: &'static str },
-    /// Exactly one of `options`, as radio buttons: `(value, label)`.
+    /// Exactly one of `options`, as radio buttons: `(value, label)`. The first is the default.
     Choice { options: &'static [(&'static str, &'static str)] },
     /// A subset of `options` where empty means "all of it", stored comma-separated, shown as a choice
     /// between `whole` and `some` with the boxes under `some`. An unticked list that silently meant
