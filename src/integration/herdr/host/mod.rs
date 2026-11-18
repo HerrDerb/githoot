@@ -14,9 +14,11 @@
 //! other one is still somebody working that pull request.
 
 mod app;
+mod orca;
 mod tui;
 
 pub use app::HerdrApp;
+pub use orca::Orca;
 pub use tui::HerdrTui;
 
 use super::Trouble;
@@ -62,18 +64,19 @@ pub trait Host: Sync + std::fmt::Debug {
     fn reopen(&self, _worktree: &str, _run: &mut Run) -> Option<String> {
         None
     }
-    /// Makes the worktree and answers the place to start in.
-    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, String>;
+    /// Makes the worktree and answers the place to start in. `Trouble::Setup` when the host itself is
+    /// not there to ask, so the pull request is tried again as soon as it is.
+    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, Trouble>;
     /// Starts the agent and gives it its prompt.
     fn start(&self, l: &Launch, run: &mut Run) -> Result<(), Trouble>;
 }
 
 /// Every host, the default first.
-pub static HOSTS: [&dyn Host; 2] = [&HerdrTui, &HerdrApp];
+pub static HOSTS: [&dyn Host; 3] = [&HerdrTui, &HerdrApp, &Orca];
 
 /// The radio buttons, in the order of `HOSTS`: `(id, label)`. A literal because a setting's options
 /// are a constant; a test keeps the two in step.
-pub const CHOICES: &[(&str, &str)] = &[("herdr", "Herdr in a terminal"), ("herdr-app", "Herdr app")];
+pub const CHOICES: &[(&str, &str)] = &[("herdr", "Herdr in a terminal"), ("herdr-app", "Herdr app"), ("orca", "Orca")];
 
 /// The host `id` names. Empty or unknown is the first, so a typo in `config.txt` keeps the default.
 pub fn by_id(id: &str) -> &'static dyn Host {
@@ -156,6 +159,7 @@ mod tests {
         assert_eq!(by_id("").id(), "herdr", "unset is the terminal, as before there was a choice");
         assert_eq!(by_id("orca?").id(), "herdr", "a typo keeps the default");
         assert_eq!(by_id("herdr-app").id(), "herdr-app");
+        assert_eq!(by_id("orca").id(), "orca");
     }
 
     /// An agent in either host is somebody working, whichever one the radio names. Missing programs
@@ -169,7 +173,7 @@ mod tests {
         });
         let found = agents_everywhere(&mut run);
         assert_eq!(found.agents, [("/w/pr-1-a".to_string(), "pr-1-a".to_string()), ("/w/pr-2-b".to_string(), "pr-2-b".to_string())]);
-        assert_eq!(ran.borrow().len(), 2, "{:?}", ran.borrow());
+        assert_eq!(ran.borrow().len(), HOSTS.len(), "{:?}", ran.borrow());
 
         let (mut none, _) = recorder(|line| Err(format!("{}: not installed", line.split(' ').next().unwrap())));
         assert_eq!(agents_everywhere(&mut none), Inventory::default(), "a host you do not have is nobody working");

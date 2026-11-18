@@ -37,7 +37,7 @@ impl Host for HerdrTui {
         json_string(&opened, "workspace_id").filter(|w| !w.is_empty())
     }
 
-    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, String> {
+    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, Trouble> {
         let created = run(
             "herdr",
             &[
@@ -50,8 +50,9 @@ impl Host for HerdrTui {
                 "--no-focus",
                 "--trust-repository",
             ],
-        )?;
-        json_string(&created, "workspace_id").ok_or_else(|| "no workspace came back".to_string())
+        )
+        .map_err(|e| Trouble::Passing(format!("could not create the worktree: {e}")))?;
+        json_string(&created, "workspace_id").ok_or_else(|| Trouble::Passing("could not create the worktree: no workspace came back".to_string()))
     }
 
     fn start(&self, l: &Launch, run: &mut Run) -> Result<(), Trouble> {
