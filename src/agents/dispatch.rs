@@ -460,12 +460,16 @@ pub enum Trouble {
     /// Anything else: a fetch that failed, a Herdr that would not answer. Recorded, by the rule at
     /// the top of this module: retry when the pull request changes, not every thirty seconds.
     Passing(String),
+    /// The client is not there and only you can start it, such as Orca not running. Setup in every
+    /// respect, unrecorded and said once, and on top of that a desktop notification, since nothing
+    /// happens until you act and the log is not where you would look.
+    Absent(String),
 }
 
 impl Trouble {
     fn text(&self) -> &str {
         match self {
-            Trouble::Setup(m) | Trouble::Passing(m) => m,
+            Trouble::Setup(m) | Trouble::Passing(m) | Trouble::Absent(m) => m,
         }
     }
 }
@@ -489,6 +493,8 @@ pub struct Report {
     /// Setup mistakes. Error level too, but said only when the set of them changes, and never
     /// recorded against the pull request.
     pub setup: Vec<String>,
+    /// A client only you can start, missing. Also in `setup`, for the log; here for the desktop.
+    pub absent: Vec<String>,
 }
 
 /// What to fetch and what to start the agent's branch from: the portal's head ref, into a ref of
@@ -606,6 +612,7 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
     client.start(&launch, &mut run).map_err(|e| match e {
         Trouble::Setup(m) => Trouble::Setup(format!("worktree {worktree_str} is ready on {own}, but {m}")),
         Trouble::Passing(m) => Trouble::Passing(format!("worktree {worktree_str} is ready on {own}, but {m}")),
+        Trouble::Absent(m) => Trouble::Absent(format!("worktree {worktree_str} is ready on {own}, but {m}")),
     })?;
 
     Ok(format!("started {slug} in {}, on branch {own}", client.name()))
@@ -711,6 +718,13 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
                 // Deliberately unrecorded: this pull request must be tried again as soon as the
                 // setting is corrected, not when it next changes.
                 Err(Trouble::Setup(why)) => report.setup.push(format!("{}#{}: {why}", t.repo, t.number)),
+                // Setup, and said on the desktop too: nothing happens until you start the client.
+                Err(Trouble::Absent(why)) => {
+                    report.setup.push(format!("{}#{}: {why}", t.repo, t.number));
+                    if !report.absent.contains(&why) {
+                        report.absent.push(why);
+                    }
+                }
                 // Recorded as not dispatched: tried again when the pull request changes.
                 Err(other) => {
                     next.insert(t.key.clone(), Handled { updated: t.updated.clone(), dispatched: false });
@@ -889,6 +903,7 @@ pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
         out.said.extend(report.lines.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
         out.trouble.extend(report.problems.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
         out.setup.extend(report.setup.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+        out.absent.extend(report.absent.into_iter().filter(|a| !out.absent.contains(a)).collect::<Vec<_>>());
         if dry_run && report.looked_at > 0 {
             out.said.push(format!("[{}] {} pull request(s) looked at", axis.slug(), report.looked_at));
         }
