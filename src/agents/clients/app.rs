@@ -11,14 +11,17 @@
 //!     agent's first argument, not a message sent after it has started.
 //!   * **`--no-parent`.** A GitHoot started from inside an app terminal would otherwise make every
 //!     agent that terminal's child, and close them all when it closes.
+//!
+//! Claude is the only agent for now. Codex would need `--no-daemon` here, or its commands run outside
+//! `hc`, as the manual says; that comes back with Codex.
 
-use super::{Host, Launch, NewWorktree, Run};
-use crate::integration::herdr::{json_string, Trouble};
+use super::{Client, Launch, NewWorktree, Run};
+use crate::agents::dispatch::{json_string, Trouble};
 
 #[derive(Debug)]
 pub struct HerdrApp;
 
-impl Host for HerdrApp {
+impl Client for HerdrApp {
     fn id(&self) -> &'static str {
         "herdr-app"
     }
@@ -31,8 +34,11 @@ impl Host for HerdrApp {
     fn install_url(&self) -> &'static str {
         "https://herdr.dev"
     }
+    fn note(&self) -> &'static str {
+        "Each agent opens as a space of its own in the Herdr app, the next time the app is open. Claude asks once per new worktree whether to trust it."
+    }
     /// Live terminals only, which is what `hc ls` lists without `--all`. A named one is a claim, as in
-    /// the terminal host, and so is an unnamed one reporting a status, under its address: only an agent
+    /// the terminal client, and so is an unnamed one reporting a status, under its address: only an agent
     /// reports one, so that is an agent you opened yourself, not a shell left behind.
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String> {
         // No "not running" case: `hc` starts its core when none runs.
@@ -53,8 +59,9 @@ impl Host for HerdrApp {
             .collect())
     }
 
-    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, String> {
-        run("git", &["-C", w.clone, "worktree", "add", "-b", w.branch, w.path, w.base])?;
+    fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, Trouble> {
+        run("git", &["-C", w.clone, "worktree", "add", "-b", w.branch, w.path, w.base])
+            .map_err(|e| Trouble::Passing(format!("could not create the worktree: {e}")))?;
         Ok(w.path.to_string())
     }
 
@@ -62,11 +69,7 @@ impl Host for HerdrApp {
     /// request fails instead of doubling up. `--keep` is what the app gives the terminals it adopts.
     fn start(&self, l: &Launch, run: &mut Run) -> Result<(), Trouble> {
         let space = format!("herdr.space=githoot-{}", l.slug);
-        let mut args = vec!["run", "--bg", "--json", "--no-parent", "--keep", "--name", l.slug, "--cwd", l.worktree, "--label", &space, "--", l.kind];
-        if l.kind == "codex" {
-            args.push("--no-daemon");
-        }
-        args.push(l.prompt);
+        let args = ["run", "--bg", "--json", "--no-parent", "--keep", "--name", l.slug, "--cwd", l.worktree, "--label", &space, "--", l.kind, l.prompt];
         run("hc", &args).map(|_| ()).map_err(|e| {
             Trouble::Passing(format!(
                 "the Herdr app would not start the agent: {e}. Start it yourself: \
@@ -88,7 +91,7 @@ mod tests {
         Launch { slug: "pr-1-x", kind, prompt: "Review it", worktree: "/w/pr-1-x", place: "/w/pr-1-x" }
     }
 
-    /// Only a named terminal is a claim, as in the terminal host: an agent you opened yourself is not.
+    /// Only a named terminal is a claim, as in the terminal client: an agent you opened yourself is not.
     #[test]
     fn its_claims_are_its_named_terminals() {
         let (mut run, ran) = recorder(|_| {
@@ -138,14 +141,6 @@ mod tests {
             ran.borrow().as_slice(),
             ["hc run --bg --json --no-parent --keep --name pr-1-x --cwd /w/pr-1-x --label herdr.space=githoot-pr-1-x -- claude Review it"]
         );
-    }
-
-    /// The manual: "Codex must run with --no-daemon, or its commands execute outside hc."
-    #[test]
-    fn codex_runs_without_its_daemon() {
-        let (mut run, ran) = recorder(|_| Ok(String::new()));
-        HerdrApp.start(&launch("codex"), &mut run).unwrap();
-        assert!(ran.borrow()[0].ends_with("-- codex --no-daemon Review it"), "{:?}", ran.borrow());
     }
 
     /// The worktree is ready by now, so the line says how to finish by hand.

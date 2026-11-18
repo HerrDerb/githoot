@@ -43,7 +43,7 @@ const ALLOWED: [(&str, &str); 11] = [
     ("docs/menu-and-settings.md", "git-system-tray"),
     ("docs/menu-and-settings.md", "github-trayicon"),
     // Scripts an earlier dispatcher installed, named so they can be removed.
-    ("docs/dispatcher.md", "ght-dispatch"),
+    ("docs/agents.md", "ght-dispatch"),
     ("contrib/README.md", "ght-dispatch"),
     // The signed fixture in the updater's tests. See the comment on `FIXTURE_SUMS`.
     ("src/update.rs", "git-system-tray"),

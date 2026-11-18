@@ -1,17 +1,18 @@
-//! Starts a Herdr agent for each pull request that needs one, from inside GitHoot.
+//! Starts a coding agent for each pull request that needs one, from inside GitHoot. The rules of a
+//! dispatch live here; where the agent's terminal opens is the chosen client's business, in
+//! `super::clients`.
 //!
 //! **This is the one thing GitHoot does that is not reading.** Everywhere else it polls GitHub,
 //! draws an icon and opens a page; here it creates branches and worktrees and starts agents. That
 //! boundary used to be a process boundary: a shipped script, installed by a button, kept alive by
-//! systemd or Task Scheduler. It is now the first integration (see `crate::integration`), off
-//! until you install it on the Integrations tab, which writes `integration.herdr.enabled=on`.
+//! systemd or Task Scheduler. It moved inside GitHoot, off until you switch it on (`agents=on`).
 //!
-//! The move inward is not a tidy-up. Two things forced it:
+//! The move inward was not a tidy-up. Two things forced it:
 //!
 //!   * **A console program cannot be a background service on Windows without a trick.** Task
 //!     Scheduler hands a console to whatever it starts, so the loop sat in a terminal on the
-//!     desktop. Every escape is a trade: session 0 cannot reach the Herdr you have open, a script
-//!     host shim is what antivirus flags, and hiding a window still created one. GitHoot is
+//!     desktop. Every escape is a trade: session 0 cannot reach the agent workspace you have open, a
+//!     script host shim is what antivirus flags, and hiding a window still created one. GitHoot is
 //!     already a windowless GUI-subsystem process with a poll thread, so in here the problem does
 //!     not exist rather than being worked around.
 //!   * **One behaviour, two implementations, guaranteed to drift.** Bash for Linux and PowerShell
@@ -25,22 +26,19 @@
 //!   * The prompts are files you own, and clearing one restores the shipped default.
 //!   * The agent works on a branch of its own, `githoot/<slug>`, never the pull request's.
 //!
-//! **An agent is started by a pull request arriving in a bar, and by nothing else**, and the
-//! dispatcher asks no forge anything: the bars come from GitHoot, who is working from Herdr, and the
+//! **An agent is started by a pull request arriving in a bar, and by nothing else**, and a dispatch
+//! asks no forge anything: the bars come from GitHoot, who is working from the clients, and the
 //! checkout from git, fetching the head ref the portal names. So it serves every portal, including
 //! ones not written yet. See `decide`.
 //!
-//! What GitHoot knows it no longer re-fetches: the bars come from the integration runner, the same
-//! judgement the icon and the pages use, with muted pull requests already taken out. Its files live
-//! in `~/.githoot/integrations/herdr/`: one state file per bar and the prompts.
+//! Its files live in `~/.githoot/agents/`: one state file per bar and the prompts.
 
-pub mod host;
-pub mod prompts;
+use super::clients;
+use super::prompts;
 
-use super::{Batch, Context, Info, Integration, Kind, Problem, Said, Setting};
+use super::{Batch, Context, Kind, Problem, Said, Setting};
 use crate::page::esc;
 use crate::portal::types::PrEntry;
-use crate::portal::PortalKind;
 use crate::state::PrAxis;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -109,8 +107,8 @@ pub struct Settings {
     pub clone_root_from: RootFrom,
     pub worktree_root: PathBuf,
     pub agent_kind: String,
-    /// Where the agent's terminal opens. See `host`.
-    pub host: &'static dyn host::Host,
+    /// Where the agent's terminal opens. See `client`.
+    pub client: &'static dyn clients::Client,
     /// Says what it would do and touches nothing, including the state file. What the page's Dry run
     /// button asks for, and never what the runner does.
     pub dry_run: bool,
@@ -128,7 +126,7 @@ impl Settings {
 /// Which of the three places a root was taken from. See `settings_now`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootFrom {
-    /// "Clones live in" on the page, `integration.herdr.cloneRoot` in the file.
+    /// "Clones live in" on the page, `agentsCloneRoot` in the file.
     Setting,
     /// `GITHOOT_CLONE_ROOT`.
     Env,
@@ -148,7 +146,7 @@ fn clone_root_said(settings: &Settings) -> String {
 
 /// What to log when `repo` has no clone: where it looked, why there, and what to change.
 fn no_clone(settings: &Settings, repo: &str) -> String {
-    let fix = format!("set \"{CLONE_ROOT_LABEL}\" on the Herdr dispatcher's settings page");
+    let fix = format!("set \"{CLONE_ROOT_LABEL}\" on the Agents settings page");
     if !settings.clone_root.is_dir() {
         return format!("no clone of {repo}: {}, and that folder does not exist. To fix it, {fix}", clone_root_said(settings));
     }
@@ -167,7 +165,7 @@ fn no_clone(settings: &Settings, repo: &str) -> String {
 /// creates it.
 pub fn setup_problems(settings: &Settings) -> Vec<Problem> {
     let mut problems = Vec::new();
-    let clone_root = |text: String| Problem { key: "cloneRoot", text };
+    let clone_root = |text: String| Problem { key: "agentsCloneRoot", text };
     match std::fs::read_dir(&settings.clone_root) {
         Err(_) => problems.push(clone_root(format!("{}, and that folder does not exist", clone_root_said(settings)))),
         Ok(entries) => {
@@ -178,7 +176,7 @@ pub fn setup_problems(settings: &Settings) -> Vec<Problem> {
     }
     if settings.worktree_root.exists() && !settings.worktree_root.is_dir() {
         problems.push(Problem {
-            key: "worktreeRoot",
+            key: "agentsWorktreeRoot",
             text: format!("\"{WORKTREE_ROOT_LABEL}\" is {}, which is not a folder", settings.worktree_root.display()),
         });
     }
@@ -196,6 +194,9 @@ pub fn setup_problems(settings: &Settings) -> Vec<Problem> {
 pub fn command(exe: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(exe);
+    // Orca's CLI reports usage to a US analytics service unless told not to. Said to every program,
+    // which costs the others nothing and cannot be forgotten on one call.
+    cmd.env("ORCA_TELEMETRY_DISABLED", "1");
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -208,7 +209,7 @@ pub fn command(exe: &str) -> Command {
 /// caller here wants a value rather than a line.
 pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
     let out = command(exe).args(args).output().map_err(|e| match e.kind() {
-        // Worded once, here, so a host can tell "not installed" from "did not answer". See `host::not_installed`.
+        // Worded once, here, so a client can tell "not installed" from "did not answer". See `clients::not_installed`.
         std::io::ErrorKind::NotFound => format!("{exe}: not installed"),
         _ => format!("{exe}: {e}"),
     })?;
@@ -223,18 +224,18 @@ pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
     Err(said)
 }
 
-/// The tools a tick shells out to: the chosen host's program, and git. Checked before the thread
+/// The tools a tick shells out to: the chosen client's program, and git. Checked before the thread
 /// starts rather than per tick, because a missing tool repeated every poll would bury the log.
 /// No forge tool among them: the dispatcher asks no forge anything. The agent does read the pull
 /// request with one (`gh`, `glab`), under your own login, but which one is its business.
-pub fn required(host: &dyn host::Host) -> [&'static str; 2] {
-    [host.tool(), "git"]
+pub fn required(client: &dyn clients::Client) -> [&'static str; 2] {
+    [client.tool(), "git"]
 }
 
 /// Which of `required` this machine cannot run. A plain `--version` rather than a `PATH` walk, so
 /// the answer is "it runs" rather than "a file with that name exists".
-pub fn missing_tools(host: &dyn host::Host) -> Vec<&'static str> {
-    required(host)
+pub fn missing_tools(client: &dyn clients::Client) -> Vec<&'static str> {
+    required(client)
         .into_iter()
         .filter(|exe| command(exe).arg("--version").output().is_err())
         .collect()
@@ -334,20 +335,20 @@ impl Target {
 
 // ── Asking Herdr who is already working ──────────────────────────────────────
 
-/// Every live, named agent in every host, as `(cwd, name)`. Agents without a name are skipped: only
+/// Every live, named agent in every client, as `(cwd, name)`. Agents without a name are skipped: only
 /// ones this dispatcher started carry a slug, and a hand-started session in your clone is not a claim
-/// on a worktree. Every host, not only the chosen one: an agent you started in the other is still
+/// on a worktree. Every client, not only the chosen one: an agent you started in the other is still
 /// somebody working that pull request.
 ///
 /// Paths are compared case-insensitively with trailing separators stripped, because Herdr answers
 /// in the platform's own shape and a mismatch here would read as "nobody home" and start a second
 /// agent on every comment.
-pub fn live_agents() -> host::Inventory {
-    host::agents_everywhere(&mut |exe, args| output(exe, args))
+pub fn live_agents() -> clients::Inventory {
+    clients::agents_everywhere(&mut |exe, args| output(exe, args))
 }
 
 /// Whether a worktree on disk with no agent in it may be recycled, as far as anyone can say. Not while
-/// a host failed to answer: the agent it did not report may be standing in that worktree, and
+/// a client failed to answer: the agent it did not report may be standing in that worktree, and
 /// removing the folder under it loses nothing git sees but pulls the floor out from under the agent.
 /// Setup, so it is tried again next pass rather than recorded against the pull request.
 pub fn may_recycle(worktree: &str, unsure: &[String]) -> Result<(), Trouble> {
@@ -382,9 +383,18 @@ fn fold(path: &str) -> String {
 /// Every use here reads one short, known field out of a Herdr reply whose shape Herdr controls.
 /// A real parse would buy correctness this does not need and a crate this binary does not have.
 pub(crate) fn json_string(haystack: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":\"");
-    let rest = &haystack[haystack.find(&needle)? + needle.len()..];
-    Some(rest[..rest.find('"')?].to_string())
+    let needle = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(&needle) {
+        from += at + needle.len();
+        // A key, not the same text as a value: it is followed by a colon. Spaces either side are fine,
+        // for Orca prints its JSON indented and Herdr does not.
+        if let Some(value) = haystack[from..].trim_start().strip_prefix(':') {
+            let value = value.trim_start().strip_prefix('"')?;
+            return Some(value[..value.find('"')?].to_string());
+        }
+    }
+    None
 }
 
 /// Substitutes the `{braced}` placeholders. Plain replacement, never a format string, so a stray
@@ -491,7 +501,7 @@ pub fn push_guard(slug: &str) -> (String, String) {
 fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[String]) -> Result<String, Trouble> {
     let clone = settings.clone_of(&t.repo);
     if !clone.join(".git").exists() {
-        // Not recorded, so that correcting `integration.herdr.cloneRoot` takes effect on the next
+        // Not recorded, so that correcting `agentsCloneRoot` takes effect on the next
         // pass rather than waiting for somebody to comment on the pull request again.
         return Err(Trouble::Setup(no_clone(settings, &t.repo)));
     }
@@ -508,13 +518,13 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
     let worktree_str = worktree.to_string_lossy().to_string();
     let own = format!("githoot/{slug}");
 
-    let host = settings.host;
+    let client = settings.client;
     if settings.dry_run {
         return Ok(format!(
             "would fetch {head} into {clone_str}, cut {own} from it with pushes disabled, \
              open a worktree at {worktree_str} and start a {} agent in {}",
             settings.agent_kind,
-            host.name()
+            client.name()
         ));
     }
     let mut run = |exe: &str, args: &[&str]| output(exe, args);
@@ -522,12 +532,16 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
     output("git", &["-C", &clone_str, "fetch", "--quiet", "origin", &refspec])
         .map_err(|e| Trouble::Passing(format!("could not fetch {head}: {e}")))?;
 
-    // A worktree already on disk with nobody reported in it. Reuse it if the host still knows it;
-    // recycle it only if every host answered and nothing would be lost. A worktree holding work is
+    // The client first, before any worktree is reused, recycled or made: one that is not there yet would
+    // otherwise turn a missing server into a failed start, recorded against the pull request.
+    client.ready(&mut run)?;
+
+    // A worktree already on disk with nobody reported in it. Reuse it if the client still knows it;
+    // recycle it only if every client answered and nothing would be lost. A worktree holding work is
     // yours to look at.
     let mut place = String::new();
     if worktree.exists() {
-        place = host.reopen(&worktree_str, &mut run).unwrap_or_default();
+        place = client.reopen(&worktree_str, &mut run).unwrap_or_default();
         if place.is_empty() {
             may_recycle(&worktree_str, unsure)?;
             let dirty = output("git", &["-C", &worktree_str, "status", "--porcelain"]).unwrap_or_default();
@@ -546,10 +560,8 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
         if output("git", &["-C", &clone_str, "show-ref", "--verify", "--quiet", &format!("refs/heads/{own}")]).is_ok() {
             let _ = output("git", &["-C", &clone_str, "branch", "-D", &own]);
         }
-        let new = host::NewWorktree { clone: &clone_str, path: &worktree_str, branch: &own, base: &base, slug };
-        place = host
-            .create(&new, &mut run)
-            .map_err(|e| Trouble::Passing(format!("could not create the worktree: {e}")))?;
+        let new = clients::NewWorktree { clone: &clone_str, path: &worktree_str, branch: &own, base: &base, slug };
+        place = client.create(&new, &mut run)?;
     }
 
     // Before the agent exists, and on a reused worktree too: drop any upstream a 3.2.0 worktree was
@@ -561,13 +573,13 @@ fn start(t: &Target, slug: &str, settings: &Settings, template: &str, unsure: &[
         .map_err(|e| Trouble::Passing(format!("could not stop {own} from pushing, so no agent was started: {e}")))?;
 
     let prompt = render_prompt(template, t, &own);
-    let launch = host::Launch { slug, kind: &settings.agent_kind, prompt: &prompt, worktree: &worktree_str, place: &place };
-    host.start(&launch, &mut run).map_err(|e| match e {
+    let launch = clients::Launch { slug, kind: &settings.agent_kind, prompt: &prompt, worktree: &worktree_str, place: &place };
+    client.start(&launch, &mut run).map_err(|e| match e {
         Trouble::Setup(m) => Trouble::Setup(format!("worktree {worktree_str} is ready on {own}, but {m}")),
         Trouble::Passing(m) => Trouble::Passing(format!("worktree {worktree_str} is ready on {own}, but {m}")),
     })?;
 
-    Ok(format!("started {slug} in {}, on branch {own}", host.name()))
+    Ok(format!("started {slug} in {}, on branch {own}", client.name()))
 }
 
 /// The last hop: start the agent in `pane` and give it its prompt. `herdr` runs one `herdr` command
@@ -686,215 +698,228 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
     report
 }
 
-// ── The integration ──────────────────────────────────────────────────────────
-
-pub struct Herdr;
+// ── The feature ──────────────────────────────────────────────────────────────
 
 /// Named once, because the messages about a wrong root tell you which box to change.
 const CLONE_ROOT_LABEL: &str = "Clones live in";
 const WORKTREE_ROOT_LABEL: &str = "Worktrees go in";
 
-static INFO: Info = Info {
-    id: "herdr",
-    name: "Herdr dispatcher",
-    summary: "Starts a Herdr agent for each pull request that needs you, on a branch of its own.",
-    // Every portal, including ones not written yet: nothing here names a forge. The bars come from
-    // GitHoot, the checkout from the portal's head ref and git, and the agent reads the pull request
-    // with whatever tool fits its URL.
-    portals: &PortalKind::ALL,
-    settings: &[
-        // Where agents open. A radio rather than a guess from what is installed: both can be, and
-        // which window you work in is a preference, not something on the PATH.
-        Setting {
-            key: "host",
-            label: "Agents open in",
-            kind: Kind::Choice { options: host::CHOICES },
-            help: "Where each agent's terminal opens. An agent already working a pull request counts in either.",
-            group: "Agents",
-            live: true,
-        },
-        // One switch per bar, keyed like the bars' prompts. Approved is off by default: an approved
-        // pull request is usually one you are about to merge yourself, and an agent started for it is
-        // mostly tokens spent on work that is done.
-        Setting {
-            key: "workRequired",
-            label: "Start agents for pull requests that need work from you",
-            kind: Kind::Flag { default_on: true },
-            help: "Start agents for the amber bar: your pull requests that need work.",
-            group: "Bars",
-            live: true,
-        },
-        Setting {
-            key: "requestedReviews",
-            label: "Start agents for reviews requested of you",
-            kind: Kind::Flag { default_on: true },
-            help: "Start agents for the red bar: reviews requested of you.",
-            group: "Bars",
-            live: true,
-        },
-        Setting {
-            key: "approved",
-            label: "Start agents for your approved pull requests",
-            kind: Kind::Flag { default_on: false },
-            help: "Start agents for the green bar: your approved pull requests. Off by default.",
-            group: "Bars",
-            live: true,
-        },
-        Setting {
-            key: "cloneRoot",
-            label: CLONE_ROOT_LABEL,
-            kind: Kind::Folder { placeholder: "~/projects" },
-            help: "Where your clones live, one directory per repository name: owner/thing needs <this>/thing. Empty means ~/projects.",
-            group: "Folders",
-            live: true,
-        },
-        Setting {
-            key: "worktreeRoot",
-            label: WORKTREE_ROOT_LABEL,
-            kind: Kind::Folder { placeholder: "~/worktrees" },
-            help: "Where the worktree for each pull request goes, named githoot/pr-<number>-<repo>. Empty means ~/worktrees.",
-            group: "Folders",
-            live: true,
-        },
-    ],
-    unsupported: if cfg!(target_os = "macos") { Some("The Herdr dispatcher needs Linux or Windows.") } else { None },
-};
+/// Which agent starts, as `(id, label)`. Claude only for now, shown anyway, as a choice of one, so the
+/// page already says which agent it is and where a second would go.
+pub const AGENTS: &[(&str, &str)] = &[("claude", "Claude")];
 
-impl Integration for Herdr {
-    fn info(&self) -> &'static Info {
-        &INFO
+/// Every setting the Agents page offers beyond its switch, in page order. Flat keys, as every core key
+/// is, all starting with `agents`.
+pub static SETTINGS: &[Setting] = &[
+    // Where agents open. A radio rather than a guess from what is installed: several can be, and which
+    // window you work in is a preference, not something on the PATH.
+    Setting {
+        key: "agentsClient",
+        label: "Agents open in",
+        kind: Kind::Choice { options: clients::CHOICES },
+        help: "Where each agent's terminal opens. An agent already working a pull request counts in any of them.",
+        group: "Client",
+        live: true,
+    },
+    Setting {
+        key: "agentsKind",
+        label: "Agent",
+        kind: Kind::Choice { options: AGENTS },
+        help: "Which agent starts. Claude only, for now.",
+        group: "Agent",
+        live: true,
+    },
+    // One switch per bar. Approved is off by default: an approved pull request is usually one you are
+    // about to merge yourself, and an agent started for it is mostly tokens spent on work that is done.
+    Setting {
+        key: "agentsWorkRequired",
+        label: "Start agents for pull requests that need work from you",
+        kind: Kind::Flag { default_on: true },
+        help: "Start agents for the amber bar: your pull requests that need work.",
+        group: "Bars",
+        live: true,
+    },
+    Setting {
+        key: "agentsRequestedReviews",
+        label: "Start agents for reviews requested of you",
+        kind: Kind::Flag { default_on: true },
+        help: "Start agents for the red bar: reviews requested of you.",
+        group: "Bars",
+        live: true,
+    },
+    Setting {
+        key: "agentsApproved",
+        label: "Start agents for your approved pull requests",
+        kind: Kind::Flag { default_on: false },
+        help: "Start agents for the green bar: your approved pull requests. Off by default.",
+        group: "Bars",
+        live: true,
+    },
+    Setting {
+        key: "agentsCloneRoot",
+        label: CLONE_ROOT_LABEL,
+        kind: Kind::Folder { placeholder: "~/projects" },
+        help: "Where your clones live, one directory per repository name: owner/thing needs <this>/thing. Empty means ~/projects.",
+        group: "Folders",
+        live: true,
+    },
+    Setting {
+        key: "agentsWorktreeRoot",
+        label: WORKTREE_ROOT_LABEL,
+        kind: Kind::Folder { placeholder: "~/worktrees" },
+        help: "Where the worktree for each pull request goes, named githoot/pr-<number>-<repo>. Empty means ~/worktrees.",
+        group: "Folders",
+        live: true,
+    },
+];
+
+/// Brings any prompt you have not edited up to this release's default, and leaves the ones you have
+/// alone. Every boot, on or not, because a release that improves a prompt still has to reach the
+/// people who never touched it, and editing the prompts before switching on is the sane order.
+pub fn prepare(ctx: &Context) {
+    match prompts::refresh_defaults(&ctx.dir) {
+        Ok(kept) if !kept.is_empty() => crate::infoln!("agents: left your edited prompts {} alone", kept.join(", ")),
+        Ok(_) => {}
+        Err(e) => crate::errorln!("agents: could not refresh the default prompts: {e}"),
     }
+}
 
-    /// Brings any prompt you have not edited up to this release's default, and leaves the ones you
-    /// have alone. Every boot, installed or not, because a release that improves a prompt still has
-    /// to reach the people who never touched it, and editing the prompts before installing is the
-    /// sane order.
-    fn prepare(&self, ctx: &Context) {
-        match prompts::refresh_defaults(&ctx.dir) {
-            Ok(kept) if !kept.is_empty() => crate::infoln!("herdr: left your edited prompts {} alone", kept.join(", ")),
-            Ok(_) => {}
-            Err(e) => crate::errorln!("herdr: could not refresh the default prompts: {e}"),
+/// Tools the chosen client needs that will not run. Empty when it has everything.
+pub fn missing(ctx: &Context) -> Vec<&'static str> {
+    missing_tools(settings_now(ctx, true).client)
+}
+
+/// What is wrong with its settings on this machine, before any pull request comes along.
+pub fn problems(ctx: &Context) -> Vec<Problem> {
+    setup_problems(&settings_now(ctx, true))
+}
+
+/// Switching on, or on again after off, is "from now on" for every bar.
+pub fn switched(ctx: &Context, _on: bool) {
+    for axis in PrAxis::ALL {
+        disarm(&ctx.dir, axis);
+    }
+}
+
+/// A bar switched off on the page is disarmed at once, not at the next pass, which may not come before
+/// it is switched back on if a tool is missing. `on` is left alone: saving the form writes every
+/// switch, and a bar that was already on must not be re-baselined by an unrelated save.
+pub fn setting_changed(ctx: &Context, key: &str, value: &str) {
+    if let (Some(axis), "off") = (PrAxis::ALL.into_iter().find(|a| bar_key(*a) == key), value) {
+        disarm(&ctx.dir, axis);
+    }
+}
+
+/// One pass over the bars. `dry_run` touches nothing, state files included, and says what it would do.
+pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
+    let settings = settings_now(ctx, dry_run);
+    let mut out = Said::default();
+    for batch in batches {
+        let axis = batch.axis;
+        // Before anything else, so a bar switched off costs nothing and touches no state beyond
+        // forgetting its baseline, which makes switching it back on "from now on" too.
+        if !bar_on(ctx, axis) {
+            if dry_run {
+                out.said.push(format!("[{}] switched off, skipped", axis.slug()));
+            } else {
+                disarm(&ctx.dir, axis);
+            }
+            continue;
         }
-    }
-
-    fn missing(&self, ctx: &Context) -> Vec<&'static str> {
-        missing_tools(settings_now(ctx, true).host)
-    }
-
-    fn problems(&self, ctx: &Context) -> Vec<Problem> {
-        setup_problems(&settings_now(ctx, true))
-    }
-
-    /// Install, or install again after Uninstall, is "from now on" for every bar.
-    fn installed(&self, ctx: &Context, _on: bool) {
-        for axis in PrAxis::ALL {
-            disarm(&ctx.dir, axis);
+        if dry_run && batch.muted > 0 {
+            out.said.push(format!("[{}] {} muted, skipped", axis.slug(), batch.muted));
         }
-    }
-
-    /// A bar switched off on the page is disarmed at once, not at the next pass, which may not come
-    /// before it is switched back on if a tool is missing. `on` is left alone: saving the form writes
-    /// every switch, and a bar that was already on must not be re-baselined by an unrelated save.
-    fn setting_changed(&self, ctx: &Context, key: &str, value: &str) {
-        if let (Some(axis), "off") = (PrAxis::ALL.into_iter().find(|a| bar_key(*a) == key), value) {
-            disarm(&ctx.dir, axis);
-        }
-    }
-
-    fn pass(&self, ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
-        let settings = settings_now(ctx, dry_run);
-        let mut out = Said::default();
-        for batch in batches {
-            let axis = batch.axis;
-            // Before anything else, so a bar switched off costs nothing and touches no state
-            // beyond forgetting its baseline, which makes switching it back on "from now on" too.
-            if !bar_on(ctx, axis) {
-                if dry_run {
-                    out.said.push(format!("[{}] switched off, skipped", axis.slug()));
-                } else {
-                    disarm(&ctx.dir, axis);
-                }
+        let targets: Vec<Target> = batch.entries.iter().filter_map(Target::from_entry).collect();
+        if !armed(&ctx.dir, axis) {
+            // Not known yet is not empty. A baseline of nothing taken before the first poll would make
+            // the whole backlog look new a moment later.
+            if !batch.confirmed {
                 continue;
             }
-            if dry_run && batch.muted > 0 {
-                out.said.push(format!("[{}] {} muted, skipped", axis.slug(), batch.muted));
-            }
-            let targets: Vec<Target> = batch.entries.iter().filter_map(Target::from_entry).collect();
-            if !armed(&ctx.dir, axis) {
-                // Not known yet is not empty. A baseline of nothing taken before the first poll
-                // would make the whole backlog look new a moment later.
-                if !batch.confirmed {
-                    continue;
-                }
-                if dry_run {
-                    if !targets.is_empty() {
-                        out.said.push(format!(
-                            "[{}] first pass: would take {} pull request(s) as seen and start none",
-                            axis.slug(),
-                            targets.len()
-                        ));
-                    }
-                    continue;
-                }
-                match write_state(&ctx.dir, axis, &baseline(&targets)).and_then(|()| arm(&ctx.dir, axis)) {
-                    Ok(()) => out.said.push(format!(
-                        "[{}] switched on: {} pull request(s) taken as seen, none started",
+            if dry_run {
+                if !targets.is_empty() {
+                    out.said.push(format!(
+                        "[{}] first pass: would take {} pull request(s) as seen and start none",
                         axis.slug(),
                         targets.len()
-                    )),
-                    Err(e) => out.trouble.push(format!("[{}] could not record the baseline: {e}", axis.slug())),
+                    ));
                 }
                 continue;
             }
-            if targets.is_empty() {
-                continue;
+            match write_state(&ctx.dir, axis, &baseline(&targets)).and_then(|()| arm(&ctx.dir, axis)) {
+                Ok(()) => out.said.push(format!("[{}] switched on: {} pull request(s) taken as seen, none started", axis.slug(), targets.len())),
+                Err(e) => out.trouble.push(format!("[{}] could not record the baseline: {e}", axis.slug())),
             }
-            let template = prompts::text(&ctx.dir, axis.slug());
-            let report = tick(axis, &targets, &settings, &ctx.dir, &template);
-            out.said.extend(report.lines.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
-            out.trouble.extend(report.problems.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
-            out.setup.extend(report.setup.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
-            if dry_run && report.looked_at > 0 {
-                out.said.push(format!("[{}] {} pull request(s) looked at", axis.slug(), report.looked_at));
-            }
+            continue;
         }
-        if dry_run && out.said.is_empty() && out.trouble.is_empty() && out.setup.is_empty() {
-            out.said.push("nothing needed an agent".to_string());
+        if targets.is_empty() {
+            continue;
         }
-        out
+        let template = prompts::text(&ctx.dir, axis.slug());
+        let report = tick(axis, &targets, &settings, &ctx.dir, &template);
+        out.said.extend(report.lines.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+        out.trouble.extend(report.problems.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+        out.setup.extend(report.setup.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
+        if dry_run && report.looked_at > 0 {
+            out.said.push(format!("[{}] {} pull request(s) looked at", axis.slug(), report.looked_at));
+        }
     }
+    if dry_run && out.said.is_empty() && out.trouble.is_empty() && out.setup.is_empty() {
+        out.said.push("nothing needed an agent".to_string());
+    }
+    out
+}
 
-    fn page(&self, ctx: &Context, token: &str) -> String {
-        let settings = settings_now(ctx, true);
-        let missing = missing_tools(settings.host);
-        let rows = prompts::prompts(&ctx.dir);
-        page_body(token, &settings, &missing, &rows)
-    }
+/// Every client's card, for the page to put under the client radio: its tools as chips, how to get the
+/// one that is missing, and what it needs from you. Only the chosen one shows; the page's script swaps
+/// them as the radio changes, so a click shows the new client's card in place, with no reload. Each
+/// says which radio value shows it (`data-shown-by`, `data-shown-for`).
+pub fn client_cards(ctx: &Context) -> String {
+    let chosen = settings_now(ctx, true).client.id();
+    clients::CLIENTS
+        .iter()
+        .map(|client| {
+            let card = client_card_for(*client, &missing_tools(*client));
+            let shows = format!(
+                "<div class=\"card client-card\" data-shown-by=\"agentsClient\" data-shown-for=\"{}\"{}>",
+                esc(client.id()),
+                if client.id() == chosen { "" } else { " hidden" }
+            );
+            card.replacen("<div class=\"card client-card\">", &shows, 1)
+        })
+        .collect()
+}
 
-    /// Only the four known names are read off the form, by name; nothing the form invents can become
-    /// a filename. See `prompts::save_prompts`.
-    fn action(&self, ctx: &Context, action: &str, form: &crate::serve::Form) -> Option<Result<String, String>> {
-        if action != "prompts" {
-            return None;
-        }
-        crate::infoln!("settings page saved the herdr prompts");
-        let given: Vec<(String, String)> = prompts::DEFAULT_PROMPTS
-            .iter()
-            .filter_map(|(name, _)| form.get(&format!("prompt_{name}")).map(|v| (name.to_string(), v.to_string())))
-            .collect();
-        Some(
-            prompts::save_prompts(&ctx.dir, &given)
-                .map(|()| "Prompts saved. The next pass uses them.".to_string())
-                .map_err(|e| format!("could not write the prompts: {e}")),
-        )
+/// What the page shows below its settings: where it will look, and the prompts.
+pub fn page(ctx: &Context, token: &str) -> String {
+    let settings = settings_now(ctx, true);
+    page_body(token, &settings, &prompts::prompts(&ctx.dir))
+}
+
+/// A form of its own was posted. `None` for an action it does not know. Only the known prompt names
+/// are read off the form, by name; nothing the form invents can become a filename. See
+/// `prompts::save_prompts`.
+pub fn action(ctx: &Context, action: &str, form: &crate::serve::Form) -> Option<Result<String, String>> {
+    if action != "prompts" {
+        return None;
     }
+    crate::infoln!("settings page saved the agents' prompts");
+    let given: Vec<(String, String)> = prompts::DEFAULT_PROMPTS
+        .iter()
+        .filter_map(|(name, _)| form.get(&format!("prompt_{name}")).map(|v| (name.to_string(), v.to_string())))
+        .collect();
+    Some(
+        prompts::save_prompts(&ctx.dir, &given)
+            .map(|()| "Prompts saved. The next pass uses them.".to_string())
+            .map_err(|e| format!("could not write the prompts: {e}")),
+    )
 }
 
 // ── Switching on is "from now on" ────────────────────────────────────────────
 //
-// A bar that was just switched on, or an integration that was just installed, must not start an
+// A bar that was just switched on, or Agents just switched on, must not start an
 // agent for every pull request already waiting in it. Its first pass takes them all as seen instead,
-// and leaves a marker saying the bar has a baseline. Switching the bar off, Install and Uninstall all
+// and leaves a marker saying the bar has a baseline. Switching the bar off, and switching Agents on or off, all
 // remove the marker, so the next time the bar is on is a fresh "from now on" as well.
 
 fn armed_path(dir: &Path, axis: PrAxis) -> PathBuf {
@@ -920,21 +945,21 @@ fn baseline(targets: &[Target]) -> std::collections::BTreeMap<String, Handled> {
     targets.iter().map(|t| (t.key.clone(), Handled { updated: t.updated.clone(), dispatched: true })).collect()
 }
 
-/// The switch for one bar's key, in `INFO.settings`.
+/// The switch for one bar's key, in `SETTINGS`.
 fn bar_key(axis: PrAxis) -> &'static str {
     match axis {
-        PrAxis::ChangesRequested => "workRequired",
-        PrAxis::ReviewRequested => "requestedReviews",
-        PrAxis::ReadyToMerge => "approved",
+        PrAxis::ChangesRequested => "agentsWorkRequired",
+        PrAxis::ReviewRequested => "agentsRequestedReviews",
+        PrAxis::ReadyToMerge => "agentsApproved",
     }
 }
 
 /// Whether this pass acts on `axis` at all.
 fn bar_on(ctx: &Context, axis: PrAxis) -> bool {
-    INFO.settings.iter().find(|s| s.key == bar_key(axis)).is_some_and(|s| ctx.flag(s))
+    SETTINGS.iter().find(|s| s.key == bar_key(axis)).is_some_and(|s| ctx.flag(s))
 }
 
-/// The roots a pass needs: the integration's setting first, then the environment, then a default
+/// The roots a pass needs: the setting first, then the environment, then a default
 /// under your home directory.
 ///
 /// The environment comes second rather than first because it is the exception: it is there for a
@@ -951,46 +976,54 @@ fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
             None => (fallback, RootFrom::Default),
         }
     };
-    let (clone_root, clone_root_from) = pick(ctx.setting("cloneRoot"), "GITHOOT_CLONE_ROOT", home.join("projects"));
+    let (clone_root, clone_root_from) = pick(ctx.setting("agentsCloneRoot"), "GITHOOT_CLONE_ROOT", home.join("projects"));
     Settings {
         clone_root,
         clone_root_from,
-        worktree_root: pick(ctx.setting("worktreeRoot"), "GITHOOT_WORKTREE_ROOT", home.join("worktrees")).0,
-        agent_kind: std::env::var("GITHOOT_AGENT_KIND").unwrap_or_else(|_| "claude".to_string()),
-        host: host::by_id(ctx.setting("host")),
+        worktree_root: pick(ctx.setting("agentsWorktreeRoot"), "GITHOOT_WORKTREE_ROOT", home.join("worktrees")).0,
+        // A choice of one for now. Anything else in the file is the first, as every radio reads it.
+        agent_kind: AGENTS.iter().find(|(id, _)| *id == ctx.setting("agentsKind")).map_or(AGENTS[0].0, |(id, _)| id).to_string(),
+        client: clients::by_id(ctx.setting("agentsClient")),
         dry_run,
     }
 }
 
 // ── Its page ─────────────────────────────────────────────────────────────────
 
-/// What sits below the generic card: what it does, where it will look, how to get Herdr, and the
-/// prompts. Whether it is installed, what it is missing and the Dry run button are the generic
-/// card's job, the same for every integration.
-fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prompts::Prompt]) -> String {
-    let host = settings.host;
-    let herdr = if missing.contains(&host.tool()) {
-        format!("<p class=\"sub\"><a href=\"{}\">How to install {}</a></p>", host.install_url(), esc(host.name()))
-    } else {
-        String::new()
-    };
-    // One chip per tool, so a missing one stands out at a glance instead of hiding in a sentence.
-    let chips: String = required(host)
+/// The card for `client`, under the client radio: its tools as tinted tags on the name's line, so a
+/// missing one stands out at a glance instead of hiding in a sentence, how to get the one that is
+/// missing, and what it needs from you.
+fn client_card_for(client: &dyn clients::Client, missing: &[&str]) -> String {
+    let tags: String = required(client)
         .iter()
         .map(|tool| {
             if missing.contains(tool) {
-                format!("<span class=\"chip chip-no\">{tool} not found</span>")
+                format!("<span class=\"tag tag-no\">✗ {} not found</span>", esc(tool))
             } else {
-                format!("<span class=\"chip chip-ok\">{tool}</span>")
+                format!("<span class=\"tag tag-ok\">✓ {}</span>", esc(tool))
             }
         })
         .collect();
+    let install = if missing.contains(&client.tool()) {
+        format!("<p class=\"sub\"><a href=\"{}\">How to install {}</a></p>", esc(client.install_url()), esc(client.name()))
+    } else {
+        String::new()
+    };
     format!(
-        "<section class=\"block\" id=\"needs\"><h2 class=\"section\">What it needs</h2><div class=\"card\">\
-         <div class=\"chips\">{chips}</div>\
-         <p class=\"sub\">On your PATH. It creates branches and worktrees and starts <a href=\"https://herdr.dev\">Herdr</a> \
-         agents. <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/dispatcher.md\">Read what it does</a> before installing.</p>\
-         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code></p>{herdr}</div></section>\n{}",
+        "<div class=\"card client-card\"><div class=\"head\"><strong>{}</strong>{tags}</div><p class=\"sub\">{}</p>{install}</div>",
+        esc(client.name()),
+        esc(client.note()),
+    )
+}
+
+/// What sits below the settings: what it does, where it will look right now, and the prompts. Whether
+/// it is on and the Dry run button are the header card's; the chosen client is its own card.
+fn page_body(token: &str, settings: &Settings, prompts: &[prompts::Prompt]) -> String {
+    format!(
+        "<section class=\"block\" id=\"needs\"><h2 class=\"section\">What it does</h2><div class=\"card\">\
+         <p class=\"sub\">It creates branches and worktrees and starts agents. \
+         <a href=\"https://github.com/HerrDerb/githoot/blob/main/docs/agents.md\">Read what it does</a> before switching it on.</p>\
+         <p class=\"sub\">Clones: <code>{}</code> · Worktrees: <code>{}</code></p></div></section>\n{}",
         esc(&settings.clone_root.display().to_string()),
         esc(&settings.worktree_root.display().to_string()),
         prompts_card(token, prompts)
@@ -1006,7 +1039,7 @@ fn page_body(token: &str, settings: &Settings, missing: &[&str], prompts: &[prom
 fn prompts_card(token: &str, prompts: &[prompts::Prompt]) -> String {
     let mut h = format!(
         "<section class=\"block\" id=\"prompts\"><h2 class=\"section\">Prompts</h2>\n<div class=\"card\">\
-         <form method=\"post\" action=\"/{}/integrations/herdr\"><input type=\"hidden\" name=\"action\" value=\"prompts\">\
+         <form method=\"post\" action=\"/{}/agents\"><input type=\"hidden\" name=\"action\" value=\"prompts\">\
          <p class=\"sub\">What the agent is told when a pull request arrives in each bar. \
          Placeholders: <code>{{url}}</code> <code>{{repo}}</code> <code>{{number}}</code> <code>{{branch}}</code> \
          <code>{{title}}</code> <code>{{author}}</code> <code>{{labels}}</code> <code>{{changes}}</code>. The title, the author and \
@@ -1038,7 +1071,7 @@ mod tests {
             clone_root_from: RootFrom::Setting,
             worktree_root: PathBuf::from("/d/worktrees"),
             agent_kind: "claude".to_string(),
-            host: &host::HerdrTui,
+            client: &clients::HerdrTui,
             dry_run: true,
         }
     }
@@ -1048,8 +1081,8 @@ mod tests {
     #[test]
     fn its_page_offers_the_prompt_boxes_and_posts_them_to_itself() {
         let rows = [prompts::Prompt { name: "approved", text: "x {url}".into(), is_default: true }];
-        let html = page_body("tok", &settings(), &[], &rows);
-        assert!(html.contains(r#"action="/tok/integrations/herdr""#) && html.contains(r#"value="prompts""#));
+        let html = page_body("tok", &settings(), &rows);
+        assert!(html.contains(r#"action="/tok/agents""#) && html.contains(r#"value="prompts""#));
         assert!(html.contains(r#"name="prompt_approved""#) && html.contains("shipped default"));
         assert!(html.contains("/d/projects") && html.contains("/d/worktrees"));
     }
@@ -1058,17 +1091,18 @@ mod tests {
     #[test]
     fn prompt_text_is_escaped_inside_its_box() {
         let rows = [prompts::Prompt { name: "update", text: "</textarea><script>1</script> & {url}".into(), is_default: false }];
-        let html = page_body("tok", &settings(), &[], &rows);
+        let html = page_body("tok", &settings(), &rows);
         assert!(!html.contains("</textarea><script>"));
         assert!(html.contains("&lt;/textarea&gt;") && html.contains("yours"));
     }
 
-    /// What it needs is a row of chips, one per tool, so a missing one stands out at a glance.
+    /// What it needs is a tinted tag per tool on the name's own line, green when it runs and red when
+    /// it does not, so a missing one stands out at a glance in a dark theme as in a light one.
     #[test]
-    fn the_tools_it_needs_are_chips_that_say_which_are_missing() {
-        let html = page_body("tok", &settings(), &["git"], &[]);
-        assert!(html.contains(r#"<span class="chip chip-ok">herdr</span>"#), "{html}");
-        assert!(html.contains(r#"<span class="chip chip-no">git not found</span>"#), "{html}");
+    fn the_tools_it_needs_are_tags_on_the_names_line_that_say_which_are_missing() {
+        let html = client_card_for(&clients::HerdrTui, &["git"]);
+        assert!(html.contains(r#"<div class="head"><strong>Herdr</strong><span class="tag tag-ok">✓ herdr</span><span class="tag tag-no">✗ git not found</span></div>"#), "{html}");
+        assert!(!html.contains("chip"), "not the login chips' look: {html}");
         assert!(!html.contains("\">gh") && !html.contains("gh not found"), "no chip for a forge tool: none is required");
     }
 
@@ -1080,7 +1114,7 @@ mod tests {
             prompts::Prompt { name: "approved", text: "x".into(), is_default: true },
             prompts::Prompt { name: "update", text: "y".into(), is_default: false },
         ];
-        let html = page_body("tok", &settings(), &[], &rows);
+        let html = page_body("tok", &settings(), &rows);
         assert!(html.contains(r#"<details class="prompt"><summary><strong>approved</strong> <span class="pill">shipped default</span></summary>"#), "{html}");
         assert!(html.contains(r#"<details class="prompt"><summary><strong>update</strong> <span class="pill">yours</span></summary>"#), "{html}");
         assert!(!html.contains("<details class=\"prompt\" open>"), "closed until clicked");
@@ -1089,34 +1123,34 @@ mod tests {
     /// Herdr is the tool a user is least likely to have, so its absence comes with the way to fix it.
     #[test]
     fn a_missing_herdr_links_to_its_install_guide() {
-        assert!(page_body("tok", &settings(), &["herdr"], &[]).contains(r#"href="https://herdr.dev/docs/install/""#));
-        assert!(!page_body("tok", &settings(), &["git"], &[]).contains("herdr.dev/docs/install"));
+        assert!(client_card_for(&clients::HerdrTui, &["herdr"]).contains(r#"href="https://herdr.dev/docs/install/""#));
+        assert!(!client_card_for(&clients::HerdrTui, &["git"]).contains("herdr.dev/docs/install"));
     }
 
     /// Only its own action. Install, uninstall, dry run and settings are the generic page's.
     #[test]
     fn it_answers_only_the_prompts_action() {
         let cfg = crate::config::Config::from_text("");
-        let ctx = Context::new(Path::new("/nonexistent"), &cfg, "herdr");
+        let ctx = Context::new(Path::new("/nonexistent"), &cfg);
         let form = crate::serve::parse_form("action=install");
-        assert!(Herdr.action(&ctx, "install", &form).is_none());
-        assert!(Herdr.action(&ctx, "anything", &form).is_none());
+        assert!(action(&ctx, "install", &form).is_none());
+        assert!(action(&ctx, "anything", &form).is_none());
     }
 
     /// Nothing to look at is said in a dry run, and nothing is run to find that out.
     #[test]
     fn a_dry_run_over_empty_bars_says_nothing_needed_an_agent() {
         let cfg = crate::config::Config::from_text("");
-        let ctx = Context::new(Path::new("/nonexistent"), &cfg, "herdr");
+        let ctx = Context::new(Path::new("/nonexistent"), &cfg);
         let batches = [Batch { axis: PrAxis::ChangesRequested, entries: Vec::new(), muted: 2, confirmed: true }];
-        let out = Herdr.pass(&ctx, &batches, true);
+        let out = pass(&ctx, &batches, true);
         assert_eq!(out.said, ["[work-required] 2 muted, skipped"]);
-        assert!(Herdr.pass(&ctx, &[], true).said == ["nothing needed an agent"]);
-        assert!(Herdr.pass(&ctx, &[], false).said.is_empty(), "a real pass with nothing to do is silent");
+        assert!(pass(&ctx, &[], true).said == ["nothing needed an agent"]);
+        assert!(pass(&ctx, &[], false).said.is_empty(), "a real pass with nothing to do is silent");
     }
 
     fn ctx(text: &str) -> Context {
-        Context::new(Path::new("/nonexistent"), &crate::config::Config::from_text(text), "herdr")
+        Context::new(Path::new("/nonexistent"), &crate::config::Config::from_text(text))
     }
 
     /// An approved pull request is usually one you merge yourself. An agent started for it is mostly
@@ -1127,7 +1161,7 @@ mod tests {
         let c = ctx("");
         assert!(!bar_on(&c, PrAxis::ReadyToMerge));
         assert!(bar_on(&c, PrAxis::ChangesRequested) && bar_on(&c, PrAxis::ReviewRequested));
-        let c = ctx("integration.herdr.approved=on\nintegration.herdr.workRequired=off\n");
+        let c = ctx("agentsApproved=on\nagentsWorkRequired=off\n");
         assert!(bar_on(&c, PrAxis::ReadyToMerge) && !bar_on(&c, PrAxis::ChangesRequested));
     }
 
@@ -1136,8 +1170,8 @@ mod tests {
     #[test]
     fn a_bar_switched_off_is_skipped_and_a_dry_run_says_so() {
         let batches = [Batch { axis: PrAxis::ReadyToMerge, entries: vec![PrEntry::stub("https://github.com/o/r/pull/1")], muted: 0, confirmed: true }];
-        assert_eq!(Herdr.pass(&ctx(""), &batches, true).said, ["[approved] switched off, skipped"]);
-        assert!(Herdr.pass(&ctx(""), &batches, false).said.is_empty(), "a real pass says nothing about it");
+        assert_eq!(pass(&ctx(""), &batches, true).said, ["[approved] switched off, skipped"]);
+        assert!(pass(&ctx(""), &batches, false).said.is_empty(), "a real pass says nothing about it");
     }
 
     fn pr(number: u64, updated: &str) -> PrEntry {
@@ -1152,7 +1186,7 @@ mod tests {
     fn temp_ctx(name: &str, text: &str) -> Context {
         let root = std::env::temp_dir().join(format!("githoot-herdr-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        Context::new(&root, &crate::config::Config::from_text(text), "herdr")
+        Context::new(&root, &crate::config::Config::from_text(text))
     }
 
     fn batch(axis: PrAxis, entries: Vec<PrEntry>, confirmed: bool) -> Batch {
@@ -1164,13 +1198,13 @@ mod tests {
     #[test]
     fn the_first_pass_of_a_bar_records_a_baseline_and_starts_nothing() {
         let ctx = temp_ctx("baseline", "");
-        let out = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(1, "2026-09-25T10:00:00Z"), pr(2, "2026-09-25T11:00:00Z")], true)], false);
+        let out = pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(1, "2026-09-25T10:00:00Z"), pr(2, "2026-09-25T11:00:00Z")], true)], false);
         assert_eq!(out.said, ["[work-required] switched on: 2 pull request(s) taken as seen, none started"]);
         assert!(out.trouble.is_empty() && out.setup.is_empty(), "nothing was asked of gh: {out:?}");
         let state = read_state(&ctx.dir, PrAxis::ChangesRequested);
         assert_eq!(state.len(), 2);
         assert!(armed(&ctx.dir, PrAxis::ChangesRequested));
-        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
     }
 
     /// Switching a bar on takes whatever is in it as dispatched, so only arrivals start agents.
@@ -1189,29 +1223,29 @@ mod tests {
     #[test]
     fn an_unconfirmed_bar_is_not_taken_as_a_baseline() {
         let ctx = temp_ctx("unconfirmed", "");
-        let out = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), false)], false);
+        let out = pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), false)], false);
         assert!(out.said.is_empty() && !armed(&ctx.dir, PrAxis::ChangesRequested));
     }
 
     #[test]
     fn switching_a_bar_off_means_the_next_switch_on_is_a_fresh_baseline() {
         let ctx = temp_ctx("rearm", "");
-        let _ = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
+        let _ = pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
         assert!(armed(&ctx.dir, PrAxis::ChangesRequested));
-        let off = Context::new(ctx.dir.parent().unwrap().parent().unwrap(), &crate::config::Config::from_text("integration.herdr.workRequired=off\n"), "herdr");
-        let _ = Herdr.pass(&off, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
+        let off = Context::new(ctx.dir.parent().unwrap(), &crate::config::Config::from_text("agentsWorkRequired=off\n"));
+        let _ = pass(&off, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
         assert!(!armed(&ctx.dir, PrAxis::ChangesRequested));
-        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
     }
 
     #[test]
     fn install_and_uninstall_both_mean_a_fresh_baseline_next_time() {
         let ctx = temp_ctx("install", "");
-        let _ = Herdr.pass(&ctx, &[batch(PrAxis::ReviewRequested, Vec::new(), true)], false);
+        let _ = pass(&ctx, &[batch(PrAxis::ReviewRequested, Vec::new(), true)], false);
         assert!(armed(&ctx.dir, PrAxis::ReviewRequested));
-        Herdr.installed(&ctx, true);
+        switched(&ctx, true);
         assert!(!armed(&ctx.dir, PrAxis::ReviewRequested));
-        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap().parent().unwrap());
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
     }
 
     /// Switching a bar off on the page counts even when no pass runs in between, say because a tool
@@ -1219,11 +1253,11 @@ mod tests {
     #[test]
     fn switching_a_bar_off_on_the_page_counts_without_a_pass() {
         let ctx = temp_ctx("page-off", "");
-        let _ = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
-        let root = ctx.dir.parent().unwrap().parent().unwrap().to_path_buf();
-        crate::integration::set(&root, &Herdr, "workRequired", "on").unwrap();
+        let _ = pass(&ctx, &[batch(PrAxis::ChangesRequested, Vec::new(), true)], false);
+        let root = ctx.dir.parent().unwrap().to_path_buf();
+        crate::agents::set(&root, "agentsWorkRequired", "on").unwrap();
         assert!(armed(&ctx.dir, PrAxis::ChangesRequested), "saving the form with it still on is not a switch");
-        crate::integration::set(&root, &Herdr, "workRequired", "off").unwrap();
+        crate::agents::set(&root, "agentsWorkRequired", "off").unwrap();
         assert!(!armed(&ctx.dir, PrAxis::ChangesRequested));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1232,16 +1266,18 @@ mod tests {
     #[test]
     fn a_dry_run_before_the_baseline_says_so_and_writes_nothing() {
         let ctx = temp_ctx("dry", "");
-        let out = Herdr.pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(1, "2026-09-25T10:00:00Z")], true)], true);
+        let out = pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(1, "2026-09-25T10:00:00Z")], true)], true);
         assert_eq!(out.said, ["[work-required] first pass: would take 1 pull request(s) as seen and start none"]);
         assert!(!armed(&ctx.dir, PrAxis::ChangesRequested) && read_state(&ctx.dir, PrAxis::ChangesRequested).is_empty());
     }
 
-    /// Its files are its own: state and caches under the integration's directory, nowhere else.
+    /// Its files are its own: state and prompts in `~/.githoot/agents/`, nowhere else, and not in the
+    /// Herdr dispatcher's old folder, which nothing reads any more.
     #[test]
-    fn its_state_lives_in_the_integration_directory() {
-        let dir = Path::new("/x/integrations/herdr");
-        assert_eq!(state_path(dir, PrAxis::ChangesRequested), dir.join("work-required.txt"));
+    fn its_state_lives_in_the_agents_directory() {
+        let ctx = Context::new(Path::new("/x"), &crate::config::Config::from_text(""));
+        assert_eq!(ctx.dir, Path::new("/x/agents"));
+        assert_eq!(state_path(&ctx.dir, PrAxis::ChangesRequested), Path::new("/x/agents/work-required.txt"));
     }
 
     fn seen(updated: &str, dispatched: bool) -> Handled {
@@ -1376,34 +1412,60 @@ mod tests {
         assert_eq!(render_prompt("on {branch}", &target(None, None), "githoot/pr-7-r"), "on githoot/pr-7-r");
     }
 
-    /// The radio picks where agents open, the terminal unless it says otherwise.
+    /// The client radio picks where agents open, Herdr in a terminal unless it says otherwise.
     #[test]
-    fn the_host_is_a_radio_that_defaults_to_the_terminal() {
-        assert_eq!(settings_now(&ctx(""), true).host.id(), "herdr");
-        assert_eq!(settings_now(&ctx("integration.herdr.host=herdr-app\n"), true).host.id(), "herdr-app");
-        let radio = INFO.settings.iter().find(|s| s.key == "host").expect("a radio for it");
-        assert_eq!(radio.kind, Kind::Choice { options: host::CHOICES });
+    fn the_client_is_a_radio_that_defaults_to_the_terminal() {
+        assert_eq!(settings_now(&ctx(""), true).client.id(), "herdr");
+        assert_eq!(settings_now(&ctx("agentsClient=herdr-app\n"), true).client.id(), "herdr-app");
+        let radio = SETTINGS.iter().find(|s| s.key == "agentsClient").expect("a radio for it");
+        assert_eq!(radio.kind, Kind::Choice { options: clients::CHOICES });
+    }
+
+    /// The agent is a radio too, with one option for now: Claude, whatever the file says. The
+    /// environment variable that used to pick it is gone, so nothing outside the page can either.
+    #[test]
+    fn the_agent_is_claude_whatever_the_file_or_the_environment_says() {
+        let radio = SETTINGS.iter().find(|s| s.key == "agentsKind").expect("a radio for it");
+        assert_eq!(radio.kind, Kind::Choice { options: &[("claude", "Claude")] });
+        for text in ["", "agentsKind=claude\n", "agentsKind=codex\n"] {
+            assert_eq!(settings_now(&ctx(text), true).agent_kind, "claude", "{text:?}");
+        }
+        let src = include_str!("dispatch.rs");
+        assert!(!src.contains(&["GITHOOT", "AGENT_KIND"].join("_")), "the variable is read nowhere");
+    }
+
+    /// One card per client, each saying which radio value shows it; only the chosen one is visible, so
+    /// the script can swap them in place when the radio changes.
+    #[test]
+    fn every_client_has_a_card_and_only_the_chosen_one_shows() {
+        let html = client_cards(&ctx("agentsClient=orca\n"));
+        for (id, _) in clients::CHOICES {
+            let tag = format!(r#"<div class="card client-card" data-shown-by="agentsClient" data-shown-for="{id}""#);
+            let at = html.find(&tag).unwrap_or_else(|| panic!("no card for {id}: {html}"));
+            let hidden = html[at + tag.len()..].starts_with(" hidden>");
+            assert_eq!(hidden, *id != "orca", "{id}: {html}");
+        }
+        assert!(html.contains("Agent permissions"), "Orca's card says what it needs: {html}");
     }
 
     /// The app needs `hc`, not `herdr`, and the page names the right one when it is missing.
     #[test]
     fn the_tools_it_needs_follow_the_host() {
-        assert_eq!(required(&host::HerdrApp), ["hc", "git"]);
-        let app = Settings { host: &host::HerdrApp, ..settings() };
-        let html = page_body("tok", &app, &["hc"], &[]);
+        assert_eq!(required(&clients::HerdrApp), ["hc", "git"]);
+        let html = client_card_for(&clients::HerdrApp, &["hc"]);
         assert!(html.contains("hc not found") && !html.contains("herdr not found"), "{html}");
     }
 
-    /// A program that is not there says so in one recognisable way, so a host can tell "not installed"
+    /// A program that is not there says so in one recognisable way, so a client can tell "not installed"
     /// (nobody working) from "did not answer" (nobody can say).
     #[test]
     fn a_program_that_is_not_installed_says_so() {
         let said = output("githoot-no-such-program-for-a-test", &["--version"]).unwrap_err();
-        assert!(host::not_installed(&said), "{said}");
-        assert!(!host::not_installed("connection reset by peer"));
+        assert!(clients::not_installed(&said), "{said}");
+        assert!(!clients::not_installed("connection reset by peer"));
     }
 
-    /// A worktree is recycled only when every host answered.
+    /// A worktree is recycled only when every client answered.
     #[test]
     fn no_worktree_is_recycled_while_a_host_did_not_answer() {
         assert_eq!(may_recycle("/w/pr-1-x", &[]), Ok(()));
@@ -1411,12 +1473,29 @@ mod tests {
         assert!(said.contains("/w/pr-1-x") && said.contains("Herdr app: broken pipe") && said.contains("left alone"), "{said}");
     }
 
+    /// Orca answers pretty-printed JSON, with a space after every colon; Herdr answers compact JSON.
+    #[test]
+    fn a_json_field_is_read_with_or_without_spaces() {
+        assert_eq!(json_string(r#"{"handle":"t1"}"#, "handle"), Some("t1".to_string()));
+        assert_eq!(json_string("{\n  \"handle\": \"t1\",", "handle"), Some("t1".to_string()));
+        assert_eq!(json_string(r#"{"handle": null}"#, "handle"), None, "not a string");
+    }
+
+    /// Orca's CLI reports usage to a US analytics service unless told not to. Every program the
+    /// dispatcher runs is told, which costs the others nothing.
+    #[test]
+    fn every_program_it_runs_has_orca_telemetry_off() {
+        let cmd = command("orca-ide");
+        let off = cmd.get_envs().any(|(k, v)| k == "ORCA_TELEMETRY_DISABLED" && v == Some(std::ffi::OsStr::new("1")));
+        assert!(off);
+    }
+
     /// Nothing in it names a forge: it needs only herdr and git, and serves every portal, including
     /// ones not written yet.
     #[test]
     fn it_needs_only_herdr_and_git_and_serves_every_portal() {
-        assert_eq!(required(&host::HerdrTui), ["herdr", "git"]);
-        assert_eq!(Herdr.info().portals, &PortalKind::ALL);
+        assert_eq!(required(&clients::HerdrTui), ["herdr", "git"]);
+        assert_eq!(crate::agents::PORTALS, &crate::portal::PortalKind::ALL);
         for (name, text) in prompts::DEFAULT_PROMPTS {
             assert!(!text.contains(" gh") && !text.contains("gh "), "{name} names a forge tool");
         }
@@ -1496,12 +1575,12 @@ mod tests {
         let problems = setup_problems(&rooted(&gone, RootFrom::Default, &scratch.0));
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].text.contains("does not exist") && problems[0].text.contains("empty"), "{problems:?}");
-        assert_eq!(problems[0].key, "cloneRoot", "it names the box to fix, so the page can mark it");
+        assert_eq!(problems[0].key, "agentsCloneRoot", "it names the box to fix, so the page can mark it");
 
         // There, but nothing in it is a clone: almost certainly the wrong folder.
         let problems = setup_problems(&rooted(&scratch.0, RootFrom::Setting, &scratch.0));
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].text.contains("no git clone") && problems[0].key == "cloneRoot", "{problems:?}");
+        assert!(problems[0].text.contains("no git clone") && problems[0].key == "agentsCloneRoot", "{problems:?}");
 
         std::fs::create_dir_all(scratch.0.join("thing").join(".git")).unwrap();
         assert_eq!(setup_problems(&rooted(&scratch.0, RootFrom::Setting, &scratch.0)), []);
@@ -1512,7 +1591,7 @@ mod tests {
         let problems = setup_problems(&rooted(&scratch.0, RootFrom::Setting, &file));
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].text.contains("Worktrees go in") && problems[0].text.contains("not a folder"), "{problems:?}");
-        assert_eq!(problems[0].key, "worktreeRoot");
+        assert_eq!(problems[0].key, "agentsWorktreeRoot");
         assert!(setup_problems(&rooted(&scratch.0, RootFrom::Setting, &scratch.0.join("later"))).is_empty());
     }
 

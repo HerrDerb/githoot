@@ -272,7 +272,7 @@ struct MergeRequest {
     /// Absent is no conflict known, never a conflict.
     #[serde(default)]
     conflicts: bool,
-    /// The merge request's branch by name, for saying. A fork's lives on the fork, so an integration
+    /// The merge request's branch by name, for saying. A fork's lives on the fork, so Agents
     /// fetches `head_ref` instead.
     source_branch: Option<String>,
     labels: Option<Connection<Label>>,
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn the_document_declares_the_variables_it_uses() {
-        assert!(MR_DOCUMENT.contains("sourceBranch"), "the branch an integration checks out");
+        assert!(MR_DOCUMENT.contains("sourceBranch"), "the branch Agents checks out");
         assert!(MR_DOCUMENT.contains("labels(first:$people){nodes{title}}"), "the labels");
         assert!(MR_DOCUMENT.contains("diffStatsSummary{additions deletions fileCount}"), "the size");
         for var in ["$hits", "$people", "$review", "$authored"] {

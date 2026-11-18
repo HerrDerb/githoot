@@ -95,26 +95,25 @@ same token and `Host` checks. It is organised by what you manage, with a sidebar
 |---|---|
 | **General** | what the tray shows and does: the three bars, the hoot, and what makes a pull request green |
 | **Portals ▸ GitHub** | where pull requests come from: the sign-in, which parts of GitHub count as an outage. The Portals list is also where GitLab is installed |
-| **Integrations ▸ Herdr dispatcher** | where pull requests go: Install, a dry run, its settings and prompts → [integrations](integrations.md) |
+| **Agents** | the agent GitHoot starts for each pull request that needs you: Switch on, a dry run, the client and agent, the bars, the folders and the prompts → [agents](agents.md) |
 | **Muted** | every muted pull request, with Unmute → [muting](pr-page.md#muting-a-pull-request) |
 | **Updates** | this version, the last check, **Check now**, **Update to X.Y.Z** when there is one, and the automatic check |
 | **Advanced** | the local API → [the local API](local-api.md), and how much the log records |
 
-Portals and Integrations are the two collections: a list with one card per item, its state, its main
-action and a ⚙ **Settings** button, and a page per item. The sidebar lists under each collection only
-what is in use, the portals you are signed in to and the integrations you installed, plus the page you
-are on, and marks where you are. Everything else is on the list page, where it is signed in to or
-installed. The page title says where you are too, as a trail from **Settings**, such as *Settings ›
-Integrations › Herdr dispatcher*, with every step but the last a link back.
+Portals is the one collection: a list with one card per portal, its state, its main action and a ⚙
+**Settings** button, and a page per portal. The sidebar lists under it only the portals you are signed
+in to, plus the page you are on, and marks where you are. Everything else is on the list page, where it
+is signed in to or installed. The page title says where you are too, as a trail from **Settings**, such
+as *Settings › Portals › GitHub*, with every step but the last a link back.
 
 **Checkboxes and choices save the moment you change them.** No Save button, like the tray's own
 checkboxes: a line beside the controls says *Saved.* and fades, or names the settings that take effect
-only after a restart and stays. Sections with a text box (the Herdr folders, its prompts) keep a
+only after a restart and stays. Sections with a text box (the Agents folders, its prompts) keep a
 **Save** button, because half-typed text should not save itself. Either way a save writes that
 section's settings and no others, **one line per changed setting**, through the same surgical edit the
 tray checkboxes make: your comments, blank lines, spacing and any keys this version has never heard of
 survive byte for byte. Only the hoot and the green bar's rules take effect at once among the core settings;
-an integration's settings always do. Without JavaScript every section shows its Save button and posts
+the Agents settings always do. Without JavaScript every section shows its Save button and posts
 as before.
 
 **What makes a pull request green** sits on General folded to one row that says how many of its rules
@@ -236,8 +235,8 @@ existed — the key is appended rather than the file regenerated.
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
 | `localApi` | `off` | Serve the judged lists as JSON to local scripts, and bind the local port at startup — see [The local API](local-api.md). Off by default, and a typo leaves it shut rather than open |
-| `integration.<id>.enabled` | `off` | Whether that integration is installed. What its Install and Uninstall buttons write, and like `localApi` a typo leaves it off → [integrations](integrations.md) |
-| `integration.<id>.<key>` | per integration | That integration's own settings, listed on its page and in its doc. The Herdr dispatcher has `cloneRoot` and `worktreeRoot` → [the dispatcher](dispatcher.md#settings) |
+| `agents` | `off` | Whether GitHoot starts agents for pull requests. What Switch on and Switch off write, and like `localApi` a typo leaves it off → [agents](agents.md) |
+| `agents…` | per setting | The Agents settings: `agentsClient`, `agentsKind`, the three bars and the two folders, listed on its page and in its doc → [agents](agents.md#settings) |
 
 | `portal.<name>.type` | none | `github` or `gitlab`. **Naming any portal retires the implicit GitHub one**, so to watch both, name both → [Portals](portals.md#configuration) |
 | `portal.<name>.url` | the forge's own | A self-managed GitLab's origin. Ignored on a GitHub section until Enterprise Server ships |
@@ -251,10 +250,10 @@ its section. The one exception is the last portal, which Sign out only signs out
 `clientId` are edited in this file, and those edits take effect after a restart.
 
 Only `off`, `false`, `0` or `no` switch something off; anything else leaves the default, so a typo cannot
-silently disable a feature. The exceptions are `localApi` and `integration.<id>.enabled`, which need an
+silently disable a feature. The exceptions are `localApi` and `agents`, which need an
 explicit `on`. Some keys are not toggles: `logLevel` takes `error` or `info`, falling back to
-`error`; `statusComponents` takes a comma-separated list; an integration's own keys take text, and empty
-means that setting's default.
+`error`; `statusComponents` takes a comma-separated list; `agentsClient` and `agentsKind` take one of
+their options, and the two folders take text, where empty means that setting's default.
 
 **Two things are deliberately not keys here:** whether GitHoot starts when you sign in, and whether its
 icon sits on the Windows taskbar or in the overflow flyout. Both are stored by the operating system

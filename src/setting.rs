@@ -1,18 +1,17 @@
 //! Settings as declarations: what a setting is called, what it holds, and where it sits on a page.
 //!
 //! Everything the settings pages can change is declared here in one shape, whoever owns it: the core
-//! (`config`), a portal, an integration. One renderer draws every declaration and one reader turns a
+//! (`config`), a portal, Agents. One renderer draws every declaration and one reader turns a
 //! submitted form back into values, so adding a setting is a declaration, not a new form, a new route
 //! and a new parser that each have to get the same details right.
 //!
 //! What a declaration does **not** decide is where its value lives. `config` stores the core's keys
-//! flat and an integration's under `integration.<id>.`; both write through the same one-line edit, and
-//! both check a value against its declaration first.
+//! flat, Agents' flat too under its own `agents` prefix, and a portal's under `portal.<name>.`; all write
+//! through the same one-line edit, and all check a value against its declaration first.
 
 /// One setting, as a page shows it and a form submits it.
 pub struct Setting {
-    /// The key as the form names it. For the core that is the `config.txt` key; for an integration
-    /// it is the part after `integration.<id>.`.
+    /// The key as the form names it, which is the `config.txt` key.
     pub key: &'static str,
     /// What the checkbox, box or list is labelled.
     pub label: &'static str,

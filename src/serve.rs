@@ -1085,14 +1085,6 @@ fn site_for<'a>(token: &'a str, nonce: &'a str) -> crate::ui::Site<'a> {
                 (p.info.id.0, p.info.display_name, signed_in)
             })
             .collect(),
-        // Read from `config.txt` only with settings installed; without them nothing is installed.
-        installed: match SETTINGS.get() {
-            Some(_) => {
-                let (cfg, _) = crate::config::Config::load(&settings_path());
-                crate::integration::all().iter().map(|i| i.info().id).filter(|id| cfg.integration_enabled(id)).collect()
-            }
-            None => Vec::new(),
-        },
         muted: crate::mute::all(unix_now()).len(),
         update: match scheduler::update_status().last {
             Some((_, Ok(Some(version)))) => Some(version),
@@ -1193,42 +1185,11 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
                 &crate::ui::portals::PortalView { card, now_unix: unix_now(), nonce: &nonce, value: value_ref, flash: flash.as_ref() },
             )
         }
-        Place::Integrations => {
-            let rows: Vec<crate::ui::integrations::IntegrationRow> = crate::integration::all()
-                .iter()
-                .map(|i| {
-                    let info = i.info();
-                    let installed = cfg.as_ref().is_some_and(|c| c.integration_enabled(info.id));
-                    // Only asked while installed: spawning processes to draw a list is waste.
-                    let missing = match (&cfg, installed && info.unsupported.is_none()) {
-                        (Some(c), true) => i.missing(&crate::integration::Context::new(&settings_path(), c, info.id)),
-                        _ => Vec::new(),
-                    };
-                    // Asked installed or not, as its page does: before Install is when a wrong folder is cheapest to fix.
-                    let problems = match (&cfg, info.unsupported) {
-                        (Some(c), None) => i.problems(&crate::integration::Context::new(&settings_path(), c, info.id)),
-                        _ => Vec::new(),
-                    };
-                    let tone = crate::ui::integrations::status_tone(installed, info.unsupported, &missing, problems.len());
-                    crate::ui::integrations::IntegrationRow {
-                        id: info.id,
-                        name: info.name,
-                        summary: info.summary,
-                        status: crate::ui::integrations::integration_status(installed, info.unsupported, &missing, problems.len()),
-                        tone,
-                        switch: crate::ui::integrations::integration_switch(installed, info.unsupported),
-                        flash: crate::integration::take_flash(info.id),
-                        problems,
-                    }
-                })
-                .collect();
-            crate::ui::integrations::integrations_page(&site, &rows)
-        }
-        Place::Integration(id) => {
-            let (Some(integration), Some(home)) = (crate::integration::find(id), settings_home()) else {
+        Place::Agents => {
+            let Some(home) = settings_home() else {
                 return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
             };
-            integration_page(&site, integration, &home, flash.as_ref())
+            agents_page(&site, &home, flash.as_ref())
         }
         Place::Muted => {
             let now = unix_now();
@@ -1259,13 +1220,13 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
 /// A button or a Save posted to a page of the settings site.
 ///
 /// The same guards as every other write, in the same order: `Origin` first, then a settings directory
-/// to write into, then a body within bounds. The muted page and an integration's page keep their own
+/// to write into, then a body within bounds. The muted page and the Agents page keep their own
 /// handlers, which apply the same guards.
 fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16, place: &crate::ui::Place) {
     use crate::ui::Place;
     match place {
         Place::Muted => return unmute_action(stream, head, request, token, port),
-        Place::Integration(id) => return integration_action(stream, head, request, token, port, id),
+        Place::Agents => return agents_action(stream, head, request, token, port),
         _ => {}
     }
     if !origin_is_ours(request.origin.as_deref(), port) {
@@ -1343,9 +1304,7 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
                 _ => respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
             }
         }
-        Place::Integrations | Place::Muted | Place::Integration(_) => {
-            respond(stream, 405, "text/plain; charset=utf-8", b"Method not allowed", true)
-        }
+        Place::Muted | Place::Agents => respond(stream, 405, "text/plain; charset=utf-8", b"Method not allowed", true),
     }
 }
 
@@ -1486,40 +1445,33 @@ fn sign_in(settings: &Settings, kind: crate::portal::PortalKind, asked: &crate::
     Ok(id)
 }
 
-/// One integration's page: the header card, its declared settings as sections, and its own part.
-fn integration_page(
-    site: &crate::ui::Site,
-    integration: &'static dyn crate::integration::Integration,
-    home: &std::path::Path,
-    flash: Option<&(usize, String)>,
-) -> String {
+/// The Agents page: the header card, its settings as sections with the chosen client's card in the
+/// first, then where it looks and its prompts.
+fn agents_page(site: &crate::ui::Site, home: &std::path::Path, flash: Option<&(usize, String)>) -> String {
+    use crate::agents::{dispatch, Context, UNSUPPORTED};
     let cfg = crate::config::Config::load(home).0;
-    let info = integration.info();
-    let ctx = crate::integration::Context::new(home, &cfg, info.id);
-    let installed = cfg.integration_enabled(info.id);
-    let missing = if installed && info.unsupported.is_none() { integration.missing(&ctx) } else { Vec::new() };
-    let problems = integration.problems(&ctx);
-    let header_flash = crate::integration::take_flash(info.id);
-    let dry_run = crate::integration::last_dry_run(info.id);
-    let place = crate::ui::Place::Integration(info.id);
+    let ctx = Context::new(home, &cfg);
+    let on = cfg.agents_enabled();
+    let missing = if on && UNSUPPORTED.is_none() { dispatch::missing(&ctx) } else { Vec::new() };
+    let problems = dispatch::problems(&ctx);
+    let header_flash = crate::agents::take_flash();
+    let dry_run = crate::agents::last_dry_run();
     let value = |s: &crate::setting::Setting| ctx.setting(s.key).to_string();
-    let view = crate::ui::integrations::IntegrationView {
-        id: info.id,
-        name: info.name,
-        summary: info.summary,
-        installed,
-        unsupported: info.unsupported,
+    let view = crate::ui::agents::AgentsView {
+        on,
+        unsupported: UNSUPPORTED,
         missing: &missing,
         problems: &problems,
         flash: header_flash.as_deref(),
         dry_run: &dry_run,
         // The box at fault is marked where it is drawn, as well as listed at the top.
-        sections: crate::ui::sections_with(site.token, &place, info.settings, &value, flash, &|s| {
+        sections: crate::ui::sections_with(site.token, &crate::ui::Place::Agents, dispatch::SETTINGS, &value, flash, &|s| {
             problems.iter().find(|p| p.key == s.key).map(|p| p.text.clone())
         }),
-        body: integration.page(&ctx, site.token),
+        client_card: dispatch::client_cards(&ctx),
+        body: dispatch::page(&ctx, site.token),
     };
-    crate::ui::integrations::integration_page(site, &view)
+    crate::ui::agents::agents_page(site, &view)
 }
 
 /// Where a Browse button's picker opens: the folder the box names, or the nearest one above it that
@@ -1610,17 +1562,18 @@ fn settings_home() -> Option<std::path::PathBuf> {
     SETTINGS.get().map(|s| s.app_asset_path.clone())
 }
 
-/// A button on an integration's page.
+/// A button or a Save on the Agents page.
 ///
-/// The same guards as every other write. The form names an action and, for `settings`, values for
-/// keys the integration declared; nothing on it can steer which file is written or which key, which
-/// `integration::set` checks and `config::set_integration` checks again. Every outcome goes back to
-/// the page as one line, shown once.
-fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16, id: &'static str) {
+/// The same guards as every other write. The form names an action and, for a section's Save, values for
+/// keys Agents declared; nothing on it can steer which file is written or which key, which `agents::set`
+/// checks and `config::set_agents` checks again. Every outcome goes back to the page as one line, shown
+/// once.
+fn agents_action(stream: &mut TcpStream, head: &str, request: &Request, token: &str, port: u16) {
+    use crate::agents::dispatch;
     if !origin_is_ours(request.origin.as_deref(), port) {
         return respond(stream, 403, "text/plain; charset=utf-8", b"Forbidden", true);
     }
-    let (Some(integration), Some(home)) = (crate::integration::find(id), settings_home()) else {
+    let Some(home) = settings_home() else {
         return respond(stream, 503, "text/plain; charset=utf-8", b"No settings directory", true);
     };
     let already = head.split_once("\r\n\r\n").map(|(_, rest)| rest).unwrap_or_default();
@@ -1632,19 +1585,19 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
     if form.get("action").is_some_and(|a| a == "browse") {
         return browse(stream, &form);
     }
-    // A section's Save: only the keys that section declared, each checked by `integration::set`. An
-    // unticked box is off; a text box submitted empty is a deliberate clear, back to its default.
+    let place = crate::ui::Place::Agents;
+    // A section's Save: only the keys that section declared, each checked by `agents::set`. An unticked
+    // box is off; a text box submitted empty is a deliberate clear, back to its default.
     if form.get("action").is_none() {
-        let place = crate::ui::Place::Integration(id);
-        let Some((index, members)) = section_of(integration.info().settings, &form) else {
+        let Some((index, members)) = section_of(dispatch::SETTINGS, &form) else {
             return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown section", true);
         };
         let line = crate::setting::from_form(&members, &form)
             .into_iter()
-            .try_for_each(|(key, value)| crate::integration::set(&home, integration, key, &value))
+            .try_for_each(|(key, value)| crate::agents::set(&home, key, &value))
             .map(|()| "Saved. The next pass uses it.".to_string())
             .unwrap_or_else(|why| {
-                errorln!("{id}: {why}");
+                errorln!("agents: {why}");
                 format!("Not saved: {why}")
             });
         return answer_save(stream, token, &place, index, &line, &form);
@@ -1652,50 +1605,40 @@ fn integration_action(stream: &mut TcpStream, head: &str, request: &Request, tok
     let action = form.get("action").map(String::as_str).unwrap_or_default();
     let outcome: Result<String, String> = match action {
         // Writes one line of `config.txt`; the runner reads it on its next pass. No restart, and no
-        // second source of truth for whether the thing is installed.
-        "install" | "uninstall" => {
-            infoln!("settings page asked to {action} {id}");
-            crate::integration::install(&home, integration, action == "install").map(|problems| {
-                if action != "install" {
-                    "Uninstalled. Nothing further will be done.".to_string()
+        // second source of truth for whether it is on.
+        "on" | "off" => {
+            infoln!("settings page switched agents {action}");
+            crate::agents::switch(&home, action == "on").map(|problems| {
+                if action != "on" {
+                    "Switched off. No agent will be started.".to_string()
                 } else if problems.is_empty() {
-                    "Installed. What is waiting now is taken as seen; the next pass starts from there.".to_string()
+                    "Switched on. What is waiting now is taken as seen; the next pass starts from there.".to_string()
                 } else {
                     let said: Vec<String> = problems.into_iter().map(|p| p.text).collect();
-                    format!("Installed, but check its settings first: {}.", said.join("; "))
+                    format!("Switched on, but check its settings first: {}.", said.join("; "))
                 }
             })
         }
         // Runs a real pass with every effect suppressed, against the lists GitHoot already holds.
         "dryrun" => {
-            infoln!("settings page asked for a {id} dry run");
-            crate::integration::dry_run_now(&home, integration);
+            infoln!("settings page asked for an agents dry run");
+            crate::agents::dry_run_now(&home);
             Ok("Dry run only. Nothing was done and nothing was recorded.".to_string())
         }
         other => {
             let cfg = crate::config::Config::load(&home).0;
-            let ctx = crate::integration::Context::new(&home, &cfg, id);
-            match integration.action(&ctx, other, &form) {
+            match dispatch::action(&crate::agents::Context::new(&home, &cfg), other, &form) {
                 Some(outcome) => outcome,
                 None => return respond(stream, 400, "text/plain; charset=utf-8", b"Unknown action", true),
             }
         }
     };
     let line = outcome.unwrap_or_else(|why| {
-        errorln!("{id}: {why}");
+        errorln!("agents: {why}");
         format!("Failed: {why}")
     });
-    crate::integration::flash(integration, line);
-    redirect(stream, &after_integration_action(token, id, form.get("from").map(String::as_str)));
-}
-
-/// Where a press sends the browser: back to the page it was pressed on, so that page reloads showing
-/// what the press did. Only the list is a recognised origin, so the field cannot point anywhere else.
-fn after_integration_action(token: &str, id: &str, from: Option<&str>) -> String {
-    match from {
-        Some("list") => format!("/{token}/integrations"),
-        _ => format!("/{token}/integrations/{id}"),
-    }
+    crate::agents::flash(line);
+    redirect(stream, &format!("/{token}/{}", place.path()));
 }
 
 /// A mute or unmute link.
@@ -1997,9 +1940,8 @@ mod tests {
         assert!(mute_post(ours, "key=PR_a&days=3").starts_with("HTTP/1.1 404 "), "no poll ran: nothing is on the page");
     }
 
-    /// Every page of the settings site is a GET, and a POST to the page it was pressed on. The
-    /// integrations list takes no POST: its buttons post to the integration they are about. The
-    /// portals list does, because Install is for a portal that has no page yet.
+    /// Every page of the settings site is a GET, and a POST to the page it was pressed on. The portals
+    /// list takes one too, because Install is for a portal that has no page yet.
     #[test]
     fn the_settings_site_routes_by_method() {
         use crate::ui::Place;
@@ -2007,7 +1949,7 @@ mod tests {
             ("general", Place::General),
             ("portals", Place::Portals),
             ("portals/github", Place::Portal("github".into())),
-            ("integrations/herdr", Place::Integration("herdr")),
+            ("agents", Place::Agents),
             ("muted", Place::Muted),
             ("updates", Place::Updates),
             ("advanced", Place::Advanced),
@@ -2015,7 +1957,6 @@ mod tests {
             assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Get), Route::Site(place.clone()), "{path}");
             assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Post), Route::SitePost(place), "{path}");
         }
-        assert_eq!(route_write(&format!("/{TOKEN}/integrations"), Method::Post), Route::MethodNotAllowed);
         assert_eq!(route_get(&format!("/{TOKEN}/general"), Some(&ok_host()), "wrong", PORT), Route::NotFound);
         // The welcome page is not part of the settings site, and only reads.
         assert_eq!(route_write(&format!("/{TOKEN}/welcome"), Method::Get), Route::Welcome);
@@ -2085,15 +2026,16 @@ mod tests {
         }
     }
 
-    /// Only an id the registry knows resolves. Anything else is a miss, so the segment can never be
-    /// used to name a file, a key or another integration's page.
+    /// The old addresses are gone, a hard cut like the keys: the Integrations list and the Herdr
+    /// dispatcher's page are a miss now, as are the dispatcher's pages before them and anything under
+    /// Agents, which has no pages of its own.
     #[test]
-    fn an_unknown_integration_is_a_miss_and_the_old_dispatcher_routes_are_gone() {
-        for path in ["integrations/nope", "integrations/..", "integrations/HERDR", "dispatcher", "settings/dispatcher"] {
+    fn the_old_integration_and_dispatcher_routes_are_gone() {
+        for path in ["integrations", "integrations/herdr", "integrations/..", "agents/herdr", "dispatcher", "settings/dispatcher"] {
             assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Get), Route::NotFound, "{path}");
             assert_eq!(route_write(&format!("/{TOKEN}/{path}"), Method::Post), Route::NotFound, "{path}");
         }
-        let path = format!("/{TOKEN}/integrations/herdr");
+        let path = format!("/{TOKEN}/agents");
         assert_eq!(route_get(&path, Some(&ok_host()), "wrong", PORT), Route::NotFound);
         assert_eq!(route_get(&path, Some("evil.com"), TOKEN, PORT), Route::Forbidden);
     }
@@ -2103,9 +2045,7 @@ mod tests {
         let r = round_trip(&format!("GET /{TOKEN}/portals HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
         assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page" href="/"#), "{r}");
-        let i = round_trip(&format!("GET /{TOKEN}/integrations HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
-        assert!(i.starts_with("HTTP/1.1 200 OK\r\n") && i.contains("Herdr dispatcher"), "{i}");
-        assert!(i.contains("Not installed") || i.contains("Not available here"), "{i}");
+        assert!(r.contains(&format!(r#"href="/{TOKEN}/agents">Agents</a>"#)), "Agents is in the sidebar: {r}");
     }
 
     #[test]
@@ -2170,17 +2110,7 @@ mod tests {
         assert!(none["path"].is_null() && none["line"].as_str().unwrap().contains("no zenity"));
     }
 
-    // ── Integration buttons ───────────────────────────────────────────────────
-
-    /// A press reloads the page it was pressed on, so the button you just used is replaced by the
-    /// state it produced. Only the list is a recognised origin; anything else goes to the
-    /// integration's own page, so the field cannot send the browser anywhere else.
-    #[test]
-    fn an_integration_button_reloads_the_page_it_was_pressed_on() {
-        assert_eq!(after_integration_action("tok", "herdr", Some("list")), "/tok/integrations");
-        assert_eq!(after_integration_action("tok", "herdr", None), "/tok/integrations/herdr");
-        assert_eq!(after_integration_action("tok", "herdr", Some("https://evil.com")), "/tok/integrations/herdr");
-    }
+    // ── Agents buttons ────────────────────────────────────────────────────────
 
     /// The guard order over a real socket. `Origin` is checked before anything else, so a
     /// cross-site form gets `403` and nothing is written; with our own `Origin` but no settings
@@ -2188,15 +2118,15 @@ mod tests {
     /// to guess at. Neither reaches `config.txt`, which is why the success path is not driven over a
     /// socket from a test.
     #[test]
-    fn an_integration_post_is_refused_before_it_can_write_anything() {
+    fn an_agents_post_is_refused_before_it_can_write_anything() {
         let hostile = round_trip(&format!(
-            "POST /{TOKEN}/integrations/herdr HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
-             Origin: https://evil.com\r\nContent-Length: 14\r\n\r\naction=install"
+            "POST /{TOKEN}/agents HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: https://evil.com\r\nContent-Length: 9\r\n\r\naction=on"
         ));
         assert!(hostile.starts_with("HTTP/1.1 403 "), "{hostile}");
         let homeless = round_trip(&format!(
-            "POST /{TOKEN}/integrations/herdr HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
-             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 14\r\n\r\naction=install"
+            "POST /{TOKEN}/agents HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\
+             Origin: http://githoot.localhost:{{PORT}}\r\nContent-Length: 9\r\n\r\naction=on"
         ));
         assert!(homeless.starts_with("HTTP/1.1 503 "), "{homeless}");
     }
@@ -2807,15 +2737,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The Herdr page as this machine would actually see it: the real tool check against the real
+    /// The Agents page as this machine would actually see it: the real tool check against the real
     /// `PATH`, the real prompts, rendered through the real handler over a real socket. Read-only:
-    /// nothing is installed. Prints the page so `--nocapture` shows what a user would see.
+    /// nothing is switched on. Prints the page so `--nocapture` shows what a user would see.
     ///
     /// `#[ignore]`d for the same reason as the test above: it installs the process-wide `SETTINGS`.
     #[cfg(not(target_os = "macos"))]
     #[test]
     #[ignore = "installs the process-wide SETTINGS and binds a real listener; run on its own"]
-    fn the_herdr_page_renders_for_this_machine_over_a_real_connection() {
+    fn the_agents_page_renders_for_this_machine_over_a_real_connection() {
         let dir = endpoint_dir("card");
         let (wake_tx, _wake_rx) = std::sync::mpsc::channel();
         install(Settings {
@@ -2838,16 +2768,17 @@ mod tests {
 
         let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         client
-            .write_all(format!("GET /{token}/integrations/herdr HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+            .write_all(format!("GET /{token}/agents HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
             .expect("write");
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read");
 
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
-        let start = response.find("Herdr dispatcher").expect("the page must render");
+        let start = response.find("Agents open in").expect("the page must render");
         println!("\n{}\n", &response[start..]);
-        assert!(response.contains(r#"value="install""#), "not installed, so Install is offered");
-        for name in ["work-required", "requested-reviews", "approved", "update"] {
+        assert!(response.contains(r#"value="on""#), "off, so Switch on is offered");
+        assert!(response.contains("client-card"), "the chosen client's card");
+        for (name, _) in crate::agents::prompts::DEFAULT_PROMPTS {
             assert!(response.contains(&format!("name=\"prompt_{name}\"")), "no box for {name}");
         }
 

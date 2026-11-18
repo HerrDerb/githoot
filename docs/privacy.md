@@ -40,12 +40,13 @@ The settings page and the pull request page are served by GitHoot itself, on `12
 only, so they are not reachable from other computers. Each run uses a random port and a random token in
 the address. The optional [local API](local-api.md) is off unless you turn it on.
 
-## Integrations
+## Agents
 
-[Integrations](integrations.md) are off until you install them. The one that exists today, the
-[Herdr dispatcher](dispatcher.md), uses tools already on your computer: it fetches the pull request with
-`git`, creates a branch and a worktree, and starts a coding agent through Herdr with a prompt about that
-pull request. Whatever that agent then sends, for example code to an AI provider, is decided by how you
+[Agents](agents.md) is off until you switch it on. It uses tools already on your computer: it fetches
+the pull request with `git`, creates a branch and a worktree, and starts a coding agent in the client
+you chose (Herdr, the Herdr app or Orca) with a prompt about that pull request. With Orca it tells
+Orca's command line not to report usage (`ORCA_TELEMETRY_DISABLED=1`); what Orca itself does is
+covered by Orca's own policy. Whatever that agent then sends, for example code to an AI provider, is decided by how you
 set up that agent and is covered by its provider's policy, not by GitHoot.
 
 ## Changes

@@ -107,7 +107,7 @@ pub fn settings_for(kind: PortalKind) -> &'static [Setting] {
     match kind {
         PortalKind::GitHub => crate::config::GITHUB,
         // Its `portal.<name>.` keys are edited in config.txt for now: the pages can only write the
-        // core's flat keys and an integration's, and a per-portal store is its own piece of work.
+        // core's flat keys and Agents', and a per-portal store is its own piece of work.
         PortalKind::GitLab => &[],
     }
 }
