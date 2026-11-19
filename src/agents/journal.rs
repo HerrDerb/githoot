@@ -19,12 +19,19 @@ pub fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
 
+/// Held across the size check, the trim and the append. The runner thread and the page's server thread
+/// both write here, and a trim that reads the file while the other thread appends would write the
+/// file back without that line, or both would trim and lose three quarters of it.
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Appends `lines`, each with a UTC timestamp. Never fails the caller: a log that can stop a dispatch
 /// is worse than none.
 pub fn append(dir: &Path, lines: &[String]) {
     if lines.is_empty() {
         return;
     }
+    // A poisoned lock only means another append panicked; the file is still a file.
+    let _writing = WRITING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _ = std::fs::create_dir_all(dir);
     let file = path(dir);
     if std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
@@ -43,8 +50,11 @@ fn keep_newer_half(file: &Path) {
         let _ = std::fs::write(file, "");
         return;
     };
+    // Searched as bytes: the middle byte can fall inside a character such as the `…` every start
+    // writes, and slicing the `str` there would panic, on every append after, since the file never
+    // changes. The byte after a `\n` is always a character boundary.
     let cut = text.len() / 2;
-    let from = text[cut..].find('\n').map_or(text.len(), |n| cut + n + 1);
+    let from = text.as_bytes()[cut..].iter().position(|&b| b == b'\n').map_or(text.len(), |n| cut + n + 1);
     let _ = std::fs::write(file, format!("-- older lines dropped --\n{}", &text[from..]));
 }
 
@@ -95,6 +105,23 @@ mod tests {
         assert!(text.starts_with("-- older lines dropped --\n"));
         assert!(!text.contains("line 0\n") && text.contains("line 79999\n") && text.trim_end().ends_with("newest"));
         assert!((text.len() as u64) < MAX_BYTES);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A start writes `…` into every log, so the middle of a full one can fall inside a character.
+    /// Trimming there must cut at the next line, not panic.
+    #[test]
+    fn a_full_log_of_multi_byte_lines_is_trimmed_without_a_panic() {
+        let d = dir("wide");
+        std::fs::create_dir_all(&d).unwrap();
+        // 600,009 bytes: the middle, byte 300,004, is the third byte of a `…`.
+        let old = format!("xx{}\nolder\n", "\u{2026}".repeat(200_000));
+        assert!(!old.is_char_boundary(old.len() / 2), "the test must cut inside a character");
+        std::fs::write(path(&d), old).unwrap();
+        append(&d, &["newest".to_string()]);
+        let text = std::fs::read_to_string(path(&d)).unwrap();
+        assert_eq!(text.lines().nth(1), Some("older"), "{:?}", &text[..text.len().min(80)]);
+        assert!(text.starts_with("-- older lines dropped --\n") && text.trim_end().ends_with("newest"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }
