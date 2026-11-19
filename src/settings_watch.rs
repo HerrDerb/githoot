@@ -189,13 +189,23 @@ pub fn spawn(path: PathBuf, restart: impl Fn(RestartPlan) + Send + 'static) {
     }
 
     std::thread::spawn(move || {
-        // Every `return` below has to clear the flag, so the body is wrapped rather than trusted.
+        let _clears = ClearsOnDrop(&WATCHING);
         watch(&path, restart);
-        WATCHING.store(false, Ordering::SeqCst);
     });
 }
 
-/// The watch itself, split out so `spawn` can clear `WATCHING` however this returns.
+/// Clears its flag when dropped, so a watch frees `WATCHING` however it ends: any `return`, or a panic
+/// unwinding the thread, which a store after `watch()` would skip, leaving Settings unwatched until a
+/// restart.
+struct ClearsOnDrop(&'static std::sync::atomic::AtomicBool);
+
+impl Drop for ClearsOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The watch itself, split out so `spawn` holds `WATCHING` for exactly as long as it runs.
 fn watch(path: &std::path::Path, restart: impl Fn(RestartPlan)) {
     // A missing file reads as empty rather than aborting: `Config::load` writes a default at startup,
     // but if it could not, creating the file counts as a change worth restarting for.
@@ -241,6 +251,19 @@ fn watch(path: &std::path::Path, restart: impl Fn(RestartPlan)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A watch that panics still frees the flag, or no edit could start a watch again until a restart.
+    #[test]
+    fn a_watch_that_panics_still_lets_the_next_one_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static FLAG: AtomicBool = AtomicBool::new(true);
+        let worker = std::thread::spawn(|| {
+            let _clears = ClearsOnDrop(&FLAG);
+            panic!("the watch went wrong");
+        });
+        assert!(worker.join().is_err(), "the worker panicked");
+        assert!(!FLAG.load(Ordering::SeqCst), "the flag was cleared as the panic unwound");
+    }
 
     const SETTLE_FOR_TEST: Duration = Duration::from_secs(3);
 
