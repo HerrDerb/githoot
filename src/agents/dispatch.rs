@@ -297,6 +297,7 @@ pub fn mac_tool_path(inherited: Option<&std::ffi::OsStr>, home: Option<&Path>) -
 /// so the order you started it with stands. Compared as Windows compares folders: case aside, and with
 /// or without a trailing slash. A value left with a `%VARIABLE%` in it is skipped rather than guessed
 /// at. Pure, so it is tested on every platform although only Windows uses it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn path_with(inherited: Option<&std::ffi::OsStr>, fresh: &[String]) -> Vec<PathBuf> {
     let same = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
     let mut dirs: Vec<PathBuf> = inherited.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
