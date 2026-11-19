@@ -209,13 +209,7 @@ fn describe(status: StatusCode, body: &str) -> String {
     format!("HTTP {status}: {}", truncate(body.trim(), MAX_DETAIL_CHARS))
 }
 
-/// Truncates on a char boundary so a multi-byte body cannot panic the formatter.
-fn truncate(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((idx, _)) => format!("{}…", &text[..idx]),
-        None => text.to_string(),
-    }
-}
+use crate::log::truncate;
 
 // ─── The payload ──────────────────────────────────────────────────────────────
 //

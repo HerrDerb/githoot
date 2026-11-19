@@ -422,7 +422,7 @@ fn step(exe: &str, args: &[&str], result: &Result<String, String>, took: std::ti
 fn shown_arg(arg: &str) -> String {
     let chars = arg.chars().count();
     if chars > 60 {
-        format!("{}\u{2026} ({chars} chars)", arg.chars().take(40).collect::<String>())
+        format!("{} ({chars} chars)", crate::log::truncate(arg, 40))
     } else if arg.is_empty() || arg.contains(' ') {
         format!("\"{arg}\"")
     } else {
@@ -433,7 +433,7 @@ fn shown_arg(arg: &str) -> String {
 /// The first non-empty line of `text`, at most `max` characters.
 fn first_line(text: &str, max: usize) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
-    if line.chars().count() > max { format!("{}\u{2026}", line.chars().take(max).collect::<String>()) } else { line.to_string() }
+    crate::log::truncate(line, max)
 }
 
 /// The tools a tick shells out to: the chosen client's program, and git. Checked before the thread
@@ -562,6 +562,20 @@ fn done_waiting(axis: PrAxis, key: &str) {
     if let Ok(mut waiting) = WAITING.lock() {
         waiting.remove(&waiting_key(axis, key));
     }
+}
+
+/// Drops every reason this bar holds for a pull request not in `keys`: one that left the bar must not
+/// come back weeks later still showing why it waited then.
+fn keep_waiting_only(axis: PrAxis, keys: &[&str]) {
+    if let Ok(mut waiting) = WAITING.lock() {
+        keep_only(&mut waiting, axis, keys);
+    }
+}
+
+/// `keep_waiting_only` on any map, so a test need not share the static with every other test.
+fn keep_only(waiting: &mut std::collections::BTreeMap<String, String>, axis: PrAxis, keys: &[&str]) {
+    let bar = waiting_key(axis, "");
+    waiting.retain(|k, _| !k.starts_with(&bar) || keys.iter().any(|key| *k == waiting_key(axis, key)));
 }
 
 fn waiting_for(axis: PrAxis, key: &str) -> Option<String> {
@@ -988,6 +1002,7 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
                 report.lines.push(format!("{label}: an agent is already there"));
                 if !settings.dry_run {
                     report.journal.push(format!("{label}: new in the bar, but agent {who} is already in its worktree, left alone"));
+                    done_waiting(axis, &t.key);
                 }
             }
             Action::Start => {
@@ -1012,7 +1027,10 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
                         next.insert(t.key.clone(), record(Outcome::Started, said.clone()));
                         report.started += 1;
                         report.lines.push(format!("{label}: {said}"));
-                        done_waiting(axis, &t.key);
+                        // Not in a dry run, whose `Ok` never asked the client: Orca can still be down.
+                        if !settings.dry_run {
+                            done_waiting(axis, &t.key);
+                        }
                         tell(said, &mut report);
                     }
                     // Deliberately unrecorded: this pull request must be tried again as soon as the
@@ -1037,7 +1055,9 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
                     Err(other) => {
                         next.insert(t.key.clone(), record(Outcome::Failed, other.text().to_string()));
                         report.problems.push(format!("{label}: {}", other.text()));
-                        done_waiting(axis, &t.key);
+                        if !settings.dry_run {
+                            done_waiting(axis, &t.key);
+                        }
                         tell(format!("failed: {}", other.text()), &mut report);
                     }
                 }
@@ -1195,6 +1215,9 @@ pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
             out.said.push(format!("[{}] {} muted, skipped", axis.slug(), batch.muted));
         }
         let targets: Vec<Target> = batch.entries.iter().filter_map(Target::from_entry).collect();
+        if !dry_run && batch.confirmed {
+            keep_waiting_only(axis, &targets.iter().map(|t| t.key.as_str()).collect::<Vec<_>>());
+        }
         if !armed(&ctx.dir, axis) {
             // Not known yet is not empty. A baseline of nothing taken before the first poll would make
             // the whole backlog look new a moment later.
@@ -1432,8 +1455,12 @@ fn arm(dir: &Path, axis: PrAxis) -> std::io::Result<()> {
     std::fs::write(armed_path(dir, axis), "")
 }
 
+/// Also drops any Start agent press still waiting: it was made before the switch, and the next
+/// baseline must not be undone by it a pass later.
 fn disarm(dir: &Path, axis: PrAxis) {
     let _ = std::fs::remove_file(armed_path(dir, axis));
+    let _ = std::fs::remove_file(forget_path(dir, axis));
+    keep_waiting_only(axis, &[]);
 }
 
 /// Every pull request in the bar taken as seen, as of now, so switching a bar on starts agents only
@@ -1761,6 +1788,36 @@ mod tests {
         crate::agents::set(&root, "agentsWorkRequired", "off").unwrap();
         assert!(!armed(&ctx.dir, PrAxis::ChangesRequested));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Start agent press made before a bar was switched off must not start anything once it is back
+    /// on: the baseline that switching on takes is "from now on", and the press is from before.
+    #[test]
+    fn a_press_waiting_when_a_bar_is_switched_off_is_dropped() {
+        let ctx = temp_ctx("press-off", "");
+        let _ = pass(&ctx, &[batch(PrAxis::ChangesRequested, vec![pr(5, "2026-09-25T10:00:00Z")], true)], false);
+        let key = Target::from_entry(&pr(5, "2026-09-25T10:00:00Z")).unwrap().key;
+        ask_to_forget(&ctx.dir, PrAxis::ChangesRequested, &key).unwrap();
+        let root = ctx.dir.parent().unwrap().to_path_buf();
+        crate::agents::set(&root, "agentsWorkRequired", "off").unwrap();
+        assert!(!forget_pending(&ctx.dir, PrAxis::ChangesRequested, &key), "the press went with the switch");
+        assert!(take_forgets(&ctx.dir, PrAxis::ChangesRequested).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A reason to wait is kept only for a pull request still in its bar, and only that bar's are touched.
+    #[test]
+    fn a_reason_to_wait_goes_when_its_pull_request_leaves_the_bar() {
+        let mut waiting = std::collections::BTreeMap::new();
+        for (axis, key) in [(PrAxis::ChangesRequested, "a"), (PrAxis::ChangesRequested, "b"), (PrAxis::ReviewRequested, "a")] {
+            waiting.insert(waiting_key(axis, key), "no clone".to_string());
+        }
+        keep_only(&mut waiting, PrAxis::ChangesRequested, &["b"]);
+        assert_eq!(waiting.len(), 2);
+        assert!(waiting.contains_key(&waiting_key(PrAxis::ChangesRequested, "b")));
+        assert!(waiting.contains_key(&waiting_key(PrAxis::ReviewRequested, "a")), "another bar's is not touched");
+        keep_only(&mut waiting, PrAxis::ChangesRequested, &[]);
+        assert_eq!(waiting.len(), 1, "switching a bar off forgets all of its own");
     }
 
     /// A dry run says what the switch would do and records nothing, baseline included.

@@ -69,6 +69,15 @@ fn enabled(level: Level) -> bool {
     (level as u8) <= THRESHOLD.load(Ordering::Relaxed)
 }
 
+/// `text` cut to at most `max_chars` characters, with `…` when something was cut. On a char boundary,
+/// so a multi-byte message cannot panic whoever shortens it for a log line or an error.
+pub fn truncate(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((idx, _)) => format!("{}\u{2026}", &text[..idx]),
+        None => text.to_string(),
+    }
+}
+
 /// Points the logger at `<app_asset_path>/log.txt`. Calls before this are dropped.
 pub fn init(app_asset_path: &Path) {
     let _ = LOG_PATH.set(Mutex::new(app_asset_path.join(LOG_FILE)));
