@@ -105,7 +105,7 @@ pub fn agents_everywhere(run: &mut Run) -> Inventory {
 }
 
 /// Who is working, as far as every client could say.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Inventory {
     pub agents: Vec<(String, String)>,
     /// Clients that are there but did not answer, each with what it said. Non-empty means an agent

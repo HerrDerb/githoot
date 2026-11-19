@@ -19,6 +19,7 @@
 
 pub mod clients;
 pub mod dispatch;
+pub mod journal;
 pub mod prompts;
 
 use crate::config::Config;
@@ -101,6 +102,9 @@ pub struct Said {
     pub setup: Vec<String>,
     /// A client only you can start, missing, once per client: said on the desktop as well, once.
     pub absent: Vec<String>,
+    /// What happened, in order, with every program a start ran: for the Agents log. Only a real pass
+    /// fills it.
+    pub journal: Vec<String>,
 }
 
 /// The bars as a pass may see them: only `portals`, only confirmed lists, no muted entries.
@@ -162,6 +166,7 @@ pub fn switch(app_asset_path: &Path, on: bool) -> Result<Vec<Problem>, String> {
     let cfg = Config::load(app_asset_path).0;
     let ctx = Context::new(app_asset_path, &cfg);
     dispatch::switched(&ctx, on);
+    journal::append(&ctx.dir, &[format!("switched {} on the page", if on { "on" } else { "off" })]);
     Ok(if on { dispatch::problems(&ctx) } else { Vec::new() })
 }
 
@@ -265,7 +270,7 @@ fn run_once(missing: &[&str], pass: impl FnOnce() -> Said, problems: impl FnOnce
 }
 
 /// The bars as they stand, filtered.
-fn current_batches() -> Vec<Batch> {
+pub fn current_batches() -> Vec<Batch> {
     let now = crate::mute::unix_now();
     let snapshots: Vec<(PrAxis, AxisSnapshot)> =
         PrAxis::ALL.into_iter().map(|axis| (axis, crate::scheduler::pr_snapshot(axis))).collect();
@@ -312,12 +317,20 @@ pub fn start(app_asset_path: PathBuf) {
                 let Ok(mut last) = LAST_COMPLAINT.lock() else { continue };
                 let missing = dispatch::missing(&ctx);
                 let mut absent = Vec::new();
+                let mut journal = Vec::new();
                 let pass = || {
-                    let out = dispatch::pass(&ctx, &current_batches(), false);
+                    let mut out = dispatch::pass(&ctx, &current_batches(), false);
                     absent.clone_from(&out.absent);
+                    journal = std::mem::take(&mut out.journal);
                     out
                 };
+                let before = last.clone();
                 let lines = run_once(&missing, pass, || dispatch::problems(&ctx), &mut last);
+                // The setup complaint, when it changed: what is wrong before any pull request needs it.
+                if *last != before {
+                    journal.push(if last.is_empty() { "everything it needs is back".to_string() } else { last.clone() });
+                }
+                journal::append(&ctx.dir, &journal);
                 for (error, line) in lines {
                     if error {
                         crate::errorln!("{line}");

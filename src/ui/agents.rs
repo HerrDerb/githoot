@@ -80,13 +80,23 @@ pub struct AgentsView<'a> {
     pub client_card: String,
     /// What goes below the sections: where it looks, and the prompts. Already HTML, escaped.
     pub body: String,
+    /// Every pull request in the bars it acts on, with what happened to it.
+    pub pulls: &'a [crate::agents::dispatch::PullRow],
+    /// The last lines of its log, oldest first, each starting with its UTC timestamp.
+    pub activity: &'a [String],
 }
 
 /// The Agents page: the header card, its settings with the client card in the Client section, then the
 /// rest.
 pub fn agents_page(site: &Site, v: &AgentsView) -> String {
     let sections = in_first_section(&v.sections, &v.client_card);
-    let body = format!("{}{sections}{}", header_card(site.token, v), v.body);
+    let live = format!(
+        "<div id=\"live\" data-live=\"/{}/{}?live=1\">{}</div>",
+        esc(site.token),
+        Place::Agents.path(),
+        live_cards(site.token, v.on, v.pulls, v.activity)
+    );
+    let body = format!("{}{live}{sections}{}", header_card(site.token, v), v.body);
     layout(site, &Place::Agents, crate::agents::NAME, None, &body)
 }
 
@@ -130,10 +140,101 @@ fn header_card(token: &str, v: &AgentsView) -> String {
         format!("<pre class=\"dry\">{}</pre>", v.dry_run.iter().map(|l| esc(l)).collect::<Vec<_>>().join("\n"))
     };
     format!(
-        "{alert}<div class=\"card\"><div class=\"row\"><span class=\"portal-status{tone}\">{}</span></div><p class=\"sub\">{}</p>{notes}{flash}\
+        "{alert}<div class=\"card\"><div class=\"row\"><span class=\"portal-status{tone}\">{}</span></div><p class=\"sub\">{}</p>\
+         <p class=\"sub\">{EXPERIMENTAL}</p>{notes}{flash}\
          <div class=\"actions\">{switch}{dry}</div>{said}</div>\n",
         esc(&status),
         esc(crate::agents::SUMMARY),
+    )
+}
+
+/// The two cards that change while you look: the pull requests (only while it is on) and the recent
+/// activity. The page's script asks for them again every few seconds at `?live=1` and swaps them in.
+pub fn live_cards(token: &str, on: bool, pulls: &[crate::agents::dispatch::PullRow], activity: &[String]) -> String {
+    let pulls = if on { pulls_card(token, pulls) } else { String::new() };
+    format!("{pulls}{}", activity_card(token, activity))
+}
+
+/// What "experimental" means here, on its card.
+const EXPERIMENTAL: &str =
+    "Experimental: it may miss a pull request or fail to start an agent. Recent activity, below, says what it did and why.";
+
+/// A form posting one of its own actions, as a small outlined button.
+fn small_action(token: &str, action: &str, fields: &[(&str, &str)], button: &str) -> String {
+    let hidden: String = fields.iter().map(|(name, value)| format!("<input type=\"hidden\" name=\"{name}\" value=\"{}\">", esc(value))).collect();
+    format!(
+        "<form method=\"post\" action=\"/{}/{}\"><input type=\"hidden\" name=\"action\" value=\"{action}\">{hidden}\
+         <button class=\"ghost small\" type=\"submit\">{button}</button></form>",
+        esc(token),
+        Place::Agents.path()
+    )
+}
+
+/// A UTC timestamp the page's script turns into local time. Shown as it is without the script.
+fn time(stamp: &str) -> String {
+    format!("<time datetime=\"{0}\">{0}</time>", esc(stamp))
+}
+
+/// Each pull request in the bars it acts on: what happened, when, why, and Start agent or Retry where a
+/// press can change something. Folded shut until asked for, so the page opens on its switch and settings.
+fn pulls_card(token: &str, rows: &[crate::agents::dispatch::PullRow]) -> String {
+    let failed = rows.iter().filter(|r| r.tone == "bad").count();
+    let count = match (rows.len(), failed) {
+        (0, _) => "none in its bars".to_string(),
+        (n, 0) => format!("{n} in its bars"),
+        (n, f) => format!("{n} in its bars, {f} failed"),
+    };
+    let body: String = rows
+        .iter()
+        .map(|r| {
+            let when = if r.at == 0 { String::new() } else { format!("{} ", time(&crate::log::utc_stamp(r.at))) };
+            let press = r.button.map(|b| small_action(token, "start", &[("bar", r.bar), ("key", &r.key)], b)).unwrap_or_default();
+            format!(
+                "<tr><td><a href=\"{}\">{}</a><span class=\"prnote\">{}</span></td><td class=\"bar\">{}</td>\
+                 <td><span class=\"st {}\">{}</span><span class=\"prnote\">{when}{}</span></td><td class=\"press\">{press}</td></tr>",
+                esc(&r.url),
+                esc(&r.label),
+                esc(&r.title),
+                esc(r.bar_name),
+                r.tone,
+                esc(r.state),
+                esc(&r.note),
+            )
+        })
+        .collect();
+    let table = if rows.is_empty() { String::new() } else { format!("<table class=\"prs\">{body}</table>") };
+    format!(
+        "<details class=\"card fold\" id=\"pulls\"><summary><h3>Pull request dispatch state</h3><span class=\"sub\">{count}</span></summary>{table}</details>\n"
+    )
+}
+
+/// A log line's timestamp and the rest.
+fn stamp_of(line: &str) -> (&str, String) {
+    line.split_once(' ').map_or(("", line.to_string()), |(stamp, rest)| (stamp, rest.to_string()))
+}
+
+/// The last lines of its log. Debug information, so folded shut until asked for; absent until there is
+/// a log.
+fn activity_card(token: &str, lines: &[String]) -> String {
+    let Some(last) = lines.last() else { return String::new() };
+    let shown: Vec<String> = lines
+        .iter()
+        .rev()
+        .map(|line| match stamp_of(line) {
+            (stamp, rest) if stamp.ends_with('Z') => format!("{} {}", time(stamp), esc(&rest)),
+            _ => esc(line),
+        })
+        .collect();
+    let last_at = match stamp_of(last) {
+        (stamp, _) if stamp.ends_with('Z') => format!(", the last at {}", time(stamp)),
+        _ => String::new(),
+    };
+    format!(
+        "<details class=\"card fold\" id=\"activity\"><summary><h3>Recent activity</h3><span class=\"sub\">{} lines{last_at}</span></summary>\
+         <div class=\"actions\">{}</div><pre class=\"activity\">{}</pre></details>\n",
+        lines.len(),
+        small_action(token, "openlog", &[], "Open log"),
+        shown.join("\n")
     )
 }
 
@@ -154,6 +255,24 @@ mod tests {
                 .to_string(),
             client_card: "<div class=\"card\">the client card</div>".to_string(),
             body: "<p>its own part</p>".to_string(),
+            pulls: &[],
+            activity: &[],
+        }
+    }
+
+    fn row(state: &'static str, tone: &'static str, button: Option<&'static str>) -> crate::agents::dispatch::PullRow {
+        crate::agents::dispatch::PullRow {
+            label: "o/r#5145".into(),
+            url: "https://github.com/o/r/pull/5145".into(),
+            title: "Bump <b>it</b>".into(),
+            bar: "requested-reviews",
+            bar_name: "Review requested",
+            key: "PR_k1".into(),
+            state,
+            tone,
+            note: "In the bar when Agents was switched on.".into(),
+            at: 1_763_538_240,
+            button,
         }
     }
 
@@ -224,6 +343,89 @@ mod tests {
     fn it_is_a_page_of_its_own() {
         let html = page(&view(false, &[]));
         assert!(html.contains("<title>Settings › Agents — GitHoot</title>"), "{html}");
-        assert!(html.contains(r#"<a class="on" aria-current="page" href="/tok/agents">Agents</a>"#), "{html}");
+        assert!(html.contains(r#"<a class="on" aria-current="page" href="/tok/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#), "{html}");
+    }
+
+    /// Experimental, where you look for it: beside its name in the sidebar and the heading, and in one
+    /// line on its card saying what that means and where to look when it misbehaves.
+    #[test]
+    fn it_says_it_is_experimental() {
+        let html = page(&view(false, &[]));
+        assert!(html.contains(r#"<span>Agents</span><span class="tag tag-exp">Experimental</span></h1>"#), "{html}");
+        assert!(html.contains("Experimental: it may miss a pull request or fail to start an agent."), "{html}");
+        let other = crate::ui::layout(&site(), &crate::ui::Place::Muted, "Muted", None, "");
+        assert_eq!(other.matches("class=\"tag tag-exp\"").count(), 1, "only Agents, only in the sidebar, on another page");
+    }
+
+    /// Each pull request in its bars, folded shut until asked for, with what happened and the press
+    /// that can change it. Shown only while it is on.
+    #[test]
+    fn the_pull_requests_card_is_folded_and_lists_what_happened() {
+        let rows = [row("Taken as seen", "seen", Some("Start agent")), row("Failed", "bad", Some("Retry")), row("Agent started", "ok", None)];
+        let html = page(&AgentsView { pulls: &rows, ..view(true, &[]) });
+        assert!(html.contains(r#"<details class="card fold" id="pulls"><summary><h3>Pull request dispatch state</h3><span class="sub">3 in its bars, 1 failed</span></summary>"#), "{html}");
+        assert!(html.contains(r#"<a href="https://github.com/o/r/pull/5145">o/r#5145</a>"#));
+        assert!(html.contains("Bump &lt;b&gt;it&lt;/b&gt;"), "titles are other people's text");
+        assert!(html.contains(r#"<span class="st seen">Taken as seen</span>"#), "{html}");
+        assert!(html.contains(r#"<time datetime="2025-11-19T07:44:00Z">2025-11-19T07:44:00Z</time>"#), "{html}");
+        assert!(html.contains(
+            r#"<form method="post" action="/tok/agents"><input type="hidden" name="action" value="start"><input type="hidden" name="bar" value="requested-reviews"><input type="hidden" name="key" value="PR_k1"><button class="ghost small" type="submit">Start agent</button></form>"#
+        ), "{html}");
+        assert_eq!(html.matches("value=\"start\"").count(), 2, "Start agent and Retry, nothing for a started one");
+        let off = page(&AgentsView { pulls: &rows, ..view(false, &[]) });
+        assert!(!off.contains("id=\"pulls\""), "off, it acts on nothing");
+        let none = page(&view(true, &[]));
+        assert!(none.contains(r#"<span class="sub">none in its bars</span>"#), "{none}");
+    }
+
+    /// The card's classes are its own. A bare `.act` rule elsewhere once laid the button cell out as a
+    /// flex box, shifting it off its row.
+    #[test]
+    fn the_pull_requests_card_classes_clash_with_no_other_rule() {
+        let css = crate::page::STYLESHEET;
+        for class in ["press", "st"] {
+            for bare in [format!("}}.{class}{{"), format!("}}.{class} "), format!("}}.{class},"), format!("}}.{class}.")] {
+                assert!(!css.contains(&bare), "a rule for .{class} outside the card: {bare}");
+            }
+        }
+    }
+
+    /// The two cards keep up by themselves: they sit in a wrapper the page's script refreshes from
+    /// `?live=1`, which answers with exactly what the wrapper holds, so nothing else on the page, a
+    /// half-typed setting included, is touched.
+    #[test]
+    fn the_cards_refresh_in_place_from_their_own_address() {
+        let rows = [row("Taken as seen", "seen", Some("Start agent"))];
+        let lines = ["2026-11-19T07:44:02Z one".to_string()];
+        let html = page(&AgentsView { pulls: &rows, activity: &lines, ..view(true, &[]) });
+        let inner = live_cards("tok", true, &rows, &lines);
+        assert!(inner.contains("id=\"pulls\"") && inner.contains("id=\"activity\""), "{inner}");
+        assert!(html.contains(&format!("<div id=\"live\" data-live=\"/tok/agents?live=1\">{inner}</div>")), "{html}");
+        assert!(!live_cards("tok", false, &rows, &lines).contains("id=\"pulls\""), "off, no pull requests");
+        assert!(crate::ui::SITE_SCRIPT.contains("data-live"), "the script that refreshes them");
+    }
+
+    /// A press reloads the page, and a card you opened stays open: the page's script keeps which cards
+    /// are open for the tab, and opens them again on load.
+    #[test]
+    fn an_opened_card_stays_open_across_a_press() {
+        let script = crate::ui::SITE_SCRIPT;
+        assert!(script.contains("addEventListener('toggle'"), "it notices a card opening or closing");
+        assert!(script.contains("sessionStorage"), "per tab, gone when the tab closes");
+        assert!(script.contains("details.fold[id]"), "only these cards");
+    }
+
+    /// Its log is debug information: folded shut by default, the last lines with their times, and a
+    /// way to open the whole file.
+    #[test]
+    fn recent_activity_is_folded_and_opens_the_log() {
+        let lines = ["2026-11-19T07:44:02Z [requested-reviews] switched on: 1 pull request(s) taken as seen".to_string(), "2026-11-19T07:44:03Z <odd>".to_string()];
+        let html = page(&AgentsView { activity: &lines, ..view(true, &[]) });
+        assert!(html.contains(r#"<details class="card fold" id="activity"><summary><h3>Recent activity</h3><span class="sub">2 lines, the last at <time datetime="2026-11-19T07:44:03Z">2026-11-19T07:44:03Z</time></span></summary>"#), "{html}");
+        assert!(html.contains(r#"<time datetime="2026-11-19T07:44:02Z">2026-11-19T07:44:02Z</time> [requested-reviews] switched on"#), "{html}");
+        assert!(html.contains("&lt;odd&gt;"));
+        assert!(html.contains(r#"value="openlog"><button class="ghost small" type="submit">Open log</button>"#), "{html}");
+        assert!(!page(&view(true, &[])).contains("id=\"activity\""), "no log, no card");
+        assert!(!html.contains("<details class=\"card fold\" id=\"activity\" open"), "closed until clicked");
     }
 }

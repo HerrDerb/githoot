@@ -9,6 +9,10 @@ by default and a typo leaves it off.
 It is part of GitHoot, with its own **Agents** page in the settings. It used to be the *Herdr
 dispatcher*, an integration; see [Upgrading from the Herdr dispatcher](#upgrading-from-the-herdr-dispatcher-34x).
 
+**It is experimental**, and says so beside its name in the sidebar and on its page. It may miss a pull
+request or fail to start an agent. When it does, [its log](#its-log) says what it did and why, and the
+page lists each pull request with what happened to it.
+
 ## What it does, each pass
 
 After every poll, and at least every thirty seconds, for each bar GitHoot is watching and the
@@ -68,7 +72,23 @@ later picks up where it left off.
 
 **Press Dry run first.** It runs a real pass with every effect suppressed and writes no state, so it
 cannot change what the next real pass would do. It explains every outcome, including the quiet ones
-a real pass does not bother to say, which is the whole point of pressing it.
+a real pass does not bother to say, which is the whole point of pressing it. A pull request it will not
+start says which reason it is: an agent was started for it, it was taken as seen when Agents was
+switched on, an agent was already in its worktree, or its start failed and waits for a change.
+
+### What the page shows
+
+Below the switch, two cards, both folded shut until you open them:
+
+- **Pull request dispatch state**: every pull request in the bars it acts on, with what happened to it and when:
+  *Agent running*, *Agent closed* (its worktree still on disk), *Worktree deleted*, *Taken as seen*,
+  *Failed* (and why), *Waiting* (on something only you can fix, such as no clone or Orca not running)
+  or *New*. Running, closed and deleted are asked of the clients as the page is drawn, not taken from
+  what was recorded; a client that does not answer leaves it at *Agent started*, said so. A pull request
+  taken as seen gets a **Start agent** button, a closed or deleted one **Start again**, and a failed one
+  **Retry**. Each asks the next pass, a few seconds later, to take it as new. Shown only while it is on.
+  Both cards keep up by themselves while the page is open.
+- **Recent activity**: the last lines of [its log](#its-log), with **Open log** for the whole file.
 
 ### Settings
 
@@ -102,7 +122,8 @@ takes every pull request in the bar as dispatched, as of that moment, and says s
 > `[work-required] switched on: 7 pull request(s) taken as seen, none started`
 
 From then on the normal rule applies: a pull request that enters the bar gets an agent, and one that
-was already there gets nothing, whatever is said on it. Switching a bar off, and
+was already there gets nothing, whatever is said on it, unless you press **Start agent** beside it on
+the page. Switching a bar off, and
 switching Agents off, forget that baseline, so switching back on is "from now on" again. A bar GitHoot has no
 confirmed answer for yet, such as before the first poll, waits: a baseline of nothing would make the
 backlog look new a moment later. Dry run says what the first pass would take as seen.
@@ -118,6 +139,13 @@ app, `orca-ide` for Orca (`orca` on Windows and macOS). The client card shows ea
 will not run, and nothing is started until they all do. No forge tool is required by GitHoot; the agent reads
 its pull request with the one that fits (`gh` for GitHub, `glab` for GitLab), signed in as you, so
 have that installed for the portals you use.
+
+### On Windows
+
+A program keeps the `PATH` it was started with, so a tool installed while GitHoot runs, such as the
+Herdr app's `hc`, would read as missing until GitHoot restarts. So on Windows every program Agents runs
+gets GitHoot's own `PATH`, then every folder your user and system `PATH` in the registry hold now that it
+lacks. Install the tool, reload the page, and its chip turns green.
 
 ### On macOS
 
@@ -261,9 +289,27 @@ request waits, the log says which client and why, and the next pass tries again.
 
 ## When something goes wrong
 
-Anything about a specific pull request is logged at **error** level, so it survives the default
+Look at **Recent activity** on its page first, or open [its log](#its-log). In GitHoot's main log,
+anything about a specific pull request is at **error** level, so it survives the default
 `logLevel=error`. Agents failing quietly every pass would look exactly like a quiet
-morning, which is the one thing this feature must never do. Routine progress is info level.
+morning, which is the one thing this feature must never do. Routine progress is info level there.
+
+### Its log
+
+`~/.githoot/agents/log.txt`, written **whatever `logLevel` says**, because the routine lines are the
+ones that answer "where is my agent?". A pull request taken as seen when Agents was switched on used to
+leave no trace at all. It holds, with a UTC timestamp each:
+
+- switching on and off, and each pull request a first pass took as seen;
+- each pull request it started an agent for, or tried to, with **every program the start ran**: what
+  was run, how it ended, how long it took and the first line of what it said. An argument longer
+  than 60 characters, such as the prompt, is cut to its first 40, so the log never holds a whole prompt;
+- what came of it: started (and where), failed (and why), or waiting (and on what). A pull request
+  waiting on the same thing as last pass is not written again;
+- a press of Start agent or Retry, and setup trouble when it changes, such as a missing tool.
+
+Only real passes write there; a dry run is shown on the page and recorded nowhere. Past 512 KB the
+older half is dropped. Like the main log, only you can read it on Linux and macOS.
 
 ### Windows: `agent_pane_busy`
 
@@ -302,8 +348,14 @@ prompt with the `herdr agent prompt` command the log gives.
 ## Its files
 
 Everything it keeps is in `~/.githoot/agents/`: one state file per bar, a `.armed` marker
-per bar that has its baseline, `prompts/`, and two caches (`viewer`, your login, and `branches/`,
-each pull request's head branch).
+per bar that has its baseline, `log.txt`, `prompts/`, and two caches (`viewer`, your login, and
+`branches/`, each pull request's head branch). A `.start` file per bar holds the Start agent and Retry
+presses the next pass has not used yet.
+
+A state file has one line per pull request: its key, its `updated_at`, what happened (`started`,
+`seen`, `there`, or `0` for a failed start), when, and the note the page shows. A `1` from an older
+release could have been a start or a baseline, so it reads as taken as seen, and the page offers Start
+agent. That is harmless if an agent is in fact there: a start finds it and leaves it alone.
 
 ## Upgrading from the Herdr dispatcher (3.4.x)
 
