@@ -147,7 +147,7 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
             items.push(link(place, &esc(name), true));
         }
     }
-    items.push(link(Place::Agents, crate::agents::NAME, false));
+    items.push(link(Place::Agents, &format!("{}{}", crate::agents::NAME, place_tag(&Place::Agents)), false));
     let muted = if site.muted > 0 { format!("Muted ({})", site.muted) } else { "Muted".to_string() };
     items.push(link(Place::Muted, &muted, false));
     let updates = match &site.update {
@@ -157,6 +157,15 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
     items.push(link(Place::Updates, &updates, false));
     items.push(link(Place::Advanced, "Advanced", false));
     format!("<nav class=\"side\" aria-label=\"GitHoot settings\">{}</nav>", items.join(""))
+}
+
+/// The tag a page carries beside its name, in the sidebar and its heading. Only Agents has one: it
+/// starts agents, it is new, and it may misbehave, which a page that only reads cannot.
+fn place_tag(place: &Place) -> &'static str {
+    match place {
+        Place::Agents => "<span class=\"tag tag-exp\">Experimental</span>",
+        _ => "",
+    }
 }
 
 /// A whole page: the shared head, the sidebar, and `body`.
@@ -189,7 +198,7 @@ pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option
             None => format!("<span>{}</span>", esc(label)),
         })
         .collect();
-    let heading = format!("<h1 class=\"crumbs\">{}</h1>", crumbs.join(sep));
+    let heading = format!("<h1 class=\"crumbs\">{}{}</h1>", crumbs.join(sep), place_tag(place));
     let tab: Vec<&str> = trail.iter().map(|(label, _)| label.as_str()).collect();
     let mut h = crate::page::shell_with(
         &tab.join(" › "),
@@ -238,8 +247,20 @@ pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option
 /// typing asks GitHoot (`action=people`), which asks GitHub: people on your repositories first, then
 /// everyone. A stale answer is dropped. Enter, a comma or a space adds what is typed even with no
 /// suggestion, Backspace in an empty box takes the last chip off. Nothing saves itself: Save does.
-const SITE_SCRIPT: &str = "(function(){\
+pub(crate) const SITE_SCRIPT: &str = "(function(){\
 document.querySelectorAll('form[data-autosave]').forEach(function(f){f.classList.add('auto');});\
+function times(root){root.querySelectorAll('time[datetime]').forEach(function(t){var d=new Date(t.getAttribute('datetime'));if(!isNaN(d))t.textContent=d.toLocaleString();});}times(document);\
+/* a folded card you opened stays open across a reload, such as a button's, for this tab */\
+function shelf(id){return 'open:'+location.pathname+':'+id;}\
+function remembered(root){root.querySelectorAll('details.fold[id]').forEach(function(d){try{if(sessionStorage.getItem(shelf(d.id))==='1')d.open=true;}catch(e){}});}\
+remembered(document);\
+document.addEventListener('toggle',function(ev){var d=ev.target;if(!d.matches||!d.matches('details.fold[id]'))return;\
+try{if(d.open)sessionStorage.setItem(shelf(d.id),'1');else sessionStorage.removeItem(shelf(d.id));}catch(e){}},true);\
+/* cards that keep up by themselves: swapped in place, each left open or shut as it was */\
+var live=document.querySelector('[data-live]');if(live){var last=null;setInterval(function(){if(document.hidden)return;\
+fetch(live.getAttribute('data-live')).then(function(r){return r.ok?r.text():null;}).then(function(h){if(h===null||h===last)return;last=h;\
+var open={};live.querySelectorAll('details[id]').forEach(function(d){open[d.id]=d.open;});live.innerHTML=h;\
+live.querySelectorAll('details[id]').forEach(function(d){if(open[d.id])d.open=true;});times(live);}).catch(function(){});},5000);}\
 function parts(){document.querySelectorAll('[data-parts]').forEach(function(p){var some=p.querySelector('input[value=\"some\"]');\
 var boxes=p.querySelector('.boxes');if(some&&boxes)boxes.hidden=!some.checked;});}parts();\
 function shown(){document.querySelectorAll('[data-shown-by]').forEach(function(e){\
@@ -846,7 +867,7 @@ pub(crate) mod tests {
     fn an_item_in_the_sidebar_carries_its_collections_name_for_the_narrow_row() {
         let html = sidebar(&site(), &Place::General);
         assert!(html.contains(r#"href="/tok/portals/github"><span class="up-name">Portals › </span>GitHub</a>"#), "{html}");
-        assert!(html.contains(r#"href="/tok/agents">Agents</a>"#), "a page of its own, no collection to name: {html}");
+        assert!(html.contains(r#"href="/tok/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#), "a page of its own, no collection to name: {html}");
     }
 
     /// The green bar's rules are drawn as the path a pull request walks to green: two fixed steps,
@@ -1023,7 +1044,7 @@ pub(crate) mod tests {
     fn the_sidebar_has_agents_between_portals_and_muted_and_no_integrations() {
         let html = sidebar(&site(), &Place::General);
         let portals = html.find("/tok/portals\"").unwrap();
-        let agents = html.find(r#"href="/tok/agents">Agents</a>"#).expect("always there");
+        let agents = html.find(r#"href="/tok/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#).expect("always there");
         let muted = html.find("/tok/muted").unwrap();
         assert!(portals < agents && agents < muted, "{html}");
         assert!(!html.contains("integrations"), "{html}");

@@ -56,15 +56,65 @@ pub enum Action {
     Start,
 }
 
+/// What happened to a pull request in a bar, as recorded. Kept apart rather than as one "dispatched"
+/// flag, because "taken as seen" and "an agent was started" look the same to the rule and nothing
+/// alike to the person wondering where the agent is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Outcome {
+    /// An agent was started for it.
+    #[default]
+    Started,
+    /// It was in the bar when the bar, or Agents, was switched on. Nothing was started.
+    Seen,
+    /// An agent was already in its worktree, and was left alone.
+    There,
+    /// The start failed. Tried again when the pull request changes, or when Retry is pressed.
+    Failed,
+}
+
+impl Outcome {
+    /// Its code in the state file.
+    fn code(self) -> &'static str {
+        match self {
+            Outcome::Started => "started",
+            Outcome::Seen => "seen",
+            Outcome::There => "there",
+            Outcome::Failed => "0",
+        }
+    }
+
+    /// `0` is a failed start, as it always was. An older file's `1`, or the comment time an even older
+    /// one holds there, could be a start or a baseline: taken as seen, so the page offers Start agent,
+    /// which is harmless if an agent is in fact there.
+    fn parse(code: &str) -> Outcome {
+        match code {
+            "0" => Outcome::Failed,
+            "started" => Outcome::Started,
+            "there" => Outcome::There,
+            _ => Outcome::Seen,
+        }
+    }
+}
+
 /// What this bar recorded about one pull request last time.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Handled {
-    /// The `updated_at` it was last looked at. Only matters while `dispatched` is false: a failed
-    /// start is tried again when the pull request changes, not every pass.
+    /// The `updated_at` it was last looked at. Only matters for a failed start, which is tried again
+    /// when the pull request changes, not every pass.
     pub updated: String,
-    /// An agent was started for it, or was already there, or it was in the bar when the bar was
-    /// switched on. Nothing more starts for it while it stays in the bar.
-    pub dispatched: bool,
+    pub outcome: Outcome,
+    /// When it was recorded, in Unix seconds. `0` for a file from before this was kept.
+    pub at: u64,
+    /// What was said about it: where the agent started, or why it failed. One line.
+    pub note: String,
+}
+
+impl Handled {
+    /// An agent was started for it, or was already there, or it was taken as seen. Nothing more
+    /// starts for it while it stays in the bar.
+    pub fn dispatched(&self) -> bool {
+        self.outcome != Outcome::Failed
+    }
 }
 
 /// The whole rule, in one place, with no I/O in it.
@@ -76,7 +126,7 @@ pub struct Handled {
 /// it (changes requested again, say) is an arrival like any other.
 pub fn decide(prev: Option<&Handled>, updated: &str, live_agent: Option<&str>) -> Action {
     if let Some(seen) = prev
-        && (seen.dispatched || seen.updated == updated)
+        && (seen.dispatched() || seen.updated == updated)
     {
         return Action::AlreadySeen;
     }
@@ -205,6 +255,11 @@ pub fn command(exe: &str) -> Command {
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        // System first, then yours, as Windows builds a new process's PATH.
+        let fresh: Vec<String> = [registry_path(true), registry_path(false)].into_iter().flatten().collect();
+        if let Ok(path) = std::env::join_paths(path_with(std::env::var_os("PATH").as_deref(), &fresh)) {
+            cmd.env("PATH", path);
+        }
     }
     cmd
 }
@@ -234,9 +289,85 @@ pub fn mac_tool_path(inherited: Option<&std::ffi::OsStr>, home: Option<&Path>) -
     std::env::join_paths(dirs).unwrap_or_default()
 }
 
+/// The PATH every program it runs gets on Windows: the one GitHoot started with, then every folder the
+/// registry's PATH (`fresh`, as `;`-separated values) has that it lacks.
+///
+/// A process keeps the PATH it was started with, so a tool installed while GitHoot runs, such as the
+/// Herdr app's `hc`, read as not installed until GitHoot was restarted. Appended rather than put first,
+/// so the order you started it with stands. Compared as Windows compares folders: case aside, and with
+/// or without a trailing slash. A value left with a `%VARIABLE%` in it is skipped rather than guessed
+/// at. Pure, so it is tested on every platform although only Windows uses it.
+pub fn path_with(inherited: Option<&std::ffi::OsStr>, fresh: &[String]) -> Vec<PathBuf> {
+    let same = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+    let mut dirs: Vec<PathBuf> = inherited.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    let mut known: Vec<String> = dirs.iter().map(|d| same(d)).collect();
+    for dir in fresh.iter().flat_map(|value| value.split(';')).map(str::trim) {
+        let dir = PathBuf::from(dir);
+        if dir.as_os_str().is_empty() || dir.to_string_lossy().contains('%') || known.contains(&same(&dir)) {
+            continue;
+        }
+        known.push(same(&dir));
+        dirs.push(dir);
+    }
+    dirs
+}
+
+/// The `Path` value as the registry holds it now, variables expanded: the system's (`machine`) or
+/// yours. `None` when it cannot be read.
+#[cfg(target_os = "windows")]
+fn registry_path(machine: bool) -> Option<String> {
+    use std::ptr::null_mut;
+    use winapi::um::winreg::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+    let (root, key) = if machine {
+        (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+    } else {
+        (HKEY_CURRENT_USER, "Environment")
+    };
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (key, name) = (wide(key), wide("Path"));
+    // Asked for as REG_SZ, which makes the registry expand a REG_EXPAND_SZ value. The expanded value can
+    // be longer than the size first reported, so the buffer is generous and one retry is allowed.
+    let mut bytes: u32 = 0;
+    // SAFETY: the key and value names are NUL-terminated and live across the call; a null buffer with
+    // a size pointer asks only for the size.
+    let status = unsafe { RegGetValueW(root, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, null_mut(), null_mut(), &mut bytes) };
+    if status != 0 {
+        return None;
+    }
+    let mut capacity = bytes as usize * 2 + 2048;
+    for _ in 0..2 {
+        let mut buf = vec![0u16; capacity / 2];
+        let mut size = (buf.len() * 2) as u32;
+        // SAFETY: `buf` is `size` bytes long and outlives the call.
+        let status = unsafe {
+            RegGetValueW(root, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, null_mut(), buf.as_mut_ptr().cast(), &mut size)
+        };
+        match status {
+            0 => {
+                let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                return Some(String::from_utf16_lossy(&buf[..len]));
+            }
+            234 => capacity = size as usize + 2048, // ERROR_MORE_DATA
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Runs a command and returns its stdout, or `Err` with whatever it said. Trimmed, because every
-/// caller here wants a value rather than a line.
+/// caller here wants a value rather than a line. Written down when a trace is running; see `traced`.
 pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
+    let began = std::time::Instant::now();
+    let result = run_output(exe, args);
+    TRACE.with(|trace| {
+        if let Some(steps) = trace.borrow_mut().as_mut() {
+            steps.push(step(exe, args, &result, began.elapsed()));
+        }
+    });
+    result
+}
+
+fn run_output(exe: &str, args: &[&str]) -> Result<String, String> {
     let out = command(exe).args(args).output().map_err(|e| match e.kind() {
         // Worded once, here, so a client can tell "not installed" from "did not answer". See `clients::not_installed`.
         std::io::ErrorKind::NotFound => format!("{exe}: not installed"),
@@ -251,6 +382,57 @@ pub fn output(exe: &str, args: &[&str]) -> Result<String, String> {
         .find(|s| !s.is_empty())
         .unwrap_or_default();
     Err(said)
+}
+
+// ── The trace ────────────────────────────────────────────────────────────────
+//
+// Agents is experimental, and when a start goes wrong the only useful question is which program said
+// what. So every program a start runs is written down, in order, for the Agents log. Per thread, so a
+// start on the runner's thread never collects the page server's calls.
+
+thread_local! {
+    static TRACE: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` and answers with every program it ran through `output`, one line each.
+pub fn traced<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = TRACE.with(|t| t.replace(Some(Vec::new())));
+    let value = f();
+    let steps = TRACE.with(|t| t.replace(outer)).unwrap_or_default();
+    (value, steps)
+}
+
+/// One program, as the log shows it: what was run, how it ended, how long it took, and the first
+/// line of what it said.
+fn step(exe: &str, args: &[&str], result: &Result<String, String>, took: std::time::Duration) -> String {
+    let run: Vec<String> = std::iter::once(exe.to_string()).chain(args.iter().map(|a| shown_arg(a))).collect();
+    let secs = format!("{:.1}s", took.as_secs_f64());
+    match result {
+        Ok(said) => match first_line(said, 120) {
+            said if said.is_empty() => format!("{}  ok {secs}", run.join(" ")),
+            said => format!("{}  ok {secs}: {said}", run.join(" ")),
+        },
+        Err(why) => format!("{}  failed {secs}: {}", run.join(" "), first_line(why, 200)),
+    }
+}
+
+/// An argument as the log shows it. A long one, such as the prompt, is cut: the log needs to know
+/// which call it was, not hold the whole prompt, part of which other people wrote.
+fn shown_arg(arg: &str) -> String {
+    let chars = arg.chars().count();
+    if chars > 60 {
+        format!("{}\u{2026} ({chars} chars)", arg.chars().take(40).collect::<String>())
+    } else if arg.is_empty() || arg.contains(' ') {
+        format!("\"{arg}\"")
+    } else {
+        arg.to_string()
+    }
+}
+
+/// The first non-empty line of `text`, at most `max` characters.
+fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    if line.chars().count() > max { format!("{}\u{2026}", line.chars().take(max).collect::<String>()) } else { line.to_string() }
 }
 
 /// The tools a tick shells out to: the chosen client's program, and git. Checked before the thread
@@ -291,11 +473,12 @@ pub fn read_state(dir: &Path, axis: PrAxis) -> std::collections::BTreeMap<String
                 return None;
             }
             let updated = parts.next().unwrap_or("").to_string();
-            // `0` is a failed start. Anything else is dispatched, including the comment time a file
-            // from before this column's meaning changed holds there: everything in such a file had
-            // been looked at, and starting agents for all of it on upgrade would be a swarm.
-            let dispatched = parts.next() != Some("0");
-            Some((key.to_string(), Handled { updated, dispatched }))
+            // Nothing in an older file is new: everything in it had been looked at, and starting
+            // agents for all of it on upgrade would be a swarm. See `Outcome::parse`.
+            let outcome = Outcome::parse(parts.next().unwrap_or(""));
+            let at = parts.next().and_then(|a| a.parse().ok()).unwrap_or(0);
+            let note = parts.next().unwrap_or("").to_string();
+            Some((key.to_string(), Handled { updated, outcome, at, note }))
         })
         .collect()
 }
@@ -312,11 +495,76 @@ pub fn write_state(
     let text: String = state
         .iter()
         .filter(|(_, h)| !h.updated.is_empty())
-        .map(|(key, h)| format!("{key}\t{}\t{}\n", h.updated, if h.dispatched { "1" } else { "0" }))
+        .map(|(key, h)| format!("{key}\t{}\t{}\t{}\t{}\n", h.updated, h.outcome.code(), h.at, one_line(&h.note)))
         .collect();
     let temp = path.with_extension("tmp");
     std::fs::write(&temp, text)?;
     std::fs::rename(&temp, &path)
+}
+
+/// `text` as one field of one line.
+fn one_line(text: &str) -> String {
+    text.replace(['\t', '\r', '\n'], " ")
+}
+
+// ── Start agent and Retry ────────────────────────────────────────────────────
+//
+// A press on the page asks for a pull request to be forgotten, so the next real pass takes it as new.
+// Asked through a file the pass consumes, rather than by editing the state: a pass may be halfway
+// through a start, and would write its own copy of the state over the edit when it finished.
+
+fn forget_path(dir: &Path, axis: PrAxis) -> PathBuf {
+    dir.join(format!("{}.start", axis.slug()))
+}
+
+/// Asks the next real pass to take `key` as new.
+fn ask_to_forget(dir: &Path, axis: PrAxis, key: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(forget_path(dir, axis))?;
+    writeln!(file, "{key}")
+}
+
+/// Whether a press for `key` is waiting for the next real pass.
+pub fn forget_pending(dir: &Path, axis: PrAxis, key: &str) -> bool {
+    std::fs::read_to_string(forget_path(dir, axis)).unwrap_or_default().lines().any(|l| l == key)
+}
+
+/// Every press waiting, used up. Moved aside first, so a press that lands meanwhile waits for the next
+/// pass rather than being lost.
+fn take_forgets(dir: &Path, axis: PrAxis) -> Vec<String> {
+    let taking = forget_path(dir, axis).with_extension("taking");
+    if std::fs::rename(forget_path(dir, axis), &taking).is_err() {
+        return Vec::new();
+    }
+    let keys = std::fs::read_to_string(&taking).unwrap_or_default().lines().map(str::to_string).collect();
+    let _ = std::fs::remove_file(&taking);
+    keys
+}
+
+/// Why a pull request with nothing recorded is not started yet, by `"<bar>\t<key>"`: the last setup
+/// trouble a real pass met, such as no clone or Orca not running. In memory, because it is never
+/// recorded; for the page, and so the log says it once rather than every pass.
+static WAITING: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn waiting_key(axis: PrAxis, key: &str) -> String {
+    format!("{}\t{key}", axis.slug())
+}
+
+/// Records why it waits. `true` when that is news, so the log says it once.
+fn wait_for(axis: PrAxis, key: &str, why: &str) -> bool {
+    let Ok(mut waiting) = WAITING.lock() else { return true };
+    waiting.insert(waiting_key(axis, key), why.to_string()).as_deref() != Some(why)
+}
+
+fn done_waiting(axis: PrAxis, key: &str) {
+    if let Ok(mut waiting) = WAITING.lock() {
+        waiting.remove(&waiting_key(axis, key));
+    }
+}
+
+fn waiting_for(axis: PrAxis, key: &str) -> Option<String> {
+    WAITING.lock().ok().and_then(|w| w.get(&waiting_key(axis, key)).cloned())
 }
 
 // ── What the bar holds, as this module wants it ──────────────────────────────
@@ -374,6 +622,21 @@ impl Target {
 /// agent on every comment.
 pub fn live_agents() -> clients::Inventory {
     clients::agents_everywhere(&mut |exe, args| output(exe, args))
+}
+
+/// `live_agents`, asked at most every few seconds, for the page: it asks again every five seconds
+/// while it is open, and each ask runs a program per client.
+pub fn live_agents_for_page() -> clients::Inventory {
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, clients::Inventory)>> = std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else { return live_agents() };
+    if let Some((when, inventory)) = last.as_ref()
+        && when.elapsed() < std::time::Duration::from_secs(4)
+    {
+        return inventory.clone();
+    }
+    let inventory = live_agents();
+    *last = Some((std::time::Instant::now(), inventory.clone()));
+    inventory
 }
 
 /// Whether a worktree on disk with no agent in it may be recycled, as far as anyone can say. Not while
@@ -495,6 +758,9 @@ pub struct Report {
     pub setup: Vec<String>,
     /// A client only you can start, missing. Also in `setup`, for the log; here for the desktop.
     pub absent: Vec<String>,
+    /// What happened, in order, with every program a start ran: for the Agents log. Said once, never
+    /// every pass, and only by a real pass.
+    pub journal: Vec<String>,
 }
 
 /// What to fetch and what to start the agent's branch from: the portal's head ref, into a ref of
@@ -688,57 +954,112 @@ pub fn tick(axis: PrAxis, targets: &[Target], settings: &Settings, dir: &Path, t
     let mut report = Report::default();
     let inventory = live_agents();
     let agents = inventory.agents;
-    let previous = read_state(dir, axis);
+    let mut previous = read_state(dir, axis);
     let mut next = std::collections::BTreeMap::new();
+    let now = crate::mute::unix_now();
+    // Start agent and Retry: forgotten, so taken as new below. A dry run leaves them for the real pass.
+    let pressed = if settings.dry_run { Vec::new() } else { take_forgets(dir, axis) };
+    for key in &pressed {
+        previous.remove(key);
+    }
 
     for t in targets {
         report.looked_at += 1;
+        let label = format!("{}#{}", t.repo, t.number);
         let prev = previous.get(&t.key);
         let slug = slug(&t.repo, t.number);
         let live = agent_in(&agents, &settings.worktree(&slug));
+        let record = |outcome, note: String| Handled { updated: t.updated.clone(), outcome, at: now, note };
         match decide(prev, &t.updated, live.as_deref()) {
             Action::AlreadySeen => {
-                next.insert(t.key.clone(), prev.expect("seen means recorded").clone());
+                let prev = prev.expect("seen means recorded");
+                next.insert(t.key.clone(), prev.clone());
                 // Silent in a real pass, where it is almost every pull request almost always. A dry
-                // run says it, because it is the commonest reason nothing happens.
+                // run says it, because it is the commonest reason nothing happens, and says which of
+                // the reasons it is: "taken as seen" once read as "an agent is somewhere".
                 if settings.dry_run {
-                    report.lines.push(format!("{}#{}: already dispatched", t.repo, t.number));
+                    report.lines.push(format!("{label}: {}", already(prev)));
                 }
             }
             Action::AlreadyThere => {
-                next.insert(t.key.clone(), Handled { updated: t.updated.clone(), dispatched: true });
-                report.lines.push(format!("{}#{}: an agent is already there", t.repo, t.number));
-            }
-            Action::Start => match start(t, &slug, settings, template, &inventory.unsure) {
-                Ok(said) => {
-                    next.insert(t.key.clone(), Handled { updated: t.updated.clone(), dispatched: true });
-                    report.started += 1;
-                    report.lines.push(format!("{}#{}: {said}", t.repo, t.number));
+                let who = live.unwrap_or_default();
+                next.insert(t.key.clone(), record(Outcome::There, format!("agent {who} is already in its worktree")));
+                report.lines.push(format!("{label}: an agent is already there"));
+                if !settings.dry_run {
+                    report.journal.push(format!("{label}: new in the bar, but agent {who} is already in its worktree, left alone"));
                 }
-                // Deliberately unrecorded: this pull request must be tried again as soon as the
-                // setting is corrected, not when it next changes.
-                Err(Trouble::Setup(why)) => report.setup.push(format!("{}#{}: {why}", t.repo, t.number)),
-                // Setup, and said on the desktop too: nothing happens until you start the client.
-                Err(Trouble::Absent(why)) => {
-                    report.setup.push(format!("{}#{}: {why}", t.repo, t.number));
-                    if !report.absent.contains(&why) {
-                        report.absent.push(why);
+            }
+            Action::Start => {
+                let (result, steps) = if settings.dry_run {
+                    (start(t, &slug, settings, template, &inventory.unsure), Vec::new())
+                } else {
+                    traced(|| start(t, &slug, settings, template, &inventory.unsure))
+                };
+                // The header and the programs it ran, ahead of what came of it. Not for a start that
+                // waits on the same thing as last pass: that would be the same lines every pass.
+                let tell = |end: String, report: &mut Report| {
+                    if settings.dry_run {
+                        return;
+                    }
+                    let why = if pressed.contains(&t.key) { "Start agent was pressed" } else { "new in the bar" };
+                    report.journal.push(format!("{label}: {why}, starting an agent"));
+                    report.journal.extend(steps.iter().map(|s| format!("  {s}")));
+                    report.journal.push(format!("{label}: {end}"));
+                };
+                match result {
+                    Ok(said) => {
+                        next.insert(t.key.clone(), record(Outcome::Started, said.clone()));
+                        report.started += 1;
+                        report.lines.push(format!("{label}: {said}"));
+                        done_waiting(axis, &t.key);
+                        tell(said, &mut report);
+                    }
+                    // Deliberately unrecorded: this pull request must be tried again as soon as the
+                    // setting is corrected, not when it next changes.
+                    Err(Trouble::Setup(why)) => {
+                        report.setup.push(format!("{label}: {why}"));
+                        if !settings.dry_run && wait_for(axis, &t.key, &why) {
+                            tell(format!("waiting: {why}"), &mut report);
+                        }
+                    }
+                    // Setup, and said on the desktop too: nothing happens until you start the client.
+                    Err(Trouble::Absent(why)) => {
+                        report.setup.push(format!("{label}: {why}"));
+                        if !settings.dry_run && wait_for(axis, &t.key, &why) {
+                            tell(format!("waiting: {why}"), &mut report);
+                        }
+                        if !report.absent.contains(&why) {
+                            report.absent.push(why);
+                        }
+                    }
+                    // Recorded as failed: tried again when the pull request changes.
+                    Err(other) => {
+                        next.insert(t.key.clone(), record(Outcome::Failed, other.text().to_string()));
+                        report.problems.push(format!("{label}: {}", other.text()));
+                        done_waiting(axis, &t.key);
+                        tell(format!("failed: {}", other.text()), &mut report);
                     }
                 }
-                // Recorded as not dispatched: tried again when the pull request changes.
-                Err(other) => {
-                    next.insert(t.key.clone(), Handled { updated: t.updated.clone(), dispatched: false });
-                    report.problems.push(format!("{}#{}: {}", t.repo, t.number, other.text()));
-                }
-            },
+            }
         }
     }
 
     let written = if settings.dry_run { Ok(()) } else { write_state(dir, axis, &next) };
     if let Err(e) = written {
         report.problems.push(format!("could not write the dispatch state: {e}"));
+        report.journal.push(format!("could not write the dispatch state: {e}"));
     }
     report
+}
+
+/// Why nothing more starts for a pull request already recorded, as a dry run says it.
+fn already(h: &Handled) -> String {
+    match h.outcome {
+        Outcome::Started => format!("an agent was already started for it ({})", h.note),
+        Outcome::Seen => "taken as seen when Agents was switched on, no agent was started".to_string(),
+        Outcome::There => "an agent was already in its worktree".to_string(),
+        Outcome::Failed => format!("its start failed ({}), and is tried again when it changes", h.note),
+    }
 }
 
 // ── The feature ──────────────────────────────────────────────────────────────
@@ -890,8 +1211,16 @@ pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
                 continue;
             }
             match write_state(&ctx.dir, axis, &baseline(&targets)).and_then(|()| arm(&ctx.dir, axis)) {
-                Ok(()) => out.said.push(format!("[{}] switched on: {} pull request(s) taken as seen, none started", axis.slug(), targets.len())),
-                Err(e) => out.trouble.push(format!("[{}] could not record the baseline: {e}", axis.slug())),
+                Ok(()) => {
+                    let said = format!("[{}] switched on: {} pull request(s) taken as seen, none started", axis.slug(), targets.len());
+                    out.journal.push(said.clone());
+                    out.journal.extend(targets.iter().map(|t| format!("[{}]   {}#{} taken as seen", axis.slug(), t.repo, t.number)));
+                    out.said.push(said);
+                }
+                Err(e) => {
+                    out.trouble.push(format!("[{}] could not record the baseline: {e}", axis.slug()));
+                    out.journal.push(format!("[{}] could not record the baseline: {e}", axis.slug()));
+                }
             }
             continue;
         }
@@ -904,6 +1233,7 @@ pub fn pass(ctx: &Context, batches: &[Batch], dry_run: bool) -> Said {
         out.trouble.extend(report.problems.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
         out.setup.extend(report.setup.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
         out.absent.extend(report.absent.into_iter().filter(|a| !out.absent.contains(a)).collect::<Vec<_>>());
+        out.journal.extend(report.journal.into_iter().map(|l| format!("[{}] {l}", axis.slug())));
         if dry_run && report.looked_at > 0 {
             out.said.push(format!("[{}] {} pull request(s) looked at", axis.slug(), report.looked_at));
         }
@@ -944,8 +1274,11 @@ pub fn page(ctx: &Context, token: &str) -> String {
 /// are read off the form, by name; nothing the form invents can become a filename. See
 /// `prompts::save_prompts`.
 pub fn action(ctx: &Context, action: &str, form: &crate::serve::Form) -> Option<Result<String, String>> {
-    if action != "prompts" {
-        return None;
+    match action {
+        "start" => return Some(press_start(ctx, form)),
+        "openlog" => return Some(open_log(ctx)),
+        "prompts" => {}
+        _ => return None,
     }
     crate::infoln!("settings page saved the agents' prompts");
     let given: Vec<(String, String)> = prompts::DEFAULT_PROMPTS
@@ -957,6 +1290,125 @@ pub fn action(ctx: &Context, action: &str, form: &crate::serve::Form) -> Option<
             .map(|()| "Prompts saved. The next pass uses them.".to_string())
             .map_err(|e| format!("could not write the prompts: {e}")),
     )
+}
+
+/// Start agent or Retry: the pull request is forgotten, so the next real pass takes it as new. Only a
+/// pull request this bar recorded, so a hand-made post cannot write anything else into the file.
+fn press_start(ctx: &Context, form: &crate::serve::Form) -> Result<String, String> {
+    let bar = form.get("bar").map(String::as_str).unwrap_or_default();
+    let axis = PrAxis::ALL.into_iter().find(|a| a.slug() == bar).ok_or_else(|| format!("no bar called {bar:?}"))?;
+    let key = form.get("key").map(String::as_str).unwrap_or_default();
+    if !read_state(&ctx.dir, axis).contains_key(key) {
+        return Err("that pull request is no longer recorded in its bar".to_string());
+    }
+    ask_to_forget(&ctx.dir, axis, key).map_err(|e| format!("could not ask for it: {e}"))?;
+    super::journal::append(&ctx.dir, &[format!("[{bar}] Start agent pressed on the page")]);
+    super::poll_published();
+    Ok("An agent starts for it on the next pass, in a few seconds. Recent activity says how it went.".to_string())
+}
+
+/// Opens the Agents log in whatever opens text files here.
+fn open_log(ctx: &Context) -> Result<String, String> {
+    let path = super::journal::path(&ctx.dir);
+    if !path.exists() {
+        return Err("there is no Agents log yet: nothing has happened since it was switched on".to_string());
+    }
+    open::that(&path).map(|()| "Opened the Agents log.".to_string()).map_err(|e| format!("could not open {}: {e}", path.display()))
+}
+
+/// One pull request, as the page lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRow {
+    /// `owner/repo#number`.
+    pub label: String,
+    pub url: String,
+    pub title: String,
+    /// The bar's slug, as the Start agent form posts it.
+    pub bar: &'static str,
+    /// The bar as the page names it.
+    pub bar_name: &'static str,
+    pub key: String,
+    /// What happened, in a word or three.
+    pub state: &'static str,
+    /// `ok`, `seen`, `wait` or `bad`, for its colour.
+    pub tone: &'static str,
+    pub note: String,
+    /// When it was recorded, in Unix seconds. `0` for not recorded, or not known.
+    pub at: u64,
+    /// Start agent or Retry, where a press can change something.
+    pub button: Option<&'static str>,
+}
+
+/// The bar as the page names it.
+fn bar_name(axis: PrAxis) -> &'static str {
+    match axis {
+        PrAxis::ChangesRequested => "Needs work",
+        PrAxis::ReviewRequested => "Review requested",
+        PrAxis::ReadyToMerge => "Approved",
+    }
+}
+
+/// Every pull request in a bar it acts on, with what it recorded about it and, for one an agent was
+/// started for, whether that agent and its worktree are still there. `live` is who is working now.
+pub fn pull_rows(ctx: &Context, batches: &[Batch], live: &clients::Inventory) -> Vec<PullRow> {
+    let settings = settings_now(ctx, true);
+    let mut rows = Vec::new();
+    for batch in batches.iter().filter(|b| bar_on(ctx, b.axis)) {
+        let axis = batch.axis;
+        let state = read_state(&ctx.dir, axis);
+        let is_armed = armed(&ctx.dir, axis);
+        for t in batch.entries.iter().filter_map(Target::from_entry) {
+            let (state_word, tone, note, at, button) = match state.get(&t.key) {
+                _ if forget_pending(&ctx.dir, axis, &t.key) => {
+                    ("Starting", "wait", "Asked for on the page. The next pass starts it.".to_string(), 0, None)
+                }
+                Some(h) if matches!(h.outcome, Outcome::Started | Outcome::There) => {
+                    let worktree = settings.worktree(&slug(&t.repo, t.number));
+                    if agent_in(&live.agents, &worktree).is_some() {
+                        ("Agent running", "ok", h.note.clone(), h.at, None)
+                    } else if !live.unsure.is_empty() {
+                        // A client that did not answer may be the one it runs in.
+                        ("Agent started", "ok", format!("{} (could not ask: {})", h.note, live.unsure.join("; ")), h.at, None)
+                    } else if worktree.exists() {
+                        let note = format!("Its agent has closed. The worktree is still at {}.", worktree.display());
+                        ("Agent closed", "seen", note, h.at, Some("Start again"))
+                    } else {
+                        ("Worktree deleted", "seen", "Its agent and its worktree are gone.".to_string(), h.at, Some("Start again"))
+                    }
+                }
+                Some(h) => match h.outcome {
+                    Outcome::Started | Outcome::There => unreachable!("handled above"),
+                    Outcome::Seen => (
+                        "Taken as seen",
+                        "seen",
+                        "In the bar when Agents was switched on. No agent was started.".to_string(),
+                        h.at,
+                        Some("Start agent"),
+                    ),
+                    Outcome::Failed => ("Failed", "bad", h.note.clone(), h.at, Some("Retry")),
+                },
+                None => match waiting_for(axis, &t.key) {
+                    Some(why) => ("Waiting", "wait", why, 0, None),
+                    None if !is_armed => ("Taken as seen next pass", "seen", "Switched on just now. What is waiting gets no agent.".to_string(), 0, None),
+                    None => ("New", "wait", "The next pass starts an agent.".to_string(), 0, None),
+                },
+            };
+            rows.push(PullRow {
+                label: format!("{}#{}", t.repo, t.number),
+                url: t.url.clone(),
+                title: t.title.clone(),
+                bar: axis.slug(),
+                bar_name: bar_name(axis),
+                key: t.key.clone(),
+                state: state_word,
+                tone,
+                note,
+                at,
+                button,
+            });
+        }
+    }
+    rows
 }
 
 // ── Switching on is "from now on" ────────────────────────────────────────────
@@ -983,10 +1435,14 @@ fn disarm(dir: &Path, axis: PrAxis) {
     let _ = std::fs::remove_file(armed_path(dir, axis));
 }
 
-/// Every pull request in the bar as dispatched, as of now, so switching a bar on starts agents only
+/// Every pull request in the bar taken as seen, as of now, so switching a bar on starts agents only
 /// for pull requests that arrive after it.
 fn baseline(targets: &[Target]) -> std::collections::BTreeMap<String, Handled> {
-    targets.iter().map(|t| (t.key.clone(), Handled { updated: t.updated.clone(), dispatched: true })).collect()
+    let now = crate::mute::unix_now();
+    targets
+        .iter()
+        .map(|t| (t.key.clone(), Handled { updated: t.updated.clone(), outcome: Outcome::Seen, at: now, note: String::new() }))
+        .collect()
 }
 
 /// The switch for one bar's key, in `SETTINGS`.
@@ -1258,7 +1714,7 @@ mod tests {
         let seen = baseline(std::slice::from_ref(&t));
         let h = &seen[&t.key];
         assert_eq!(h.updated, "2026-09-25T10:00:00Z");
-        assert!(h.dispatched);
+        assert!(h.dispatched());
         assert_eq!(decide(Some(h), "2026-09-25T12:00:00Z", None), Action::AlreadySeen, "later changes start nothing");
     }
 
@@ -1325,7 +1781,7 @@ mod tests {
     }
 
     fn seen(updated: &str, dispatched: bool) -> Handled {
-        Handled { updated: updated.to_string(), dispatched }
+        Handled { updated: updated.to_string(), outcome: if dispatched { Outcome::Started } else { Outcome::Failed }, at: 0, note: String::new() }
     }
 
     /// An agent starts for a pull request that is new to its bar, from GitHoot's own lists, whatever
@@ -1366,7 +1822,7 @@ mod tests {
         write_state(&ctx.dir, PrAxis::ChangesRequested, &state).unwrap();
         assert_eq!(read_state(&ctx.dir, PrAxis::ChangesRequested), state);
         std::fs::write(state_path(&ctx.dir, PrAxis::ChangesRequested), "c\tt3\t2026-09-24T09:00:00Z\n").unwrap();
-        assert_eq!(read_state(&ctx.dir, PrAxis::ChangesRequested)["c"], seen("t3", true));
+        assert_eq!(read_state(&ctx.dir, PrAxis::ChangesRequested)["c"].outcome, Outcome::Seen, "a start or a baseline: cannot tell");
         let _ = std::fs::remove_dir_all(&ctx.dir);
     }
 
@@ -1569,13 +2025,17 @@ mod tests {
         assert_eq!(dirs_of(&got), want.map(PathBuf::from));
     }
 
-    /// Only a Mac needs it. Linux and Windows apps inherit the PATH you set, so it is left alone there.
+    /// A Mac widens it with the installers' folders, and Windows with what the registry's PATH gained
+    /// since GitHoot started. A Linux app inherits the PATH you set, so it is left alone there.
     #[test]
-    fn only_a_mac_widens_the_path_of_what_it_runs() {
+    fn a_mac_and_windows_widen_the_path_of_what_it_runs() {
         let cmd = command("git");
         let path = cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v);
         if cfg!(target_os = "macos") {
             assert!(dirs_of(path.expect("a PATH on macOS")).contains(&PathBuf::from("/opt/homebrew/bin")));
+        } else if cfg!(windows) {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            assert!(path.expect("a PATH on Windows").to_string_lossy().starts_with(&*inherited.to_string_lossy()), "yours first, in order");
         } else {
             assert_eq!(path, None);
         }
@@ -1812,5 +2272,180 @@ mod tests {
         assert_eq!(target.repo, "o/r");
         assert_eq!(target.number, 1);
         assert_eq!(target.title, "", "a missing title is empty, never a panic");
+    }
+
+    // ── Telling "taken as seen" from "started", and saying what happened ──────────
+
+    /// The baseline records what really happened: nothing started. A pull request taken as seen must
+    /// not read as one an agent was started for, which is what a dry run once said of it.
+    #[test]
+    fn a_baseline_is_recorded_as_taken_as_seen_not_as_started() {
+        let ctx = temp_ctx("baseline-seen", "");
+        let _ = pass(&ctx, &[batch(PrAxis::ReviewRequested, vec![pr(5145, "2026-11-19T07:34:00Z")], true)], false);
+        let state = read_state(&ctx.dir, PrAxis::ReviewRequested);
+        let h = state.values().next().expect("recorded");
+        assert_eq!(h.outcome, Outcome::Seen);
+        assert!(h.at > 0, "when it was taken as seen is kept for the page");
+        let out = pass(&ctx, &[batch(PrAxis::ReviewRequested, vec![pr(5145, "2026-11-19T07:34:00Z")], true)], true);
+        assert!(
+            out.said.contains(&"[requested-reviews] o/r#5145: taken as seen when Agents was switched on, no agent was started".to_string()),
+            "{:?}",
+            out.said
+        );
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
+    }
+
+    /// The baseline is written to the Agents log, naming every pull request it took as seen.
+    #[test]
+    fn a_baseline_names_what_it_took_as_seen_in_the_journal() {
+        let ctx = temp_ctx("baseline-journal", "");
+        let out = pass(&ctx, &[batch(PrAxis::ReviewRequested, vec![pr(1, "t1"), pr(2, "t2")], true)], false);
+        assert_eq!(
+            out.journal,
+            [
+                "[requested-reviews] switched on: 2 pull request(s) taken as seen, none started",
+                "[requested-reviews]   o/r#1 taken as seen",
+                "[requested-reviews]   o/r#2 taken as seen",
+            ]
+        );
+        let again = pass(&ctx, &[batch(PrAxis::ReviewRequested, vec![pr(1, "t1")], true)], false);
+        assert!(again.journal.is_empty(), "nothing new, nothing said: {:?}", again.journal);
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
+    }
+
+    /// Each outcome is its own code in the state file, with when and why. An older file's `1`, which
+    /// could have been either a start or a baseline, reads as taken as seen: the page then offers
+    /// Start agent, which is harmless when an agent is in fact there.
+    #[test]
+    fn the_state_file_keeps_each_outcome_with_when_and_why() {
+        let ctx = temp_ctx("state-outcomes", "");
+        let mut state = std::collections::BTreeMap::new();
+        for (key, outcome) in [("a", Outcome::Started), ("b", Outcome::Seen), ("c", Outcome::There), ("d", Outcome::Failed)] {
+            let note = "said\twith a tab\nand a line".to_string();
+            state.insert(key.to_string(), Handled { updated: "t1".into(), outcome, at: 1_763_538_240, note });
+        }
+        write_state(&ctx.dir, PrAxis::ChangesRequested, &state).unwrap();
+        let back = read_state(&ctx.dir, PrAxis::ChangesRequested);
+        for (key, h) in &state {
+            assert_eq!(back[key].outcome, h.outcome, "{key}");
+            assert_eq!(back[key].at, 1_763_538_240, "{key}");
+        }
+        assert_eq!(back["c"].note, "said with a tab and a line", "one line, one field");
+        std::fs::write(state_path(&ctx.dir, PrAxis::ChangesRequested), "x\tt3\t1\ny\tt4\t0\n").unwrap();
+        let old = read_state(&ctx.dir, PrAxis::ChangesRequested);
+        assert_eq!(old["x"].outcome, Outcome::Seen);
+        assert_eq!(old["y"].outcome, Outcome::Failed);
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
+    }
+
+    /// Start agent and Retry forget the pull request, so the next real pass takes it as new. Only a
+    /// pull request the state holds can be forgotten, and a dry run leaves the request for the real
+    /// pass.
+    #[test]
+    fn start_agent_forgets_the_pull_request_for_the_next_real_pass() {
+        let ctx = temp_ctx("forget", "");
+        let entries = vec![pr(77, "t1")];
+        let _ = pass(&ctx, &[batch(PrAxis::ReviewRequested, entries.clone(), true)], false);
+        let key = read_state(&ctx.dir, PrAxis::ReviewRequested).keys().next().unwrap().clone();
+        let form = crate::serve::parse_form(&format!("action=start&bar=requested-reviews&key={key}"));
+        let said = action(&ctx, "start", &form).expect("its own action").expect("accepted");
+        assert!(said.contains("next pass"), "{said}");
+        let bad = crate::serve::parse_form("action=start&bar=requested-reviews&key=nope");
+        assert!(action(&ctx, "start", &bad).unwrap().is_err(), "a key it never recorded is refused");
+        let _ = pass(&ctx, &[batch(PrAxis::ReviewRequested, entries.clone(), true)], true);
+        assert!(forget_pending(&ctx.dir, PrAxis::ReviewRequested, &key), "a dry run does not use it up");
+        let out = pass(&ctx, &[batch(PrAxis::ReviewRequested, entries, true)], false);
+        assert!(out.journal.iter().any(|l| l.contains("o/r#77") && l.contains("Start agent")), "{:?}", out.journal);
+        assert!(!forget_pending(&ctx.dir, PrAxis::ReviewRequested, &key));
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
+    }
+
+    /// A program installed while GitHoot runs is found without a restart: the PATH a program gets is
+    /// the one GitHoot started with, then every folder the registry's PATH has gained since, compared
+    /// as Windows compares them. Installing the Herdr app at 08:58 into a GitHoot started earlier left
+    /// `hc` "not found".
+    #[test]
+    fn a_folder_added_to_the_path_since_the_start_is_found() {
+        let inherited = std::ffi::OsString::from(if cfg!(windows) { r"C:\Windows;C:\Tools\" } else { "/usr/bin" });
+        let fresh = [r"C:\Windows;c:\tools".to_string(), r"%NOT_EXPANDED%;;C:\Users\me\AppData\Local\Programs\herdr-core".to_string()];
+        let dirs = path_with(Some(&inherited), &fresh);
+        let herdr = PathBuf::from(r"C:\Users\me\AppData\Local\Programs\herdr-core");
+        assert_eq!(dirs.last(), Some(&herdr), "{dirs:?}");
+        assert_eq!(dirs.iter().filter(|d| **d == herdr).count(), 1);
+        if cfg!(windows) {
+            assert_eq!(dirs.len(), 3, "C:\\Windows and C:\\Tools are already there, in any case, with or without a slash: {dirs:?}");
+        }
+        assert!(path_with(None, &[]).is_empty());
+    }
+
+    /// "Agent started" is what was recorded, not what is true now: the row asks who is in the worktree
+    /// and whether the worktree is still there. Closed or deleted, it offers Start again. A client that
+    /// would not answer leaves it as recorded, said so.
+    #[test]
+    fn a_started_row_says_whether_its_agent_and_worktree_are_still_there() {
+        let base = std::env::temp_dir().join(format!("githoot-herdr-{}-live-rows", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let wt = base.join("wt");
+        let ctx = Context::new(&base, &crate::config::Config::from_text(&format!("agentsWorktreeRoot={}\n", wt.display())));
+        let entries = vec![pr(1, "t1"), pr(2, "t2"), pr(3, "t3")];
+        let _ = pass(&ctx, &[batch(PrAxis::ReviewRequested, entries.clone(), true)], false);
+        let mut state = read_state(&ctx.dir, PrAxis::ReviewRequested);
+        for e in &entries {
+            let key = Target::from_entry(e).unwrap().key;
+            state.insert(key, Handled { updated: "t".into(), outcome: Outcome::Started, at: 1, note: "started in Herdr".into() });
+        }
+        write_state(&ctx.dir, PrAxis::ReviewRequested, &state).unwrap();
+        std::fs::create_dir_all(wt.join("pr-1-r")).unwrap();
+        std::fs::create_dir_all(wt.join("pr-2-r")).unwrap();
+        let live = clients::Inventory { agents: vec![(wt.join("pr-1-r").display().to_string(), "pr-1-r".into())], unsure: Vec::new() };
+        let bars = [batch(PrAxis::ReviewRequested, entries.clone(), true)];
+        let rows = pull_rows(&ctx, &bars, &live);
+        assert_eq!((rows[0].state, rows[0].button), ("Agent running", None));
+        assert_eq!((rows[1].state, rows[1].button), ("Agent closed", Some("Start again")));
+        assert!(rows[1].note.contains("pr-2-r"), "says where the worktree still is: {}", rows[1].note);
+        assert_eq!((rows[2].state, rows[2].button), ("Worktree deleted", Some("Start again")));
+        let unsure = clients::Inventory { agents: Vec::new(), unsure: vec!["hc: timed out".into()] };
+        let rows = pull_rows(&ctx, &bars, &unsure);
+        assert_eq!(rows[1].state, "Agent started", "cannot tell, so as recorded");
+        assert!(rows[1].note.contains("hc: timed out"), "{}", rows[1].note);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every program a start runs is in the trace: what was run, how it ended, how long it took. A
+    /// long argument, such as the prompt, is cut short, so the log never holds the whole prompt.
+    #[test]
+    fn a_traced_command_is_written_down_and_long_arguments_are_cut() {
+        let long = "x".repeat(300);
+        let (_, steps) = traced(|| output("git", &["--definitely-not-an-option", &long]));
+        assert_eq!(steps.len(), 1, "{steps:?}");
+        assert!(steps[0].starts_with("git --definitely-not-an-option xxxxxxxx"), "{}", steps[0]);
+        assert!(steps[0].contains("(300 chars)") && !steps[0].contains(&long), "{}", steps[0]);
+        assert!(steps[0].contains("failed"), "{}", steps[0]);
+        let (_, none) = traced(|| ());
+        assert!(none.is_empty());
+        let _ = output("git", &["--version"]);
+        assert!(traced(|| ()).1.is_empty(), "nothing is collected outside a trace");
+    }
+
+    /// The pull requests the page lists: one row per pull request in a bar it acts on, with what it
+    /// recorded, and Start agent or Retry where a press can change something.
+    #[test]
+    fn the_page_lists_each_pull_request_with_what_happened() {
+        let ctx = temp_ctx("rows", "");
+        let entries = vec![pr(1, "t1"), pr(2, "t2")];
+        let _ = pass(&ctx, &[batch(PrAxis::ReviewRequested, entries.clone(), true)], false);
+        let mut state = read_state(&ctx.dir, PrAxis::ReviewRequested);
+        let k2 = Target::from_entry(&entries[1]).unwrap().key;
+        state.insert(k2, Handled { updated: "t2".into(), outcome: Outcome::Failed, at: 1, note: "Orca is not running".into() });
+        write_state(&ctx.dir, PrAxis::ReviewRequested, &state).unwrap();
+        let bars = [batch(PrAxis::ReviewRequested, entries, true), batch(PrAxis::ReadyToMerge, vec![pr(3, "t3")], true)];
+        let rows = pull_rows(&ctx, &bars, &clients::Inventory::default());
+        assert_eq!(rows.len(), 2, "the approved bar is off, so not listed");
+        assert_eq!((rows[0].state, rows[0].button), ("Taken as seen", Some("Start agent")));
+        assert_eq!((rows[1].state, rows[1].button), ("Failed", Some("Retry")));
+        assert_eq!(rows[1].note, "Orca is not running");
+        assert_eq!(rows[0].label, "o/r#1");
+        assert_eq!(rows[0].bar, "requested-reviews");
+        let _ = std::fs::remove_dir_all(ctx.dir.parent().unwrap());
     }
 }

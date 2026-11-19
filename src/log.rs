@@ -102,7 +102,7 @@ pub fn write_line(level: Level, line: &str) {
 /// Opens the log for appending, readable by its owner only, as `pr_token.txt` is: what GitHoot did
 /// with your accounts and repositories is nobody else's to read. A log an older release created
 /// readable by the group is tightened on the next line written.
-fn open_log(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_log(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -136,11 +136,12 @@ macro_rules! infoln {
 // Formatted by hand rather than pulling in `chrono`/`time`: a tray app that polls one
 // endpoint does not need a date library for the sake of a log prefix.
 
-fn utc_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+pub(crate) fn utc_now() -> String {
+    utc_stamp(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+}
+
+/// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
+pub(crate) fn utc_stamp(secs: u64) -> String {
     let (year, month, day) = civil_from_days((secs / 86_400) as i64);
     let tod = secs % 86_400;
     format!(

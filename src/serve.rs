@@ -1189,6 +1189,12 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
             let Some(home) = settings_home() else {
                 return respond(stream, 404, "text/plain; charset=utf-8", b"Not found", request.body_wanted);
             };
+            // The page script's question: the two cards that change, and nothing else. No flash taken,
+            // and none of the tool checks a whole page runs.
+            if query_value(request.query.as_deref(), "live").is_some() {
+                let body = agents_live(&home, site.token);
+                return respond(stream, 200, "text/html; charset=utf-8", body.as_bytes(), request.body_wanted);
+            }
             agents_page(&site, &home, flash.as_ref())
         }
         Place::Muted => {
@@ -1457,6 +1463,8 @@ fn agents_page(site: &crate::ui::Site, home: &std::path::Path, flash: Option<&(u
     let header_flash = crate::agents::take_flash();
     let dry_run = crate::agents::last_dry_run();
     let value = |s: &crate::setting::Setting| ctx.setting(s.key).to_string();
+    let pulls = if on { dispatch::pull_rows(&ctx, &crate::agents::current_batches(), &dispatch::live_agents_for_page()) } else { Vec::new() };
+    let activity = crate::agents::journal::tail(&ctx.dir, 60);
     let view = crate::ui::agents::AgentsView {
         on,
         missing: &missing,
@@ -1469,8 +1477,20 @@ fn agents_page(site: &crate::ui::Site, home: &std::path::Path, flash: Option<&(u
         }),
         client_card: dispatch::client_cards(&ctx),
         body: dispatch::page(&ctx, site.token),
+        pulls: &pulls,
+        activity: &activity,
     };
     crate::ui::agents::agents_page(site, &view)
+}
+
+/// The Agents page's live cards, for its script.
+fn agents_live(home: &std::path::Path, token: &str) -> String {
+    use crate::agents::{dispatch, Context};
+    let cfg = crate::config::Config::load(home).0;
+    let ctx = Context::new(home, &cfg);
+    let on = cfg.agents_enabled();
+    let pulls = if on { dispatch::pull_rows(&ctx, &crate::agents::current_batches(), &dispatch::live_agents_for_page()) } else { Vec::new() };
+    crate::ui::agents::live_cards(token, on, &pulls, &crate::agents::journal::tail(&ctx.dir, 60))
 }
 
 /// Where a Browse button's picker opens: the folder the box names, or the nearest one above it that
@@ -2044,7 +2064,7 @@ mod tests {
         let r = round_trip(&format!("GET /{TOKEN}/portals HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
         assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page" href="/"#), "{r}");
-        assert!(r.contains(&format!(r#"href="/{TOKEN}/agents">Agents</a>"#)), "Agents is in the sidebar: {r}");
+        assert!(r.contains(&format!(r#"href="/{TOKEN}/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#)), "Agents is in the sidebar: {r}");
     }
 
     #[test]
