@@ -30,6 +30,10 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 minisign-verify = "0.2"
 # SHA-256 for the per-asset digests listed in the signed sums file.
 sha2 = "0.10"
+# Renders release notes on the Updates page. `html` only, no CLI: the notes are untrusted text from
+# GitHub, so `ui::updates::notes_html` rewrites the events (raw HTML to text, http(s) links only) before
+# this crate writes a byte.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # ── Build-time only: the Windows resource section ────────────────────────────────────────────────
 #

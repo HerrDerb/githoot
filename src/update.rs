@@ -27,7 +27,7 @@
 //! quality controls, not security controls, and the comments say so where they appear.
 
 use crate::{errorln, infoln};
-use crate::version::{Version, VERSION};
+use crate::version::Version;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
@@ -47,8 +47,7 @@ const AGENT: &str = "githoot";
 
 /// How many releases to ask for. The changelog spans every release between the installed version and
 /// the newest, so this also bounds how far back that can reach — someone thirty releases behind gets a
-/// truncated history rather than a second request, which is a fine trade for a page that is capped for
-/// display anyway.
+/// truncated history rather than a second request.
 const RELEASES_PER_PAGE: u32 = 30;
 
 /// The asset published for the platform this binary was built for, or `None` if there is not one.
@@ -101,15 +100,6 @@ pub fn signing_configured() -> bool {
     PUBLIC_KEY != PUBLIC_KEY_PLACEHOLDER
 }
 
-/// Notes longer than this are cut, because none of the three dialog mechanisms can scroll.
-///
-/// `MessageBoxW`, `osascript display dialog` and `zenity --question` all render a fixed block of text.
-/// Release bodies here are generated from `git log --oneline` (`release.yml`), so a few releases'
-/// worth can run to hundreds of lines and would produce a dialog taller than the screen with its
-/// buttons pushed off the bottom.
-const MAX_NOTES_CHARS: usize = 1800;
-const MAX_NOTES_LINES: usize = 20;
-
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -128,8 +118,6 @@ pub enum UpdateError {
     Integrity(String),
     /// Something about the local filesystem or process prevented the install.
     Local(String),
-    /// The user declined.
-    Declined,
 }
 
 impl std::fmt::Display for UpdateError {
@@ -149,7 +137,6 @@ impl std::fmt::Display for UpdateError {
             }
             UpdateError::Integrity(e) => write!(f, "the download failed verification: {e}"),
             UpdateError::Local(e) => write!(f, "{e}"),
-            UpdateError::Declined => write!(f, "declined"),
         }
     }
 }
@@ -166,10 +153,18 @@ pub struct Available {
     /// verbatim rather than reconstructed from `version`, so a tag like `v1.4.0` cannot be turned into
     /// `1.4.0` and produce a 404.
     pub tag: String,
-    /// Accumulated release notes from the installed version up to this one, already capped for a
-    /// dialog.
-    pub notes: String,
-    /// The target release's page, for "read the full notes".
+    /// Every release from the installed version up to this one, newest first, for the Updates page.
+    pub releases: Vec<ReleaseNotes>,
+    /// The target release's page.
+    pub url: String,
+}
+
+/// One release's notes, as GitHub holds them: Markdown, uncut. The Updates page renders them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseNotes {
+    pub version: Version,
+    /// `None` for a release with no notes, blank ones included.
+    pub body: Option<String>,
     pub url: String,
 }
 
@@ -218,8 +213,8 @@ pub fn check(client: &Client, current: Version) -> Result<Option<Available>, Upd
     Ok(newer_than(&releases, current))
 }
 
-/// Picks the newest usable release above `current` and builds its notes. Pure, so the whole
-/// filter-and-order decision is testable without a network.
+/// Picks the newest usable release above `current` and keeps every skipped release's notes. Pure, so
+/// the whole filter-and-order decision is testable without a network.
 fn newer_than(releases: &[ReleaseJson], current: Version) -> Option<Available> {
     // Drafts are invisible to an unauthenticated caller anyway, but filtered regardless so the rule is
     // stated rather than relied upon. Pre-releases are excluded because nothing here asks the user
@@ -237,71 +232,160 @@ fn newer_than(releases: &[ReleaseJson], current: Version) -> Option<Available> {
     candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
     let (version, newest) = candidates.first().copied()?;
-    let notes = format_notes(&candidates, &newest.html_url);
-
     Some(Available {
         version,
         tag: newest.tag_name.clone(),
-        notes,
+        releases: candidates
+            .iter()
+            .map(|(version, r)| ReleaseNotes {
+                version: *version,
+                body: r.body.as_deref().map(str::trim).filter(|b| !b.is_empty()).map(str::to_string),
+                url: r.html_url.clone(),
+            })
+            .collect(),
         url: newest.html_url.clone(),
     })
 }
 
-/// Renders "what changed" from every release between the installed version and the target.
-///
-/// Newest first, each under its own heading, so the ordering matches how a person reads a changelog
-/// and the version they are moving *to* is the first thing they see.
-fn format_notes(candidates: &[(Version, &ReleaseJson)], url: &str) -> String {
-    let mut out = String::new();
-    for (version, release) in candidates {
-        out.push_str(&format!("── {version} ──\n"));
-        let body = release.body.as_deref().unwrap_or("").trim();
-        if body.is_empty() {
-            out.push_str("(no notes)\n");
-        } else {
-            out.push_str(body);
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    cap_notes(out.trim_end(), url)
+// ── Progress ──────────────────────────────────────────────────────────────────
+
+/// The steps of an install, in the order `install` runs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Signature,
+    Download,
+    Digest,
+    Test,
+    Replace,
 }
 
-/// Cuts `notes` to something a non-scrolling dialog can show, pointing at the full text instead.
-///
-/// Both a line and a character limit, because either alone lets the other through: a hundred short
-/// commit subjects blow the height while staying under the character count, and one enormous paragraph
-/// does the reverse.
-fn cap_notes(notes: &str, url: &str) -> String {
-    let lines: Vec<&str> = notes.lines().collect();
-    let over_lines = lines.len() > MAX_NOTES_LINES;
-    let over_chars = notes.chars().count() > MAX_NOTES_CHARS;
+impl Step {
+    pub const ALL: [Step; 5] = [Step::Signature, Step::Download, Step::Digest, Step::Test, Step::Replace];
 
-    if !over_lines && !over_chars {
-        return notes.to_string();
-    }
-
-    let mut kept = String::new();
-    let mut kept_lines = 0usize;
-    for line in lines.iter().take(MAX_NOTES_LINES) {
-        // `chars().count()` not `len()`: release notes are arbitrary UTF-8 and cutting on a byte
-        // boundary mid-character would panic on the slice.
-        if kept.chars().count() + line.chars().count() + 1 > MAX_NOTES_CHARS {
-            break;
+    /// The word the page script and the JSON use.
+    pub fn key(self) -> &'static str {
+        match self {
+            Step::Signature => "signature",
+            Step::Download => "download",
+            Step::Digest => "digest",
+            Step::Test => "test",
+            Step::Replace => "replace",
         }
-        kept.push_str(line);
-        kept.push('\n');
-        kept_lines += 1;
     }
 
-    let dropped = lines.len().saturating_sub(kept_lines);
-    if dropped > 0 {
-        kept.push_str(&format!("\n… and {dropped} more line(s). Full notes: {url}"));
-    } else {
-        kept.push_str(&format!("\nFull notes: {url}"));
+    pub fn label(self) -> &'static str {
+        match self {
+            Step::Signature => "Check the release signature",
+            Step::Download => "Download",
+            Step::Digest => "Check the SHA-256",
+            Step::Test => "Test the new build",
+            Step::Replace => "Replace this app",
+        }
     }
-    kept
 }
+
+/// How an install stands, for the Updates page. One at a time: `begin` is the only way in.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Progress {
+    #[default]
+    Idle,
+    /// `step` is `None` between the click and the first step. `done` and `total` are bytes, and only
+    /// move during the download.
+    Running { version: String, step: Option<Step>, done: u64, total: Option<u64> },
+    /// Installed; the app is handing over to the new version, and this server goes with it.
+    Restarting { version: String },
+    /// Nothing was replaced. A new `begin` may try again.
+    Failed { version: String, message: String },
+}
+
+impl Progress {
+    /// Starts an install of `version`, unless one is already running or restarting.
+    pub fn begin(&mut self, version: &str) -> bool {
+        if matches!(self, Progress::Running { .. } | Progress::Restarting { .. }) {
+            return false;
+        }
+        *self = Progress::Running { version: version.to_string(), step: None, done: 0, total: None };
+        true
+    }
+
+    pub fn step(&mut self, next: Step) {
+        if let Progress::Running { step, done, total, .. } = self {
+            *step = Some(next);
+            *done = 0;
+            *total = None;
+        }
+    }
+
+    pub fn bytes(&mut self, now: u64, of: Option<u64>) {
+        if let Progress::Running { step: Some(Step::Download), done, total, .. } = self {
+            *done = now;
+            *total = of;
+        }
+    }
+
+    pub fn fail(&mut self, message: &str) {
+        if let Progress::Running { version, .. } | Progress::Restarting { version } = self {
+            *self = Progress::Failed { version: version.clone(), message: message.to_string() };
+        }
+    }
+
+    fn restarting(&mut self) {
+        if let Progress::Running { version, .. } = self {
+            *self = Progress::Restarting { version: version.clone() };
+        }
+    }
+
+    /// The page script's answer to `?progress=1`.
+    pub fn json(&self) -> String {
+        match self {
+            Progress::Idle => serde_json::json!({ "state": "idle" }),
+            Progress::Running { version, step, done, total } => serde_json::json!({
+                "state": "running",
+                "version": version,
+                "step": step.map(Step::key),
+                "done": done,
+                "total": total,
+            }),
+            Progress::Restarting { version } => serde_json::json!({ "state": "restarting", "version": version }),
+            Progress::Failed { version, message } => {
+                serde_json::json!({ "state": "failed", "version": version, "message": message })
+            }
+        }
+        .to_string()
+    }
+}
+
+/// The one install's progress. A `static` because the page that starts it, the thread that runs it
+/// and the page that watches it are three different threads with nothing else in common.
+static PROGRESS: std::sync::Mutex<Progress> = std::sync::Mutex::new(Progress::Idle);
+
+fn with_progress<T>(f: impl FnOnce(&mut Progress) -> T) -> Option<T> {
+    PROGRESS.lock().ok().map(|mut p| f(&mut p))
+}
+
+pub fn progress() -> Progress {
+    with_progress(|p| p.clone()).unwrap_or_default()
+}
+
+/// Claims the install for `version`. `false` while another one runs, which makes a second click a no-op.
+pub fn begin(version: &str) -> bool {
+    with_progress(|p| p.begin(version)).unwrap_or(false)
+}
+
+/// Ends the install as failed, with `message` for the page.
+pub fn fail(message: &str) {
+    with_progress(|p| p.fail(message));
+}
+
+fn set_step(step: Step) {
+    with_progress(|p| p.step(step));
+}
+
+/// Whether `asked`, the version the page showed, is the release waiting to be installed.
+pub fn matches_pending(asked: &str, pending: Option<&Available>) -> bool {
+    pending.is_some_and(|a| !asked.is_empty() && a.version.to_string() == asked)
+}
+
 
 /// URL of a named asset on a given release tag.
 fn asset_url(tag: &str, asset: &str) -> String {
@@ -442,6 +526,33 @@ fn fetch_text(client: &Client, url: &str) -> Result<String, UpdateError> {
 }
 
 /// Streams an asset to `dest`, returning how many bytes were written.
+/// `io::copy` that reports the running byte count after every chunk, for the page's progress bar.
+///
+/// `cap` bounds what a lying or endless server can make us write, independently of any
+/// `Content-Length`: a read never asks for more than is left under it.
+fn copy_counting(
+    reader: &mut impl Read,
+    writer: &mut impl std::io::Write,
+    cap: u64,
+    mut report: impl FnMut(u64),
+) -> std::io::Result<u64> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    while done < cap {
+        let want = buf.len().min((cap - done).try_into().unwrap_or(usize::MAX));
+        let read = match reader.read(&mut buf[..want]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        writer.write_all(&buf[..read])?;
+        done += read as u64;
+        report(done);
+    }
+    Ok(done)
+}
+
 fn fetch_file(client: &Client, url: &str, dest: &Path) -> Result<u64, UpdateError> {
     let response = client
         .get(url)
@@ -462,9 +573,11 @@ fn fetch_file(client: &Client, url: &str, dest: &Path) -> Result<u64, UpdateErro
 
     let mut file = std::fs::File::create(dest)
         .map_err(|e| UpdateError::Local(format!("could not create {}: {e}", dest.display())))?;
-    // `take` caps what a lying or endless server can make us write, independently of the header above.
-    let written = std::io::copy(&mut response.take(MAX_ASSET_BYTES), &mut file)
-        .map_err(|e| UpdateError::Network(format!("download interrupted: {e}")))?;
+    let mut response = response;
+    let written = copy_counting(&mut response, &mut file, MAX_ASSET_BYTES, |done| {
+        with_progress(|p| p.bytes(done, advertised));
+    })
+    .map_err(|e| UpdateError::Network(format!("download interrupted: {e}")))?;
     file.sync_all().map_err(|e| UpdateError::Local(format!("could not flush the download: {e}")))?;
 
     // A stream truncated by a proxy that never sends `close_notify` can surface as a clean EOF, so the
@@ -593,6 +706,7 @@ fn check_magic(path: &Path) -> Result<(), UpdateError> {
 /// describe. Proves nothing about authenticity — a hostile binary prints whatever it likes — which is
 /// why it runs after the signature, not instead of it.
 fn smoke_test(binary: &Path, expected: &Version) -> Result<(), UpdateError> {
+    set_step(Step::Test);
     let mut child = std::process::Command::new(binary)
         .arg("--print-version")
         .stdin(std::process::Stdio::null())
@@ -678,46 +792,46 @@ fn resolve_current_exe() -> Result<PathBuf, UpdateError> {
     Ok(exe)
 }
 
-/// Downloads, verifies and installs `available`, returning what the UI thread must do next.
+/// Whether this binary can update itself here, and why not if it cannot.
 ///
-/// Runs on its own thread. Ordering is chosen so the cheap and local refusals happen before anything is
-/// downloaded, and the user is asked before any real work — nobody should wait five minutes to be told
-/// their install directory is read-only, and nobody should have five minutes spent on their behalf
-/// without being asked.
-pub fn install(available: &Available) -> Result<RestartPlan, UpdateError> {
-    let asset = ASSET.ok_or(UpdateError::UnsupportedPlatform)?;
+/// The cheap, local refusals, run when the Updates page renders so it can say so instead of offering a
+/// button that would fail, and again at the start of `install`, since a folder can change in between.
+pub fn preflight() -> Result<PathBuf, UpdateError> {
+    ASSET.ok_or(UpdateError::UnsupportedPlatform)?;
     if !signing_configured() {
         return Err(UpdateError::NoSigningKey);
     }
-
     let exe = resolve_current_exe()?;
     let target = install_target(&exe)?;
     probe_writable(&target)?;
+    Ok(target)
+}
 
-    // Asked before the download, with the version transition and the accumulated notes. The wording
-    // says plainly what is about to happen, because it is not a small thing.
-    let prompt = format!(
-        "Version {} is available. You are running {}.\n\n{}\n\nInstalling downloads an executable \
-         from GitHub, replaces this app, and restarts it.",
-        available.version, VERSION, available.notes
-    );
-    if !crate::dialog::confirm_install("githoot: update available", &prompt) {
-        return Err(UpdateError::Declined);
-    }
+/// Downloads, verifies and installs `available`, returning what the UI thread must do next.
+///
+/// Runs on its own thread, after the Install button on the Updates page: that click is the consent,
+/// so nothing here asks. Each step is published to `progress` as it starts, and a success ends in
+/// `Restarting`. A failure is the caller's to publish, with `fail`.
+pub fn install(available: &Available) -> Result<RestartPlan, UpdateError> {
+    let asset = ASSET.ok_or(UpdateError::UnsupportedPlatform)?;
+    let target = preflight()?;
 
     let client = download_client()?;
     let scratch = ScratchDir::beside(&target)?;
 
     // Signature first: if the manifest is not trustworthy there is no point downloading megabytes to
     // compare against it.
+    set_step(Step::Signature);
     let sums = fetch_text(&client, &asset_url(&available.tag, SUMS_ASSET))?;
     let signature = fetch_text(&client, &asset_url(&available.tag, SIG_ASSET))?;
     verify_sums(&sums, &signature)?;
     let expected_digest = digest_for(&sums, asset)?;
 
+    set_step(Step::Download);
     let payload = scratch.path().join(asset);
     let written = fetch_file(&client, &asset_url(&available.tag, asset), &payload)?;
 
+    set_step(Step::Digest);
     let actual_digest = sha256_file(&payload)?;
     if actual_digest != expected_digest {
         return Err(UpdateError::Integrity(format!(
@@ -727,7 +841,9 @@ pub fn install(available: &Available) -> Result<RestartPlan, UpdateError> {
     check_magic(&payload)?;
     infoln!("update {}: {written} bytes verified against the signed manifest", available.version);
 
-    install_verified(&payload, &target, available)
+    let plan = install_verified(&payload, &target, available)?;
+    with_progress(Progress::restarting);
+    Ok(plan)
 }
 
 /// What to launch to restart this same build in place, with nothing replaced.
@@ -789,6 +905,7 @@ fn install_verified(
     std::fs::set_permissions(payload, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| UpdateError::Local(format!("could not make the download executable: {e}")))?;
     smoke_test(payload, &available.version)?;
+    set_step(Step::Replace);
 
     // A hard link, not a copy: same inode, no bytes moved, and it survives the rename below because the
     // rename only rewrites a directory entry. It exists solely so a failing `exec` has a fallback.
@@ -819,6 +936,7 @@ fn install_verified(
     available: &Available,
 ) -> Result<RestartPlan, UpdateError> {
     smoke_test(payload, &available.version)?;
+    set_step(Step::Replace);
 
     // Two renames, because Windows' rules are asymmetric: renaming a running `.exe` is permitted (only
     // the directory entry changes), while writing to it or replacing it is refused — replacing requires
@@ -881,6 +999,7 @@ fn install_verified(
 
     let inner = extracted.join("Contents/MacOS/githoot");
     smoke_test(&inner, &available.version)?;
+    set_step(Step::Replace);
 
     let backup = with_suffix(target, ".old");
     let _ = std::fs::remove_dir_all(&backup);
@@ -1032,7 +1151,7 @@ mod tests {
         let releases = [release("v1.2.1", Some("backport")), release("v1.4.0", Some("newer"))];
         let found = newer_than(&releases, v("1.2.0")).expect("an update");
         assert_eq!(found.version, v("1.4.0"));
-        assert!(found.notes.starts_with("── 1.4.0 ──"), "got {:?}", found.notes);
+        assert_eq!(found.releases[0].version, v("1.4.0"), "{:?}", found.releases);
     }
 
     #[test]
@@ -1055,66 +1174,132 @@ mod tests {
     }
 
     /// The point of using the list endpoint: notes accumulate across every version skipped, so someone
-    /// two releases behind sees both.
+    /// two releases behind sees both, each with its own page.
     #[test]
     fn notes_accumulate_across_every_skipped_release_newest_first() {
         let releases = [
-            release("v1.4.0", Some("did the newer thing")),
             release("v1.3.0", Some("did the older thing")),
+            release("v1.4.0", Some("did the newer thing")),
             release("v1.2.0", Some("already installed, must not appear")),
         ];
-        let notes = newer_than(&releases, v("1.2.0")).expect("an update").notes;
+        let found = newer_than(&releases, v("1.2.0")).expect("an update");
+        let shown: Vec<(String, Option<&str>, &str)> =
+            found.releases.iter().map(|r| (r.version.to_string(), r.body.as_deref(), r.url.as_str())).collect();
+        assert_eq!(
+            shown,
+            [
+                ("1.4.0".to_string(), Some("did the newer thing"), "https://example.invalid/v1.4.0"),
+                ("1.3.0".to_string(), Some("did the older thing"), "https://example.invalid/v1.3.0"),
+            ]
+        );
+    }
 
-        let newer = notes.find("did the newer thing").expect("1.4.0 notes present");
-        let older = notes.find("did the older thing").expect("1.3.0 notes present");
-        assert!(newer < older, "newest first, got {notes:?}");
-        assert!(!notes.contains("must not appear"), "the installed version's own notes");
+    /// A page scrolls, so nothing is cut any more: the dialog's caps are gone with the dialog.
+    #[test]
+    fn every_release_keeps_its_whole_body() {
+        let long = (0..200).map(|i| format!("line {i} é")).collect::<Vec<_>>().join("\n");
+        let found = newer_than(&[release("v1.3.0", Some(&long))], v("1.2.0")).expect("an update");
+        assert_eq!(found.releases[0].body.as_deref(), Some(long.as_str()));
     }
 
     #[test]
-    fn a_release_with_no_body_still_gets_a_heading() {
-        let releases = [release("v1.3.0", None)];
-        let notes = newer_than(&releases, v("1.2.0")).expect("an update").notes;
-        assert!(notes.contains("── 1.3.0 ──"), "got {notes:?}");
-        assert!(notes.contains("(no notes)"), "got {notes:?}");
+    fn a_release_with_no_body_is_kept_with_none() {
+        let found = newer_than(&[release("v1.3.0", None), release("v1.4.0", Some("  "))], v("1.2.0")).expect("an update");
+        assert!(found.releases.iter().all(|r| r.body.is_none()), "{:?}", found.releases);
     }
 
+    // ── Progress ───────────────────────────────────────────────────────────
+
+    /// One install at a time: a second Install while one runs or restarts is refused, and a failed one
+    /// can be tried again.
     #[test]
-    fn short_notes_are_left_alone() {
-        let notes = cap_notes("one\ntwo", "https://example.invalid/x");
-        assert_eq!(notes, "one\ntwo", "nothing to cut, so no link appended");
+    fn only_one_install_runs_and_a_failed_one_can_be_retried() {
+        let mut p = Progress::Idle;
+        assert!(p.begin("1.4.0"));
+        assert_eq!(p, Progress::Running { version: "1.4.0".into(), step: None, done: 0, total: None });
+        assert!(!p.begin("1.4.0"), "a second click while running");
+        p = Progress::Restarting { version: "1.4.0".into() };
+        assert!(!p.begin("1.4.0"), "nor while restarting");
+        p = Progress::Failed { version: "1.4.0".into(), message: "x".into() };
+        assert!(p.begin("1.4.0"), "a failure is not a lock");
     }
 
-    /// Many short lines blow the height while staying well under the character budget, which is why
-    /// there are two limits rather than one.
+    /// Each step replaces the last and zeroes the byte count; bytes only move within the download.
     #[test]
-    fn too_many_lines_are_cut_and_the_remainder_is_counted() {
-        let long = (0..60).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let capped = cap_notes(&long, "https://example.invalid/x");
-
-        assert!(capped.lines().count() <= MAX_NOTES_LINES + 3, "got {} lines", capped.lines().count());
-        assert!(capped.contains("more line(s)"), "got {capped:?}");
-        assert!(capped.contains("https://example.invalid/x"));
-        assert!(capped.contains("line 0"), "the start must survive");
-        assert!(!capped.contains("line 59"), "the tail must be gone");
+    fn steps_advance_and_bytes_belong_to_the_download() {
+        let mut p = Progress::Idle;
+        p.begin("1.4.0");
+        p.step(Step::Signature);
+        p.bytes(10, Some(100));
+        assert_eq!(p, Progress::Running { version: "1.4.0".into(), step: Some(Step::Signature), done: 0, total: None }, "not downloading yet");
+        p.step(Step::Download);
+        p.bytes(40, Some(100));
+        assert_eq!(p, Progress::Running { version: "1.4.0".into(), step: Some(Step::Download), done: 40, total: Some(100) });
+        p.step(Step::Digest);
+        assert_eq!(p, Progress::Running { version: "1.4.0".into(), step: Some(Step::Digest), done: 0, total: None });
+        p.fail("boom");
+        assert_eq!(p, Progress::Failed { version: "1.4.0".into(), message: "boom".into() });
+        p.step(Step::Replace);
+        assert!(matches!(p, Progress::Failed { .. }), "a step after a failure does not resurrect it");
     }
 
-    /// One enormous paragraph is the case the line limit misses.
+    /// What the page polls: a state word, the version, and for a running install which step and how
+    /// many bytes. The keys are the page script's contract.
     #[test]
-    fn a_single_overlong_line_is_cut_by_the_character_limit() {
-        let long = "x".repeat(MAX_NOTES_CHARS * 2);
-        let capped = cap_notes(&long, "https://example.invalid/x");
-        assert!(capped.chars().count() < MAX_NOTES_CHARS + 120, "got {} chars", capped.chars().count());
-        assert!(capped.contains("Full notes:"));
+    fn progress_as_json_names_the_state_the_step_and_the_bytes() {
+        let j = |p: &Progress| serde_json::from_str::<serde_json::Value>(&p.json()).unwrap();
+        assert_eq!(j(&Progress::Idle), serde_json::json!({ "state": "idle" }));
+        assert_eq!(
+            j(&Progress::Running { version: "1.4.0".into(), step: Some(Step::Download), done: 5, total: Some(9) }),
+            serde_json::json!({ "state": "running", "version": "1.4.0", "step": "download", "done": 5, "total": 9 })
+        );
+        assert_eq!(
+            j(&Progress::Running { version: "1.4.0".into(), step: None, done: 0, total: None }),
+            serde_json::json!({ "state": "running", "version": "1.4.0", "step": null, "done": 0, "total": null })
+        );
+        assert_eq!(j(&Progress::Restarting { version: "1.4.0".into() }), serde_json::json!({ "state": "restarting", "version": "1.4.0" }));
+        assert_eq!(
+            j(&Progress::Failed { version: "1.4.0".into(), message: "<x>".into() }),
+            serde_json::json!({ "state": "failed", "version": "1.4.0", "message": "<x>" })
+        );
     }
 
-    /// Release notes are arbitrary UTF-8. Cutting on a byte index would panic mid-character, so the
-    /// caps count characters; this is the test that would catch a regression to `len()`.
+    /// The steps in the order `install` runs them, each with a key for the script and a label.
     #[test]
-    fn multibyte_notes_do_not_panic_when_cut() {
-        let long = "é".repeat(MAX_NOTES_CHARS * 2);
-        let capped = cap_notes(&long, "https://example.invalid/x");
-        assert!(capped.chars().count() < MAX_NOTES_CHARS + 120);
+    fn the_steps_are_listed_in_the_order_they_run() {
+        let keys: Vec<&str> = Step::ALL.iter().map(|s| s.key()).collect();
+        assert_eq!(keys, ["signature", "download", "digest", "test", "replace"]);
+        assert!(Step::ALL.iter().all(|s| !s.label().is_empty()));
+    }
+
+    /// Install names the version the page showed. Anything else, or nothing pending at all, is refused,
+    /// so nobody installs a release whose notes they did not see.
+    #[test]
+    fn install_runs_only_for_the_version_the_page_showed() {
+        let pending = newer_than(&[release("v1.4.0", Some("x"))], v("1.2.0"));
+        assert!(matches_pending("1.4.0", pending.as_ref()));
+        assert!(!matches_pending("1.3.0", pending.as_ref()), "a newer release landed after the page loaded");
+        assert!(!matches_pending("1.4.0", None), "nothing pending");
+        assert!(!matches_pending("", pending.as_ref()));
+    }
+
+    // ── The download ───────────────────────────────────────────────────────
+
+    /// The download reports as it goes, ends on the full count, and the size cap still holds.
+    #[test]
+    fn the_download_reports_its_bytes_and_keeps_the_cap() {
+        let data = vec![7u8; 200_000];
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        let n = copy_counting(&mut data.as_slice(), &mut out, u64::MAX, |done| seen.push(done)).unwrap();
+        assert_eq!((n, out.len()), (200_000, 200_000));
+        assert!(seen.len() > 1, "more than one report: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "rising: {seen:?}");
+        assert_eq!(seen.last(), Some(&200_000));
+
+        let mut out = Vec::new();
+        let n = copy_counting(&mut data.as_slice(), &mut out, 1000, |_| {}).unwrap();
+        assert_eq!((n, out.len()), (1000, 1000), "never more than the cap");
     }
 
     #[test]

@@ -262,6 +262,18 @@ fn open_status_pages() {
     });
 }
 
+/// The Install update entry was clicked: open the Updates page, where the release notes and the Install
+/// button are. Shared by both platforms. With no page to serve, the release page on GitHub is the way
+/// to update by hand.
+fn open_updates() {
+    if !serve::open_updates_page() {
+        let releases = format!("{}/releases/latest", update::REPOSITORY_URL);
+        if let Err(e) = open::that(&releases) {
+            errorln!("failed to open {releases}: {e}");
+        }
+    }
+}
+
 // ─── Linux ────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -384,10 +396,7 @@ fn main() {
     // signal entries, offering to install an update before one is known to exist would be a lie, and
     // `show_all` below would otherwise make it visible.
     let update_item = MenuItem::with_label(state::UPDATE_MENU_LABEL);
-    let update_wake_tx = wake_tx.clone();
-    update_item.connect_activate(move |_| {
-        let _ = update_wake_tx.send(scheduler::Wake::UpdateNow);
-    });
+    update_item.connect_activate(|_| open_updates());
 
     // ── Settings ─────────────────────────────────────────────────────────────
     //
@@ -1140,9 +1149,7 @@ fn main() {
                     let _ = self.wake_tx.send(scheduler::Wake::Authenticate(None));
                 }
             } else if *id == tray.update_item_id {
-                // Only asks. The download, verification and swap all happen on the update thread —
-                // see `scheduler::Wake::UpdateNow`.
-                let _ = self.wake_tx.send(scheduler::Wake::UpdateNow);
+                open_updates();
             } else if *id == tray.hoot_item_id {
                 // `muda` has already flipped the tick, so the item is the request rather than the
                 // state: read it, try to make it true, and put it back if that fails.
@@ -1248,6 +1255,7 @@ fn main() {
                     // This is only reportable *because* the check happens before exiting — otherwise the
                     // reporter has already gone.
                     errorln!("the updated binary would not start ({e}) — rolling back");
+                    update::fail(&format!("the new version would not start ({e}), so the previous one was put back"));
                     if let Some(backup) = plan.backup.as_ref() {
                         let _ = std::fs::remove_file(&plan.target);
                         let _ = std::fs::rename(backup, &plan.target);

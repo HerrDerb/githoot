@@ -3,15 +3,24 @@
 ## Updating
 
 Checked daily and at startup. When a newer release exists, a green up-arrow appears top-left and an
-**Install update** entry appears in the menu. Picking it shows the release notes of **every** version
-between yours and the newest, then asks. Nothing is ever installed silently. On confirmation it downloads,
-verifies, replaces itself and restarts. Turn the automatic check off with `updateCheck=off`.
+**Install update** entry appears in the menu. Picking it opens the **Updates** settings page, which shows
+the release notes of **every** version between yours and the newest, uncut, and one **Install X.Y.Z and
+restart** button. Pressing it is the consent; nothing is ever installed silently and nothing asks again.
+The page then follows the install in place, step by step: the signature check, the download with its
+bytes, the SHA-256, the test run of the new build, and the swap, until the app restarts and the tab loses
+its connection. A failure says why on the same page, leaves the running version untouched, and offers
+**Try again**. Turn the automatic check off with `updateCheck=off`.
 
-**To check right now**, open **Updates** in the settings pages and press **Check now**. It asks at once,
-whether or not the automatic check is on, and the page says what it found within a second or two: the
-newest release, a newer one with an **Update to X.Y.Z** button beside it, or why the check failed. A
-newer release also puts the arrow on the tray icon straight away. The button installs exactly as the
-tray's **Install update** does.
+**To check right now**, open **Updates** and press **Check now**. It asks at once, whether or not the
+automatic check is on, and the page says what it found within a second or two: the newest release, a newer
+one with its notes and the Install button, or why the check failed. A newer release also puts the arrow on
+the tray icon straight away.
+
+Install names the version the page showed. If a newer release landed after the page loaded, the install is
+refused and the page shows the new notes instead, so nobody installs a release they have not read about.
+Where the app cannot update itself (a local build, a folder it may not write, a platform with no release
+build), the page says so and links the release page instead of offering the button. With no local page to
+serve, **Install update** opens the latest release on GitHub.
 
 ## What is verified, and what that proves
 

@@ -361,23 +361,9 @@ pub fn show_device_code_prompt(subject: &str, user_code: &str, verification_uri:
     });
 }
 
-/// Asks whether to install a downloaded update, and **declines if it cannot ask**.
-///
-/// That default is the point of this wrapper existing rather than callers using `confirm` directly.
-/// Everywhere else in this app, a dialog that cannot be shown degrades to "go ahead". Here it must
-/// degrade to "stop": the action on the other side replaces the running executable, and a machine with
-/// no display server or no `zenity` would otherwise install an update on the strength of a prompt no
-/// human ever saw.
-///
-/// Blocks until answered, so call it from the update thread — never from the UI thread, and never from
-/// the poll thread, which has pull requests to fetch.
-pub fn confirm_install(title: &str, msg: &str) -> bool {
-    confirm(title, msg, "Install and restart", "Not now", false)
-}
-
 /// Asks whether to restart now so edited settings take effect.
 ///
-/// `on_unavailable: false`, for the same reason the installer passes `false`: settings are only read at
+/// `on_unavailable: false`, because a restart nobody saw coming is not a kindness: settings are only read at
 /// startup, so a restart is the *point* here — but making a tray icon vanish and come back on the
 /// strength of a prompt nobody saw is the wrong way to be helpful. With no dialog, the edits simply
 /// apply on the next start.
@@ -388,13 +374,13 @@ pub fn confirm_restart(title: &str, msg: &str) -> bool {
 /// Asks whether to register the app to start when the user signs in, and **declines if it cannot
 /// ask**.
 ///
-/// `on_unavailable: false`, the same as the installer and the restart prompt, and for a stronger
-/// reason than either: this one outlives the process. A headless box — a systemd user service, a CI
+/// `on_unavailable: false`, the same as the restart prompt, and for a stronger
+/// reason: this one outlives the process. A headless box — a systemd user service, a CI
 /// container, a bare TTY — would otherwise grant itself a permanent place in someone's session on the
 /// strength of a prompt no human ever saw, and the app would be the wrong thing to have to uninstall to
 /// get rid of it.
 ///
-/// The declining label is `Leave it off`, not the `Not now` the other two use, because this question is
+/// The declining label is `Leave it off`, not the `Not now` the others use, because this question is
 /// asked exactly once (see `autostart`) and `Not now` would promise a second chance that never comes.
 ///
 /// Blocks until answered, so call it from a background thread — `autostart::offer_on_first_run` spawns
@@ -686,8 +672,8 @@ mod confirm_tests {
 
     /// With no display server the graphical path is skipped entirely and `on_unavailable` decides.
     /// Asserted in **both** directions, because the whole hazard here is one caller silently getting
-    /// the other's default: the device-flow prompt must continue and open a browser, while the update
-    /// installer must refuse rather than replace a binary on the strength of a prompt nobody saw.
+    /// the other's default: the device-flow prompt must continue and open a browser, while a restart
+    /// must refuse rather than make the icon vanish on the strength of a prompt nobody saw.
     /// Linux-only: it is the only arm that consults the environment.
     #[test]
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -701,11 +687,10 @@ mod confirm_tests {
 
         let accepted = confirm("headless", "no display here", "accept", "decline", true);
         let declined = !confirm("headless", "no display here", "accept", "decline", false);
-        // The wrappers the updater and the settings watcher actually call, checked through their real
+        // The wrappers the settings watcher and first run actually call, checked through their real
         // entry points rather than by trusting that they pass `false` down. Both must refuse: nobody
-        // should have a binary replaced, or a tray icon vanish and come back, because of a prompt that
+        // should have a tray icon vanish and come back, or start at sign-in, because of a prompt that
         // was never on screen.
-        let install_declined = !confirm_install("headless", "no display here");
         let restart_declined = !confirm_restart("headless", "no display here");
         let autostart_declined = !confirm_autostart("headless", "no display here");
 
@@ -719,10 +704,6 @@ mod confirm_tests {
         }
         assert!(accepted, "on_unavailable=true must degrade to accepting");
         assert!(declined, "on_unavailable=false must degrade to declining");
-        assert!(
-            install_declined,
-            "confirm_install must never read an unaskable prompt as consent to replace the binary"
-        );
         assert!(
             restart_declined,
             "confirm_restart must never read an unaskable prompt as consent to restart the app"

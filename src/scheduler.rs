@@ -45,13 +45,6 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// incidents are declared by humans on a scale of minutes.
 const STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Guards against two overlapping installs.
-///
-/// A `static` rather than a loop local because the install runs on a detached thread that outlives the
-/// loop iteration that spawned it, so the flag has to live somewhere both can see. Clicking the menu
-/// entry twice is the case this exists for.
-static UPDATE_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// What the update checks have found, for the Updates page. Written by the poll thread, which runs
 /// every check, automatic or asked for; read by the page on each request.
 #[derive(Clone, Default)]
@@ -60,9 +53,11 @@ pub struct UpdateStatus {
     pub asked: Option<Instant>,
     /// The last check that landed: when, and a newer version, `None` for up to date, or why it failed.
     pub last: Option<(Instant, Result<Option<String>, String>)>,
+    /// The release the last check found, with its notes, for the page to show and install.
+    pub available: Option<crate::update::Available>,
 }
 
-static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus { asked: None, last: None });
+static UPDATE_STATUS: std::sync::Mutex<UpdateStatus> = std::sync::Mutex::new(UpdateStatus { asked: None, last: None, available: None });
 
 pub fn update_status() -> UpdateStatus {
     UPDATE_STATUS.lock().map(|s| s.clone()).unwrap_or_default()
@@ -77,16 +72,22 @@ pub fn request_update_check(wake: &std::sync::mpsc::Sender<Wake>) {
     let _ = wake.send(Wake::CheckUpdates);
 }
 
-fn record_update_check(result: Result<Option<String>, String>) {
+/// Records a check that landed. A failed check keeps the release an earlier one found: not being able
+/// to ask again says nothing about whether it is still there.
+fn record_update_check(result: Result<Option<crate::update::Available>, String>) {
     if let Ok(mut status) = UPDATE_STATUS.lock() {
         status.asked = None;
-        status.last = Some((Instant::now(), result));
+        let found = result.as_ref().map(|a| a.as_ref().map(|a| a.version.to_string())).map_err(Clone::clone);
+        if let Ok(available) = result {
+            status.available = available;
+        }
+        status.last = Some((Instant::now(), found));
     }
 }
 
 /// The last pull requests each axis's poll confirmed, indexed by `PrAxis::index`.
 ///
-/// A `static` for the same reason `UPDATE_IN_FLIGHT` is: the writer is the poll thread and the
+/// A `static` because the writer is the poll thread and the
 /// reader is a menu-click handler on the UI thread, created before the poll loop exists, so there
 /// is no value to thread through. `None` means "no confirmed list" — never "no PRs", which is
 /// `Some(vec![])`. All three axes fill their slot now; before 1.17.0 `ReviewRequested`'s stayed empty
@@ -257,12 +258,13 @@ pub enum Wake {
     /// The user asked for an update directly, by clicking the icon. Nothing on GitHub's side is
     /// changing, so one poll answers it and a burst would just be traffic.
     PollNow,
-    /// The user picked the Install update item.
+    /// The Updates page's Install button, naming the version the page showed. The page has already
+    /// claimed the install with `update::begin`.
     ///
     /// Unlike `Authenticate`, the work does **not** happen on the poll thread: downloading several
     /// megabytes would stall notification polling for as long as it takes, so this spawns a dedicated
     /// thread and returns immediately. See `run_poll_loop`.
-    UpdateNow,
+    UpdateNow(String),
     /// The Updates page's Check now: ask whether a newer release exists, now, whether or not the
     /// automatic check is on. Runs where the automatic one does, after the next poll.
     CheckUpdates,
@@ -1014,7 +1016,7 @@ fn run_poll_loop(
                             available.version
                         );
                         update_available = Some(available.version.to_string());
-                        record_update_check(Ok(Some(available.version.to_string())));
+                        record_update_check(Ok(Some(available.clone())));
                         pending_update = Some(available);
                     }
                     Ok(None) => {
@@ -1157,35 +1159,23 @@ fn run_poll_loop(
                             infoln!("asked to check for updates now");
                             check_asked = true;
                         }
-                        Wake::UpdateNow => {
-                            if let Some(available) = pending_update.clone() {
-                                // `swap` rather than load-then-store: two menu clicks in quick succession
-                                // must not both get past this.
-                                if UPDATE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-                                    infoln!("an update install is already in progress");
-                                } else {
-                                    let restart = restart.clone();
-                                    std::thread::spawn(move || {
-                                        match crate::update::install(&available) {
-                                            // Hands the plan to the UI thread, which is the only one that
-                                            // can take the tray down cleanly before the process ends.
-                                            Ok(plan) => restart(plan),
-                                            Err(crate::update::UpdateError::Declined) => {
-                                                infoln!("update declined by the user");
-                                            }
-                                            Err(e) => crate::dialog::report(
-                                                "githoot: update failed",
-                                                &format!(
-                                                    "The update was not installed and the current \
-                                                     version is untouched.\n\n{e}"
-                                                ),
-                                            ),
-                                        }
-                                        UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
-                                    });
-                                }
-                            } else {
-                                infoln!("install requested, but no update is pending");
+                        Wake::UpdateNow(asked) => {
+                            // The version the page showed, or nothing: a release that landed after the
+                            // page loaded is one whose notes nobody has read.
+                            if !crate::update::matches_pending(&asked, pending_update.as_ref()) {
+                                infoln!("install of {asked} asked for, but it is not the pending release");
+                                crate::update::fail("A different release is waiting now. Reload the page to see it.");
+                            } else if let Some(available) = pending_update.clone() {
+                                let restart = restart.clone();
+                                std::thread::spawn(move || match crate::update::install(&available) {
+                                    // Hands the plan to the UI thread, which is the only one that can
+                                    // take the tray down cleanly before the process ends.
+                                    Ok(plan) => restart(plan),
+                                    Err(e) => {
+                                        errorln!("update failed: {e}");
+                                        crate::update::fail(&e.to_string());
+                                    }
+                                });
                             }
                         }
                         // Opening settings says nothing about GitHub, so this is the one wake that does not

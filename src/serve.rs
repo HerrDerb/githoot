@@ -717,6 +717,12 @@ pub fn open_settings_page() -> bool {
     open_site(&crate::ui::Place::General)
 }
 
+/// Opens the Updates page, where a found release's notes and its Install button are. `false` when
+/// there is no listener.
+pub fn open_updates_page() -> bool {
+    open_site(&crate::ui::Place::Updates)
+}
+
 /// Opens onboarding's first step, binding the listener if need be. `false` when there is no listener.
 ///
 /// The poll loop calls it at startup when no portal is signed in; see `scheduler::needs_onboarding`.
@@ -1127,6 +1133,12 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
     use crate::ui::Place;
     // One nonce per response, for the site script every page carries and any page's own script.
     // Failing to get one drops the scripts, never widens the policy; every control still posts.
+    // The Updates page's script asking how an install stands. Before anything reads `config.txt`: an
+    // install runs whatever the settings say, and this is asked several times a second.
+    if *place == Place::Updates && query_value(request.query.as_deref(), "progress").is_some() {
+        let body = crate::update::progress().json();
+        return respond(stream, 200, "application/json", body.as_bytes(), request.body_wanted);
+    }
     let nonce = new_token().unwrap_or_default();
     let site = site_for(token, &nonce);
     let cfg = SETTINGS.get().map(|_| crate::config::Config::load(&settings_path()).0);
@@ -1141,12 +1153,18 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
             Some(c) => {
                 let status = scheduler::update_status();
                 let value = |s: &crate::setting::Setting| crate::config::value_of(&c, s.key);
+                let progress = crate::update::progress();
+                // Asked only with a release to install: it touches the install folder.
+                let blocked = status.available.as_ref().and_then(|_| crate::update::preflight().err()).map(|e| e.to_string());
                 crate::ui::updates::updates_page(
                     &site,
                     &crate::ui::updates::UpdatesView {
                         installed: crate::version::VERSION,
                         waiting: status.asked.map(|at| at.elapsed().as_secs()),
                         last: status.last.map(|(at, found)| (at.elapsed().as_secs(), found)),
+                        available: status.available.as_ref(),
+                        blocked,
+                        progress: &progress,
                         value: &value,
                         flash: flash.as_ref(),
                     },
@@ -1262,12 +1280,19 @@ fn site_post(stream: &mut TcpStream, head: &str, request: &Request, token: &str,
             }
             redirect(stream, &format!("/{token}/{}", place.path()));
         }
-        // The page's Update button: the same install as the tray's "Install update", on the release the
-        // last check found. The install asks for confirmation itself and restarts the app when done.
+        // The page's Install button, naming the version the page showed. Pressing it is the consent:
+        // nothing asks again. Claimed here, before the wake, so the page that loads next already shows
+        // the install running, and a second press is a no-op rather than a second install.
         Place::Updates if form.get("action").is_some_and(|a| a == "install") => {
-            infoln!("settings page asked to install the update");
-            if let Ok(wake) = settings.wake.lock() {
-                let _ = wake.send(scheduler::Wake::UpdateNow);
+            let asked = form.get("version").cloned().unwrap_or_default();
+            let pending = scheduler::update_status().available;
+            if !crate::update::matches_pending(&asked, pending.as_ref()) {
+                crate::ui::flash(place, 0, "A different release is waiting now. Here are its notes.".to_string());
+            } else if crate::update::begin(&asked) {
+                infoln!("settings page asked to install {asked}");
+                if let Ok(wake) = settings.wake.lock() {
+                    let _ = wake.send(scheduler::Wake::UpdateNow(asked));
+                }
             }
             redirect(stream, &format!("/{token}/{}", place.path()));
         }
@@ -2026,6 +2051,17 @@ mod tests {
             assert!(post("https://evil.com").starts_with("HTTP/1.1 403 "), "{path}");
             assert!(post("http://githoot.localhost:{PORT}").starts_with("HTTP/1.1 503 "), "{path}");
         }
+    }
+
+    /// The Updates page's script asks how an install stands, as JSON and without the page, settings or
+    /// not: an install runs whatever `config.txt` says.
+    #[test]
+    fn the_updates_page_answers_its_progress_as_json() {
+        let r = round_trip(&format!("GET /{TOKEN}/updates?progress=1 HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
+        assert!(r.starts_with("HTTP/1.1 200 OK\r\n") && r.contains("Content-Type: application/json"), "{r}");
+        let body = r.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let j: serde_json::Value = serde_json::from_str(body).expect(body);
+        assert!(j["state"].is_string(), "{j}");
     }
 
     /// The pages that show `config.txt` say so when there is no settings directory, rather than

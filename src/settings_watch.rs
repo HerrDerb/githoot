@@ -168,7 +168,7 @@ fn choose_editor(raw: Option<&str>) -> Option<String> {
 }
 
 /// Guards against a second watch. Clicking Settings three times must not arm three threads that each
-/// prompt about the same save — the same hazard `scheduler::UPDATE_IN_FLIGHT` exists for, kept here
+/// prompt about the same save — the same hazard `update::begin` guards the install against, kept here
 /// rather than at the call site so the flag cannot be set without the thread that clears it.
 static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
