@@ -83,6 +83,30 @@ Only those three are built. On anything else — Arm Linux, an Intel Mac — the
 no build for your platform rather than downloading something that will not run. `cargo build --release`
 works there if you build it yourself.
 
+## Release notes
+
+Each release's notes are GitHub's generated ones: every pull request merged since the previous tag,
+grouped by its label as `.github/release.yml` says. They are also what the Updates page shows before
+you install.
+
+| Label | Section |
+|---|---|
+| `breaking` (added on top of a category) | ⚠️ Breaking changes, listed first |
+| `feature` | New features |
+| `improvement` | Improvements |
+| `bug` | Bug fixes |
+| `security` | Security |
+| `dependencies` | Dependencies |
+| `internal` | Left out |
+
+Every pull request needs exactly one category label, plus `breaking` optionally, never with `internal`.
+The `label` check (`.github/workflows/pr-label.yml`) enforces it, and the `main` ruleset requires that
+check, CI and a pull request, so no change reaches a release without a section. A commit pushed without a
+pull request would not appear in the notes at all, which is the reason for that rule. A draft that already
+has notes, written by hand, is left as it is.
+
+Releases cut before this change list commits instead (`git log --oneline`); published releases cannot be changed.
+
 ## macOS
 
 On macOS the bare binary takes a Dock icon and an app menu, because `LSUIElement` needs a bundle. The

@@ -1,0 +1,25 @@
+# Every pull request carries exactly one category label, because the release notes are grouped by
+# them (.github/release.yml). Required on `main` by the repository's ruleset, so nothing merges
+# without one. Re-runs when a label is added or removed, and the newest run is the one that counts.
+name: PR label
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  label:
+    name: label
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test the check
+        run: bash .github/scripts/check-pr-labels.test.sh
+      - name: Check the labels
+        # Through the environment, never interpolated into the script: label names are text.
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: bash .github/scripts/check-pr-labels.sh "$LABELS"

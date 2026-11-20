@@ -2,18 +2,25 @@
 
 ## Git workflow
 
-**Commit directly to `main`. Do not create a branch.**
+**Every change goes through a pull request.** `main` is protected by the `main` ruleset: no direct
+pushes, a PR is required, and it merges only when CI and the `label` check pass. The `commit-and-pr`
+house style applies in full: branch names, commit messages, PR titles and descriptions.
 
-This overrides the usual "if HEAD is on the default branch, branch first" habit, and it overrides the
-branch-naming rules in the `commit-and-pr` skill. Only create a branch when I ask for one in that
-message, in so many words — a branch is never the right default here, and "this change looks big" is
-not a reason to make one.
+Every PR carries **exactly one** category label, because the release notes are grouped by them
+(`.github/release.yml`), and people read those notes on the Updates page before they install:
 
-Everything else in the `commit-and-pr` house style still applies to the commit itself:
+| Label | Use for |
+|---|---|
+| `feature` | Something new a user can do |
+| `improvement` | Something existing that works better |
+| `bug` | Something that did not work |
+| `security` | A security fix or hardening |
+| `dependencies` | A dependency update |
+| `internal` | CI, refactors, tests, docs, release bumps. Left out of the notes |
 
-- Uppercase imperative subject, no conventional-commit prefix, no trailing period, aim under 72 chars.
-- Subject only, no body. Reasoning belongs in a PR description, not in `git log`.
-- No issue or ticket references in the commit.
+Add **`breaking`** on top when the change makes something stop working or asks the user to act: a
+renamed or removed setting, a changed local API or `endpoint.json`, a removed route, a new system
+requirement, a changed default. Never with `internal`. Pick the label when opening the PR.
 
 Commit only when I ask. Push only when I ask.
 
@@ -22,10 +29,12 @@ Commit only when I ask. Push only when I ask.
 The tag is the source of truth for a release, not `Cargo.toml` — CI injects it as `GITHOOT_VERSION`. The
 ritual, as the history shows it:
 
-1. Land the change.
-2. A separate `Bump to X.Y.Z` commit touching only `Cargo.toml` and `Cargo.lock`.
-3. Push `main` and **wait for CI to pass on all three platforms.**
-4. Only then push the `vX.Y.Z` tag, which triggers `release.yml`.
+1. Land the changes, each through its own labelled PR.
+2. A `Bump to X.Y.Z` PR, labelled `internal`, touching only `Cargo.toml` and `Cargo.lock`. Merge it.
+3. **Wait for CI to pass on all three platforms** on `main`.
+4. Only then push the `vX.Y.Z` tag on that commit, which triggers `release.yml`. Tags are not covered by
+   the ruleset. The draft's notes are GitHub's generated ones, grouped by label; edit the draft before
+   publishing if something needs saying that no PR title says.
 
 Step 3 is not optional. Published releases are immutable — assets and the tag cannot be changed or
 deleted, and a release cannot be re-cut — so a tag pushed onto a red commit is a burnt version number.

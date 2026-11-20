@@ -1,0 +1,33 @@
+# How GitHub groups a release's notes, by the label on each merged pull request. Every pull request
+# has exactly one category label, plus `breaking` optionally (.github/workflows/pr-label.yml).
+#
+# A pull request lands in the first section that matches, so Breaking changes comes first and wins.
+# `internal` (CI, refactors, tests, docs, release bumps) is left out: these notes are what people
+# read on the Updates page before they install.
+changelog:
+  exclude:
+    labels:
+      - internal
+  categories:
+    - title: ⚠️ Breaking changes
+      labels:
+        - breaking
+    - title: New features
+      labels:
+        - feature
+    - title: Improvements
+      labels:
+        - improvement
+    - title: Bug fixes
+      labels:
+        - bug
+    - title: Security
+      labels:
+        - security
+    - title: Dependencies
+      labels:
+        - dependencies
+    # Only a pull request merged before labels were required can land here.
+    - title: Other changes
+      labels:
+        - "*"
