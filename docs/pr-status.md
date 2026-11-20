@@ -1,7 +1,24 @@
 # PR status
 
-This page describes the GitHub portal, the one every install has by default. The seam it sits behind,
-and how GitLab judges the same three bars, is in [Portals](portals.md#how-gitlab-is-judged).
+What lights each bar, for every portal, and then how the GitHub portal asks for it. The seam the
+portals sit behind, and how GitLab judges the same three bars, is in [Portals](portals.md#how-gitlab-is-judged).
+
+## The rules
+
+Each bar answers one question about your open pull requests, the same on every portal:
+
+- **Red:** is somebody waiting for your review?
+- **Green:** is one of yours approved and clear to go?
+- **Amber:** does one of yours need work before anyone can move on?
+
+A pull request lights at most one of green and amber, with work before good news. Drafts, bots and
+muted pull requests stay dark by default.
+
+Every rule behind a bar can be fine-tuned in the settings: under **Settings ▸ Open settings page ▸
+General**, each bar has a folded section where its rules are switched on or off one by one. How GitHub
+is asked follows below.
+
+## How GitHub is asked
 
 Three independent signals, each a GitHub Search query against your own pull requests:
 

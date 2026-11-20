@@ -28,14 +28,6 @@ It lights up when something needs you, and hoots once when it is news.
 - **Hear only news.** One hoot when something new needs you, silence the rest of the time. It can tell
   a new pull request from the same one handed back by a flaky search index → [the hoot](docs/hoot.md).
 
-What it is on the lookout for:
-
-| | |
-|:---:|---|
-| <img src="docs/icons/tray_review.png" height="26"> | **somebody wants your review** |
-| <img src="docs/icons/tray_merge.png" height="26"> | **your change was approved** |
-| <img src="docs/icons/tray_changes.png" height="26"> | **your change needs work** |
-
 Every lit bar has a menu entry with its count. Clicking one opens **a page GitHoot renders itself**,
 listing exactly what that bar counted, with check states and every reviewer's verdict. No forge search
 URL can express what two of the three bars count → [the PR page](docs/pr-page.md).
@@ -50,9 +42,6 @@ already on your clipboard when the dialog appears.
 | 🪟 Windows x86-64 | [`githoot.exe`](../../releases/latest) |
 | 🐧 Linux x86-64 | [`githoot`](../../releases/latest) |
 | 🍎 macOS Apple Silicon | [`githoot-macos-aarch64.zip`](../../releases/latest) |
-
-> **Coming from `githoot-tray`?** Install this one by hand, once, and rename `~/.githoot-tray/` to
-> `~/.githoot/` before its first start → [the three steps](docs/menu-and-settings.md#settings).
 
 Or build it:
 
@@ -108,111 +97,24 @@ marks around it do, and **every mark combines with every other**, so any state c
 Those are the real icons the app draws, composited at runtime from one owl, not mock-ups. Positions
 are fixed, so a bar always means the same thing → [the whole design](docs/icons.md).
 
-### How each state is decided
-
-The same rules apply to every portal, GitHub and GitLab alike. "Pull request" covers GitLab's merge
-requests. Only **open** pull requests are considered, and by default **no drafts**: a draft is work
-nobody can act on yet, so it lights nothing until it is marked ready. Each bar has its own "not a
-draft" rule; switched off, that bar judges drafts by its other rules like any pull request.
-
-**Red bar: somebody wants your review.** A pull request counts when a review has been asked of you and
-you have not given it yet.
-
-- Giving your review, whether approving, asking for changes or commenting, takes it off the bar.
-  Being asked again puts it back.
-- A request made to a team you belong to counts too (GitHub). Anyone on the team reviewing clears it.
-- Pull requests opened by bots, such as dependency updaters, are left out.
-
-**Green bar: your pull request was approved.** One of your own pull requests counts when:
-
-- at least one person has approved it,
-- nobody's request for changes still stands,
-- it does not conflict with the branch it merges into,
-- its checks have finished without failing (while they are still running it waits, on neither bar),
-- no automatic reviewer comments are still open (GitHub's Copilot, if you count those),
-- and it is not in the merge queue, where it is already on its way in. This one cannot be switched off.
-
-It reports good news, not permission to merge: your repository's required number of approvals is not
-checked. A pull request with no checks at all counts as soon as it is approved.
-
-**Amber bar: your pull request needs work.** One of your own pull requests counts when any of these is
-true:
-
-- a reviewer asked for changes and you have not handed it back to them by asking for their review
-  again,
-- it conflicts with the branch it merges into while somebody is reviewing it,
-- its checks failed while somebody is reviewing it, approved or not,
-- the automatic reviewer left comments that are still open and not outdated (GitHub's Copilot, if you
-  count those).
-
-"While somebody is reviewing it" is a rule of its own: a conflict or a red build nobody is waiting on
-blocks nobody. Switch it off to count both on any pull request of yours.
-
-**The rules can be switched** on **General**, one folded section per bar: the red and green bars are
-drawn as the path a pull request walks to them, the amber bar as its list of reasons. A green-bar rule
-switched off is ignored on both green and amber; on the red bar you can also count only requests naming
-you directly (GitHub), or let pull requests opened by bots in. The draft rules and amber's reviewer rule
-act on their own bar only.
-
-**The green and amber bars never light for the same pull request.** Anything that puts it on amber takes
-it off green: work comes before good news, and the approval is still there once the work is done.
-
-**Muted pull requests count for nothing** until the mute ends, then return as if new. Each bar can be
-switched off, which also stops it being asked for.
-
-**The hoot** plays when a pull request arrives on a bar that you have not been told about yet. Leaving a
-bar is silent, and several arriving at once are one hoot → [the hoot](docs/hoot.md).
-
-**The exclamation** means GitHoot cannot vouch for what it shows: you need to sign in, a portal reports
-an outage, or asking failed. A failed answer is never shown as zero; the last known state is kept and
-the tooltip says what went wrong.
-
-**The small dot** is an outage you acknowledged by opening its status page from the tray menu. The
-exclamation comes back when the incident changes (worse, better, or another part down), when it ends and
-a new one starts, or when GitHoot restarts. It quiets the outage only: a sign-in or a failed poll still
-raises the full mark.
-
-**The arrow** means a newer GitHoot release is available. Install it from the tray menu or from
-**Updates** in the settings pages.
+**How each bar decides**, and how to fine-tune it in the settings → [the rules](docs/pr-status.md#the-rules).
 
 ## Configure it
 
-The hoot and starting at sign-in are checkboxes under the menu's **Settings**, and take effect the
-moment you click them. Everything else is on **Settings ▸ Open settings page**, and lives in
-`~/.githoot/config.txt`, one `key=value` per line, if you prefer editing it by hand.
+The hoot and starting at sign-in are checkboxes under the menu's **Settings**. Everything else is on
+**Settings ▸ Open settings page**, saved to `~/.githoot/config.txt` if you prefer editing by hand →
+[every key, and what it costs](docs/menu-and-settings.md#settings). Switching a bar off also stops it
+being searched for.
 
-```ini
-reviewRequested=on          # the red bar
-readyToMerge=on             # the green bar (approved)
-changesRequested=on         # the amber bar
-sound=on                    # hoot when a count rises
-updateCheck=on              # check for a newer release daily
-statusComponents=Pull Requests, Actions, API Requests   # which GitHub outages may raise the mark
-```
-
-GitLab is a portal too. **Settings ▸ Portals ▸ Sign in to GitLab** adds gitlab.com and signs in, in one step. That writes
-the lines below; a self-managed instance needs them by hand, with its own OAuth application (non-confidential,
-scope `read_api`), because the one GitHoot ships is registered on gitlab.com:
-
-```ini
-portal.github.type=github
-portal.gitlab.type=gitlab
-# portal.gitlab.url=https://git.example.com          # self-managed only
-# portal.gitlab.clientId=<your application id>       # self-managed only
-```
-
-Switching a PR signal off removes its bar **and stops it being searched for**, so it costs nothing
-against the rate limit → [every key, and what it costs](docs/menu-and-settings.md#settings).
+GitLab is a portal too: **Settings ▸ Portals ▸ Sign in to GitLab** adds gitlab.com in one step. A
+self-managed instance needs its own OAuth application → [portals](docs/portals.md).
 
 ## Under the hood
 
-- **The green bar reads the reviews, not `review:approved`.** That qualifier is a projection of
-  GitHub's *review policy* verdict, and a repo that requires no reviews reports `null` on every PR,
-  approved or not. Measured: 100 of 100 PRs `null`, six carrying a real approval → [why](docs/pr-status.md).
-- **The amber bar means work required, not just changes requested.** It counts a reviewer's objection
-  that still stands *and* a merge conflict with somebody waiting on it — neither of which GitHub's own
-  search can express, since re-requesting a review does not dismiss the old verdict and `mergeable` is
-  not a qualifier at all → [both halves](docs/pr-status.md).
+- **The green bar reads the reviews, not `review:approved`**, which is `null` on every PR of a repo
+  that requires no reviews → [why](docs/pr-status.md).
+- **The amber bar means work required**: a standing objection, or a conflict or red build somebody is
+  waiting on. GitHub's search can express neither → [both halves](docs/pr-status.md).
 - **A read-only fine-grained GitHub App**, not a classic `repo` scope, which would also grant write
   to everything you can reach. Contents is deliberately not requested.
 - **The self-updater verifies a minisign signature against a key compiled into the copy you already
@@ -246,7 +148,7 @@ against the rate limit → [every key, and what it costs](docs/menu-and-settings
 
 ## Network and privacy
 
-No telemetry, no analytics, no server of its own. GitHoot talks only to the GitHub or GitLab you sign
+No telemetry, no analytics, no online service of its own; its only server is a local one. GitHoot talks only to the GitHub or GitLab you sign
 in to, their public status pages, and GitHub Releases for the daily update check (`updateCheck=off`
 turns that off). Settings, tokens and the log stay in `~/.githoot` on your computer. The full
 [privacy policy](https://herrderb.github.io/githoot/privacy) lists every connection and every file.
@@ -259,5 +161,5 @@ were drawn for this project, and the hoot, which was synthesized for it (`script
 > **Built with AI assistance** — specifically Claude (Anthropic), driven through Claude Code, which
 > did the bulk of the hauling: most of the code, the tests, the release workflow and these docs. The
 > human author set the goals, reviewed and directed the work throughout, and is accountable for what
-> ships. Roughly half the commits carry a `Co-Authored-By: Claude` trailer, so `git log` shows where
-> that help actually landed.
+> ships. Commits Claude helped with carry a `Co-Authored-By: Claude` trailer, so `git log` shows where
+> that help landed.
