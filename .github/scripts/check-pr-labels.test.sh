@@ -11,6 +11,7 @@ expect() { # expect <pass|fail> <labels json> <why>
 
 expect pass '["feature"]'                         "one category"
 expect pass '["bug","breaking"]'                  "a category plus breaking"
+expect pass '["internal","breaking"]'             "internal is in the notes too, so breaking may go with it"
 expect pass '["internal","good first issue"]'     "labels outside the set are ignored"
 for c in feature improvement bug security dependencies internal; do
   expect pass "[\"$c\"]"                          "$c alone"
@@ -18,7 +19,6 @@ done
 expect fail '[]'                                  "no label"
 expect fail '["breaking"]'                        "breaking alone is not a category"
 expect fail '["feature","bug"]'                   "two categories"
-expect fail '["internal","breaking"]'             "breaking cannot hide under internal"
 expect fail '["Feature"]'                         "names are exact"
 
 exit $failed

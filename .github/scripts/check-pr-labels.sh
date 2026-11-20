@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks a pull request's labels for the release notes: exactly one category label, plus `breaking`
-# optionally, and never `breaking` together with `internal`, because internal is left out of the notes.
+# optionally.
 #
 # Usage: check-pr-labels.sh '<labels as a JSON array of names>'
 # The sections these labels become are in .github/release.yml.
@@ -18,11 +18,6 @@ done
 
 if [ "${#found[@]}" -ne 1 ]; then
   echo "::error::A pull request needs exactly one of: ${categories[*]}. It has ${#found[@]}${found:+ (${found[*]})}. Add \`breaking\` on top when it changes something people rely on."
-  exit 1
-fi
-
-if has breaking && [ "${found[0]}" = internal ]; then
-  echo "::error::\`breaking\` with \`internal\` would hide a breaking change from the release notes. Pick the category it belongs to."
   exit 1
 fi
 
