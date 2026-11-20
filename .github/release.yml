@@ -2,12 +2,9 @@
 # has exactly one category label, plus `breaking` optionally (.github/workflows/pr-label.yml).
 #
 # A pull request lands in the first section that matches, so Breaking changes comes first and wins.
-# `internal` (CI, refactors, tests, docs, release bumps) is left out: these notes are what people
-# read on the Updates page before they install.
+# `internal` (CI, refactors, tests, docs, release bumps) is listed last: these notes are what people
+# read on the Updates page before they install, so what matters to them comes first.
 changelog:
-  exclude:
-    labels:
-      - internal
   categories:
     - title: ⚠️ Breaking changes
       labels:
@@ -27,6 +24,9 @@ changelog:
     - title: Dependencies
       labels:
         - dependencies
+    - title: Internal
+      labels:
+        - internal
     # Only a pull request merged before labels were required can land here.
     - title: Other changes
       labels:

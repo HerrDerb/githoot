@@ -97,9 +97,9 @@ you install.
 | `bug` | Bug fixes |
 | `security` | Security |
 | `dependencies` | Dependencies |
-| `internal` | Left out |
+| `internal` | Internal, listed last |
 
-Every pull request needs exactly one category label, plus `breaking` optionally, never with `internal`.
+Every pull request needs exactly one category label, plus `breaking` optionally.
 The `label` check (`.github/workflows/pr-label.yml`) enforces it, and the `main` ruleset requires that
 check, CI and a pull request, so no change reaches a release without a section. A commit pushed without a
 pull request would not appear in the notes at all, which is the reason for that rule. A draft that already

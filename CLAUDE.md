@@ -16,11 +16,11 @@ Every PR carries **exactly one** category label, because the release notes are g
 | `bug` | Something that did not work |
 | `security` | A security fix or hardening |
 | `dependencies` | A dependency update |
-| `internal` | CI, refactors, tests, docs, release bumps. Left out of the notes |
+| `internal` | CI, refactors, tests, docs, release bumps. Listed last in the notes |
 
 Add **`breaking`** on top when the change makes something stop working or asks the user to act: a
 renamed or removed setting, a changed local API or `endpoint.json`, a removed route, a new system
-requirement, a changed default. Never with `internal`. Pick the label when opening the PR.
+requirement, a changed default. Pick the label when opening the PR.
 
 Commit only when I ask. Push only when I ask.
 
