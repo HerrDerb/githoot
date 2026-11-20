@@ -1,0 +1,44 @@
+# Reruns the macOS test job, on main and on pull requests, when it fails or is cancelled, at most twice.
+#
+# GitHub's macOS runners sometimes never pick a job up: it sits queued and is cancelled with no step
+# run, which a step-level retry cannot catch. Only macOS: a red Linux or Windows job should stay red
+# at once. `workflow_run` fires only from the default branch, so this file does nothing until merged.
+# It never checks out or runs pull request code, so the write token is safe with forks too.
+name: CI retry (macOS)
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun-macos:
+    # Attempts 1 and 2 may be rerun; attempt 3 is final.
+    if: >-
+      contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion)
+      && github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rerun the macOS job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          # A newer push to the branch cancels the older run on purpose (ci.yml's concurrency group).
+          if [ "$(gh api "repos/$HEAD_REPO/commits/$HEAD_BRANCH" -q .sha)" != "$SHA" ]; then
+            echo "$HEAD_BRANCH has moved on; not rerunning an old commit"
+            exit 0
+          fi
+          job=$(gh run view "$RUN" -R "$GITHUB_REPOSITORY" --json jobs \
+            -q '.jobs[] | select(.name == "test (macos-15)" and (.conclusion == "failure" or .conclusion == "cancelled")) | .databaseId')
+          if [ -z "$job" ]; then
+            echo "macOS passed; nothing to rerun"
+            exit 0
+          fi
+          gh run rerun "$RUN" -R "$GITHUB_REPOSITORY" --job "$job"
