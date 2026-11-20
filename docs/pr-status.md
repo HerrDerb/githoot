@@ -5,58 +5,18 @@ portals sit behind, and how GitLab judges the same three bars, is in [Portals](p
 
 ## The rules
 
-The same rules apply to every portal, GitHub and GitLab alike. "Pull request" covers GitLab's merge
-requests. Only **open** pull requests are considered, and by default **no drafts**: a draft is work
-nobody can act on yet, so it lights nothing until it is marked ready. Each bar has its own "not a
-draft" rule; switched off, that bar judges drafts by its other rules like any pull request.
+Each bar answers one question about your open pull requests, the same on every portal:
 
-**Red bar: somebody wants your review.** A pull request counts when a review has been asked of you and
-you have not given it yet.
+- **Red:** is somebody waiting for your review?
+- **Green:** is one of yours approved and clear to go?
+- **Amber:** does one of yours need work before anyone can move on?
 
-- Giving your review, whether approving, asking for changes or commenting, takes it off the bar.
-  Being asked again puts it back.
-- A request made to a team you belong to counts too (GitHub). Anyone on the team reviewing clears it.
-- Pull requests opened by bots, such as dependency updaters, are left out.
+A pull request lights at most one of green and amber, with work before good news. Drafts, bots and
+muted pull requests stay dark by default.
 
-**Green bar: your pull request was approved.** One of your own pull requests counts when:
-
-- at least one person has approved it,
-- nobody's request for changes still stands,
-- it does not conflict with the branch it merges into,
-- its checks have finished without failing (while they are still running it waits, on neither bar),
-- no automatic reviewer comments are still open (GitHub's Copilot, if you count those),
-- and it is not in the merge queue, where it is already on its way in. This one cannot be switched off.
-
-It reports good news, not permission to merge: your repository's required number of approvals is not
-checked. A pull request with no checks at all counts as soon as it is approved.
-
-**Amber bar: your pull request needs work.** One of your own pull requests counts when any of these is
-true:
-
-- a reviewer asked for changes and you have not handed it back to them by asking for their review
-  again,
-- it conflicts with the branch it merges into while somebody is reviewing it,
-- its checks failed while somebody is reviewing it, approved or not,
-- the automatic reviewer left comments that are still open and not outdated (GitHub's Copilot, if you
-  count those).
-
-"While somebody is reviewing it" is a rule of its own: a conflict or a red build nobody is waiting on
-blocks nobody. Switch it off to count both on any pull request of yours.
-
-**The rules can be switched** on **General**, one folded section per bar: the red and green bars are
-drawn as the path a pull request walks to them, the amber bar as its list of reasons. A green-bar rule
-switched off is ignored on both green and amber; on the red bar you can also count only requests naming
-you directly (GitHub), or let pull requests opened by bots in. The draft rules and amber's reviewer rule
-act on their own bar only.
-
-**The green and amber bars never light for the same pull request.** Anything that puts it on amber takes
-it off green: work comes before good news, and the approval is still there once the work is done.
-
-**Muted pull requests count for nothing** until the mute ends, then return as if new. Each bar can be
-switched off, which also stops it being asked for.
-
-**The hoot** plays when a pull request arrives on a bar that you have not been told about yet. Leaving a
-bar is silent, and several arriving at once are one hoot → [the hoot](hoot.md).
+Every rule behind a bar can be fine-tuned in the settings: under **Settings ▸ Open settings page ▸
+General**, each bar has a folded section where its rules are switched on or off one by one. How GitHub
+is asked follows below.
 
 ## How GitHub is asked
 

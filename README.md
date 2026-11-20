@@ -97,8 +97,7 @@ marks around it do, and **every mark combines with every other**, so any state c
 Those are the real icons the app draws, composited at runtime from one owl, not mock-ups. Positions
 are fixed, so a bar always means the same thing → [the whole design](docs/icons.md).
 
-**How each bar decides**, for GitHub and GitLab alike: drafts, bots, teams, checks, conflicts and
-every rule you can switch → [the rules](docs/pr-status.md#the-rules).
+**How each bar decides**, and how to fine-tune it in the settings → [the rules](docs/pr-status.md#the-rules).
 
 ## Configure it
 
