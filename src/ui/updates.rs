@@ -45,7 +45,7 @@ const PROGRESS_SCRIPT: &str = "(function(){\
 var card=document.querySelector('[data-progress-url]');if(!card)return;\
 var url=card.getAttribute('data-progress-url'),order=['signature','download','digest','test','replace'];\
 function q(s){return card.querySelector(s);}\
-function mb(n){return (n/1048576).toFixed(1);}\
+function mb(n){return (n/1e6).toFixed(1);}\
 function mark(step){var i=order.indexOf(step);card.querySelectorAll('[data-step]').forEach(function(li){\
 var j=order.indexOf(li.getAttribute('data-step'));li.className=step===null?'':(j<i?'done':(j===i?'now':''));});}\
 function note(t){q('[data-note]').textContent=t;}\
@@ -85,6 +85,8 @@ const STYLE: &str = "<style>\
 .notes h4{margin:.4rem 0 .2rem;font-size:.9rem;color:var(--dim);font-weight:600}\
 .notes p{margin:.2rem 0;overflow-wrap:anywhere}\
 .notes .release-link{font-size:.85rem}\
+.notes a{color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:.2em}\
+.notes a:hover{text-decoration-thickness:2px}\
 </style>";
 
 pub fn updates_page(site: &Site, v: &UpdatesView) -> String {
@@ -229,8 +231,9 @@ fn index(step: Step) -> usize {
     Step::ALL.iter().position(|s| *s == step).unwrap_or(0)
 }
 
+/// Megabytes of a million bytes, the way GitHub states an asset's size.
 fn mb(bytes: u64) -> String {
-    format!("{:.1}", bytes as f64 / 1_048_576.0)
+    format!("{:.1}", bytes as f64 / 1_000_000.0)
 }
 
 /// Every release between this version and the newest, newest first, each under its version.
@@ -258,16 +261,20 @@ fn whats_new(a: &Available) -> String {
 /// an image is reduced to its alt text (the CSP would block it anyway). Headings sit under the
 /// version's own `<h3>`, and a single line break is kept, because the bodies are one commit per line.
 pub fn notes_html(markdown: &str) -> String {
-    use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd};
+    use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, TextMergeStream};
 
     let safe = |url: &str| {
         let lower = url.trim().to_ascii_lowercase();
         lower.starts_with("https://") || lower.starts_with("http://")
     };
-    // Which link starts were kept, so each end matches its start.
+    // Which link starts were kept, so each end matches its start. Text inside a link is not linked again.
     let mut links: Vec<bool> = Vec::new();
-    let events = Parser::new_ext(markdown, Options::ENABLE_STRIKETHROUGH).filter_map(|event| match event {
+    // Merged, because the parser splits text at entities and some punctuation, and an address cut in
+    // two would be linked as two halves.
+    let parsed = TextMergeStream::new(Parser::new_ext(markdown, Options::ENABLE_STRIKETHROUGH));
+    let events = parsed.filter_map(|event| match event {
         Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
+        Event::Text(text) if links.is_empty() => Some(Event::Html(CowStr::from(autolink(&text)))),
         Event::SoftBreak => Some(Event::HardBreak),
         // The alt text arrives as the image's own text events, so dropping the tag keeps the words.
         Event::Start(Tag::Image { .. }) | Event::End(TagEnd::Image) => None,
@@ -290,6 +297,66 @@ pub fn notes_html(markdown: &str) -> String {
     let mut out = String::new();
     pulldown_cmark::html::push_html(&mut out, events);
     out
+}
+
+/// Escapes `text` and links what GitHub's generated notes leave bare: an address, shortened to `#21`
+/// for a pull request or issue and to its range for a compare, and an `@name`, linked to that profile.
+///
+/// Hand-rolled rather than a regex crate: two shapes, scanned once. An address ends at whitespace or a
+/// quote or angle bracket, and sentence punctuation at its end stays outside the link. A mention needs
+/// a start of text or a space or bracket before the `@`, which keeps an email address plain.
+fn autolink(text: &str) -> String {
+    let link = |href: &str, label: &str| {
+        format!("<a href=\"{}\" rel=\"noreferrer\" target=\"_blank\">{}</a>", esc(href), esc(label))
+    };
+    let mut out = String::new();
+    let mut rest = text;
+    let mut prev: Option<char> = None;
+    while let Some(c) = rest.chars().next() {
+        let at_word_start = prev.is_none_or(|p| p.is_whitespace() || "([{".contains(p));
+        if rest.starts_with("https://") || rest.starts_with("http://") {
+            let end = rest.find(|c: char| c.is_whitespace() || "\"'<>".contains(c)).unwrap_or(rest.len());
+            let mut url = &rest[..end];
+            while let Some(last) = url.chars().last().filter(|l| ".,;:!?)]".contains(*l)) {
+                // A closing bracket the address itself opened is part of it.
+                if (last == ')' && url.matches('(').count() >= url.matches(')').count())
+                    || (last == ']' && url.matches('[').count() >= url.matches(']').count())
+                {
+                    break;
+                }
+                url = &url[..url.len() - last.len_utf8()];
+            }
+            out.push_str(&link(url, &short_label(url)));
+            prev = url.chars().last();
+            rest = &rest[url.len()..];
+            continue;
+        }
+        if c == '@' && at_word_start {
+            let name: String = rest[1..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+            let name = name.trim_end_matches('-');
+            if !name.is_empty() && !name.starts_with('-') && name.len() <= 39 {
+                out.push_str(&link(&format!("https://github.com/{name}"), &format!("@{name}")));
+                prev = name.chars().last();
+                rest = &rest[1 + name.len()..];
+                continue;
+            }
+        }
+        out.push_str(&esc(&c.to_string()));
+        prev = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// What an address reads as: `#21` for a GitHub pull request or issue, the range for a compare, and
+/// the address itself for anything else.
+fn short_label(url: &str) -> String {
+    let parts: Vec<&str> = url.trim_end_matches('/').split('/').collect();
+    match parts.as_slice() {
+        ["https:", "", "github.com", _, _, "pull" | "issues", n] if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => format!("#{n}"),
+        ["https:", "", "github.com", _, _, "compare", range] if !range.is_empty() => range.to_string(),
+        _ => url.to_string(),
+    }
 }
 
 fn ago_text(secs: u64) -> String {
@@ -461,7 +528,7 @@ mod tests {
     #[test]
     fn a_running_install_shows_its_steps_and_follows_them_in_place() {
         let a = found("3.2.0", &[("3.2.0", Some("x"))]);
-        let p = Progress::Running { version: "3.2.0".into(), step: Some(Step::Download), done: 1_048_576, total: Some(4_194_304) };
+        let p = Progress::Running { version: "3.2.0".into(), step: Some(Step::Download), done: 1_000_000, total: Some(11_800_000) };
         let html = with(&a, &p, None);
         assert!(html.contains(r#"data-progress-url="/tok/updates?progress=1""#), "{html}");
         for step in Step::ALL {
@@ -469,7 +536,8 @@ mod tests {
         }
         assert!(html.contains(r#"<li data-step="signature" class="done">"#), "{html}");
         assert!(html.contains(r#"<li data-step="download" class="now">"#), "{html}");
-        assert!(html.contains("1.0 / 4.0 MB"), "{html}");
+        assert!(html.contains("1.0 / 11.8 MB"), "megabytes of a million, as GitHub counts them: {html}");
+        assert!(!PROGRESS_SCRIPT.contains("1048576") && PROGRESS_SCRIPT.contains("1e6"), "the script counts the same way");
         assert!(!html.contains("data-install>"), "nothing to press while it runs");
         assert!(html.contains("data-retry hidden>"), "the retry waits, hidden, for a failure: {html}");
         assert!(html.contains("<script nonce=\"n\">") && html.contains("progress"), "{html}");
@@ -492,5 +560,49 @@ mod tests {
         let html = with(&a, &Progress::Restarting { version: "3.2.0".into() }, None);
         assert!(html.contains("Restarting into 3.2.0"), "{html}");
         assert!(!html.contains("data-install>") && html.contains("data-retry hidden>"), "{html}");
+    }
+
+    /// GitHub's generated notes end each line with the pull request's address and name its author with
+    /// an `@`. Both become links, the address shortened to the number GitHub itself shows.
+    #[test]
+    fn pull_requests_and_people_in_the_notes_become_short_links() {
+        let html = notes_html("* Let Agents run on macOS by @HerrDerb in https://github.com/HerrDerb/githoot/pull/21");
+        assert!(html.contains(r#"<a href="https://github.com/HerrDerb/githoot/pull/21" rel="noreferrer" target="_blank">#21</a>"#), "{html}");
+        assert!(html.contains(r#"by <a href="https://github.com/HerrDerb" rel="noreferrer" target="_blank">@HerrDerb</a> in"#), "{html}");
+        assert!(!html.contains(">https://github.com/HerrDerb/githoot/pull/21<"), "{html}");
+        // Underscores and brackets are where the parser splits text, which must not split an address.
+        let html = notes_html("in https://github.com/my_org/a_repo/pull/7 by @some-one_x");
+        assert!(html.contains(r#"<a href="https://github.com/my_org/a_repo/pull/7" rel="noreferrer" target="_blank">#7</a>"#), "{html}");
+        let html = notes_html("see https://example.com/a?x=1&amp;y=2 now");
+        assert!(html.contains(r#"<a href="https://example.com/a?x=1&amp;y=2" rel="noreferrer" target="_blank">https://example.com/a?x=1&amp;y=2</a> now"#), "{html}");
+    }
+
+    /// A compare address names its range, any other address is linked as written, and punctuation that
+    /// ends a sentence stays outside the link.
+    #[test]
+    fn other_addresses_become_links_and_keep_their_punctuation_outside() {
+        let html = notes_html("**Full Changelog**: https://github.com/HerrDerb/githoot/compare/v3.4.0...v3.5.0");
+        assert!(html.contains(r#"<a href="https://github.com/HerrDerb/githoot/compare/v3.4.0...v3.5.0" rel="noreferrer" target="_blank">v3.4.0...v3.5.0</a>"#), "{html}");
+        let html = notes_html("See https://example.com/docs. And (https://example.com/x), too.");
+        assert!(html.contains(r#"<a href="https://example.com/docs" rel="noreferrer" target="_blank">https://example.com/docs</a>. And"#), "{html}");
+        assert!(html.contains(r#"(<a href="https://example.com/x" rel="noreferrer" target="_blank">https://example.com/x</a>), too."#), "{html}");
+    }
+
+    /// Only a real mention is one: an address with an `@` in it is not, nor is text inside a link or a
+    /// code span, and nothing here opens a way to inject anything.
+    #[test]
+    fn only_real_mentions_and_addresses_are_linked() {
+        let html = notes_html("Mail ugg@example.com, run `curl https://x.test/@me`, read [the docs](https://example.com/@a).");
+        assert!(!html.contains(r#"href="https://github.com/example"#), "an email is not a mention: {html}");
+        assert!(html.contains("<code>curl https://x.test/@me</code>"), "code stays code: {html}");
+        assert_eq!(html.matches("<a ").count(), 1, "the one written link, nothing nested in it: {html}");
+        let html = notes_html("https://evil.test/\"onmouseover=\"x and @a\"b");
+        assert!(!html.contains("\"onmouseover"), "{html}");
+    }
+
+    /// The release page link looks like a link, which the card's own rule for links would otherwise undo.
+    #[test]
+    fn links_in_the_notes_look_like_links() {
+        assert!(STYLE.contains(".notes a{color:var(--ink);text-decoration:underline"), "{STYLE}");
     }
 }
