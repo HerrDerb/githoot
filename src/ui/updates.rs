@@ -269,10 +269,18 @@ pub fn notes_html(markdown: &str) -> String {
     };
     // Which link starts were kept, so each end matches its start. Text inside a link is not linked again.
     let mut links: Vec<bool> = Vec::new();
+    // Inside an HTML comment that has not closed yet. A block comment arrives one line per event.
+    let mut in_comment = false;
     // Merged, because the parser splits text at entities and some punctuation, and an address cut in
     // two would be linked as two halves.
     let parsed = TextMergeStream::new(Parser::new_ext(markdown, Options::ENABLE_STRIKETHROUGH));
     let events = parsed.filter_map(|event| match event {
+        // A comment is dropped: GitHub's generated notes open with one, invisible there. Any other raw
+        // HTML is shown as the text it is.
+        Event::Html(raw) | Event::InlineHtml(raw) if in_comment || raw.trim_start().starts_with("<!--") => {
+            in_comment = !raw.contains("-->");
+            None
+        }
         Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
         Event::Text(text) if links.is_empty() => Some(Event::Html(CowStr::from(autolink(&text)))),
         Event::SoftBreak => Some(Event::HardBreak),
@@ -604,5 +612,22 @@ mod tests {
     #[test]
     fn links_in_the_notes_look_like_links() {
         assert!(STYLE.contains(".notes a{color:var(--ink);text-decoration:underline"), "{STYLE}");
+    }
+
+    /// GitHub's generated notes open with an HTML comment naming the config they came from. On GitHub it
+    /// is invisible; here raw HTML is shown as text, so a comment would sit on top of the notes. Comments
+    /// are dropped, on one line or several, while other raw HTML still shows as text.
+    #[test]
+    fn html_comments_in_the_notes_are_dropped_not_shown() {
+        let html = notes_html(
+            "<!-- Release notes generated using configuration in .github/release.yml at main -->\n\n## What's Changed\n* A thing",
+        );
+        assert!(!html.contains("Release notes generated") && !html.contains("&lt;!--"), "{html}");
+        assert!(html.contains("<h4>What&#39;s Changed</h4>") && html.contains("A thing"), "{html}");
+        let html = notes_html("<!--\nspread over\nlines\n-->\n\nafter");
+        assert!(!html.contains("spread over") && !html.contains("--&gt;") && html.contains("after"), "{html}");
+        let html = notes_html("before <!-- inline --> after");
+        assert!(!html.contains("inline") && html.contains("before") && html.contains("after"), "{html}");
+        assert!(notes_html("<b>x</b>").contains("&lt;b&gt;"), "other raw HTML still shows as text");
     }
 }
