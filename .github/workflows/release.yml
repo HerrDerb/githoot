@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  # ── 1. Create the release as a DRAFT, with the commit changelog ──────────────
+  # ── 1. Create the release as a DRAFT, with the grouped changelog ─────────────
   #
   # A draft, not a published release, and that ordering is the whole shape of this workflow.
   #
@@ -50,18 +50,14 @@ jobs:
               done \
             | head -1 || true)
 
+          # GitHub's own notes: the pull requests merged since the previous tag, grouped by their labels
+          # as .github/release.yml says. Commits pushed without a pull request do not appear, which is
+          # why every change goes through one.
+          ARGS=(-f tag_name="$CURRENT_TAG")
           if [ -n "$PREV_TAG" ]; then
-            RANGE="${PREV_TAG}..${CURRENT_TAG}"
-            HEADING="## Changes since ${PREV_TAG}"
-          else
-            RANGE="$CURRENT_TAG"
-            HEADING="## All commits"
+            ARGS+=(-f previous_tag_name="$PREV_TAG")
           fi
-
-          # Re-tagging an already-released commit yields an empty range, which would otherwise
-          # produce a release body containing nothing but a heading.
-          CHANGELOG=$(git log ${RANGE} --oneline --no-merges)
-          printf '%s\n\n%s\n' "$HEADING" "${CHANGELOG:-_No new commits in this range._}" > notes.md
+          gh api "repos/${{ github.repository }}/releases/generate-notes" "${ARGS[@]}" --jq .body > notes.md
 
           # The release may already exist. Creating one through the GitHub UI, or with
           # `gh release create`, also creates the tag, and that tag push is what triggers this
