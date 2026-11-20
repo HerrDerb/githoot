@@ -192,6 +192,9 @@ font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}\
 main{max-width:56rem;margin:0 auto;padding:1.5rem 1rem 3rem}\
 header{display:flex;align-items:center;gap:.75rem;margin-bottom:.25rem}\
 header img{width:36px;height:36px}\
+.cog{margin:0 -.3rem 0 auto;display:flex;padding:.3rem;border-radius:6px;color:var(--dim)}\
+.cog:hover,.cog:focus-visible{color:var(--ink);background:var(--line)}\
+.cog svg{width:20px;height:20px}\
 h1{font-size:1.4rem;margin:0;font-weight:650}\
 .rule{height:4px;border-radius:2px;background:var(--accent);margin:.6rem 0 1.25rem}\
 .sub{color:var(--dim);font-size:.85rem;margin:0}\
@@ -644,9 +647,12 @@ pub fn axis_page(
     h.push_str("</head>\n<body>\n<main>\n");
 
     h.push_str(&format!(
-        "<header><img src=\"/{}/owl.png\" alt=\"\" width=\"36\" height=\"36\"><h1>{}</h1></header>\n",
-        esc(token),
-        esc(title)
+        "<header><img src=\"/{t}/owl.png\" alt=\"\" width=\"36\" height=\"36\"><h1>{}</h1>\
+         <a class=\"cog\" href=\"/{t}/{}\" aria-label=\"Settings\" title=\"Settings\">{}</a></header>\n",
+        esc(title),
+        crate::ui::Place::General.path(),
+        crate::ui::GEAR,
+        t = esc(token),
     ));
 
     h.push_str(&format!(
@@ -1095,7 +1101,8 @@ mod tests {
     #[test]
     fn every_outbound_link_is_noreferrer() {
         let html = page(Some(&[entry("https://github.com/o/r/pull/1")]));
-        let links = html.matches("<a ").count();
+        // Outbound only: a link back into GitHoot, like the settings gear, leaves nothing to leak.
+        let links = html.matches("<a ").count() - html.matches("<a class=\"cog\" href=\"/").count();
         assert!(links > 0, "the page should link somewhere");
         assert_eq!(html.matches("noreferrer").count(), links, "every link, not most of them");
     }
@@ -1341,6 +1348,17 @@ mod tests {
         let accent_at = html.find(&format!("--accent:{hex}")).expect("the axis colour");
         let sheet_at = html.find("--bg:").expect("the sheet");
         assert!(accent_at > sheet_at, "the accent has to win, so it has to come last");
+    }
+
+    /// Every list carries a gear in its header, the last thing in it, linking to the settings.
+    #[test]
+    fn every_list_links_to_the_settings_from_its_header() {
+        for axis in PrAxis::ALL {
+            let html = axis_page(axis, &[group(Some(&[]))], None, "tok", NOW, "n", None);
+            let header = &html[html.find("<header>").unwrap()..html.find("</header>").unwrap()];
+            let link = format!("<a class=\"cog\" href=\"/tok/general\" aria-label=\"Settings\" title=\"Settings\">{}</a>", crate::ui::GEAR);
+            assert!(header.ends_with(&link), "{axis:?}: {header}");
+        }
     }
 
     #[test]
