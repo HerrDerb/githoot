@@ -129,7 +129,7 @@ pub fn build_client() -> reqwest::Result<Client> {
 /// `rateLimit` is free — GitHub does not charge a query for asking what it cost — and it is the only
 /// way to turn "three of these per cycle is probably fine" into a number. See `RateLimit`.
 const PR_REVIEWS_DOCUMENT: &str = "\
-query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!,$labels:Int!){\
+query($q:String!,$hits:Int!,$reviews:Int!,$labels:Int!,$copilot:Boolean!){\
   rateLimit{limit cost remaining}\
   search(query:$q,type:ISSUE,first:$hits){\
     nodes{...on PullRequest{\
@@ -140,7 +140,8 @@ query($q:String!,$hits:Int!,$reviews:Int!,$threads:Int!,$labels:Int!){\
       statusCheckRollup{state}\
       latestOpinionatedReviews(first:$reviews){nodes{state author{login}}}\
       reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login} ...on Team{slug}}}}\
-      reviewThreads(first:$threads){nodes{isResolved isOutdated comments(first:1){nodes{author{login}}}}}\
+      reviewThreads(first:0) @include(if:$copilot){totalCount}\
+      copilotReviews: reviews(last:$reviews,states:[COMMENTED]) @include(if:$copilot){nodes{isCopilotCodeReview author{login}}}\
     }}\
   }\
 }";
@@ -234,23 +235,82 @@ fn poll_reviewed_all(
     token: &str,
     query: &str,
     parsers: &[BodyParser],
-    threads: bool,
+    copilot: bool,
 ) -> Vec<PollResponse> {
-    let body = serde_json::json!({
-        "query": PR_REVIEWS_DOCUMENT,
-        "variables": {
-            "q": query,
-            "hits": SEARCH_HITS_CAP,
-            "reviews": CHANGES_REVIEWS_CAP,
-            // `0` where the axis has no use for them, keeping the document's most expensive
-            // connection off the queries that would only pay for it.
-            "threads": if threads { REVIEW_THREADS_CAP } else { 0 },
-            "labels": LABELS_CAP,
-        },
-    });
-    let request = client.post(graphql_url).json(&body);
+    let first = serde_json::json!({ "query": PR_REVIEWS_DOCUMENT, "variables": search_variables(query, copilot) });
+    let (status, headers, body) = match post(client.post(graphql_url).json(&first), token) {
+        Ok(answer) => answer,
+        Err(why) => return failed(parsers, &why),
+    };
+    let poll_interval = header_u64(&headers, "x-poll-interval").map(Duration::from_secs);
 
-    send_all(request, token, parsers)
+    // The second step only follows a clean first answer. Anything else is judged as it stands, and
+    // says exactly what it always did.
+    let body = if copilot && status.is_success() {
+        match with_copilot_threads(client, graphql_url, token, body) {
+            Ok(body) => body,
+            Err(ThreadsFailed::Answered(answer)) => {
+                let (status, headers, body) = *answer;
+                return classify_all(status, &headers, &body, unix_now(), parsers)
+                    .into_iter()
+                    .map(|result| PollResponse { result, poll_interval })
+                    .collect();
+            }
+            Err(ThreadsFailed::Unusable(why)) => return failed(parsers, &why),
+        }
+    } else {
+        body
+    };
+
+    classify_all(status, &headers, &body, unix_now(), parsers)
+        .into_iter()
+        .map(|result| PollResponse { result, poll_interval })
+        .collect()
+}
+
+/// A raw answer: status, headers and body.
+type Answer = (StatusCode, HeaderMap, String);
+
+/// Reads the threads `copilot_thread_ids` picks out of `body` and splices them in. No pull request
+/// needing them means no second request at all.
+///
+fn with_copilot_threads(
+    client: &Client,
+    graphql_url: &str,
+    token: &str,
+    body: String,
+) -> Result<String, ThreadsFailed> {
+    let ids = copilot_thread_ids(&body);
+    if ids.is_empty() {
+        return Ok(body);
+    }
+    let second = serde_json::json!({
+        "query": PR_THREADS_DOCUMENT,
+        "variables": { "ids": ids, "threads": REVIEW_THREADS_CAP },
+    });
+    let (status, headers, threads) =
+        post(client.post(graphql_url).json(&second), token).map_err(ThreadsFailed::Unusable)?;
+    if !status.is_success() {
+        return Err(ThreadsFailed::Answered(Box::new((status, headers, threads))));
+    }
+    splice_threads(&body, &threads).map_err(ThreadsFailed::Unusable)
+}
+
+/// Why the second request could not complete the first answer.
+enum ThreadsFailed {
+    /// It was answered, but not with a success (a 401, a rate limit, a 5xx): classified like any other
+    /// answer, so it says the same as it would have on the first request.
+    Answered(Box<Answer>),
+    /// It could not be sent, or its answer could not be used.
+    Unusable(String),
+}
+
+/// The same failure for every bar that shared a request.
+fn failed(parsers: &[BodyParser], why: &str) -> Vec<PollResponse> {
+    parsers
+        .iter()
+        .map(|_| PollResponse { result: PollResult::Transient(why.to_string()), poll_interval: None })
+        .collect()
 }
 
 /// Shared request/response plumbing.
@@ -258,45 +318,22 @@ fn poll_reviewed_all(
 /// No conditional request. `If-None-Match` existed for `/notifications`, the one endpoint that
 /// answered `304`; GraphQL is a POST and never does, so the whole ETag path went with the
 /// notification feature in 2.0.0.
-/// Sends one request and judges its answer once per parser, in order.
+/// Sends one request and returns its answer, logging what it cost.
 ///
-/// A failure is the same failure for every bar that shared the request: one 401 is every bar's 401.
-fn send_all(
-    request: reqwest::blocking::RequestBuilder,
-    token: &str,
-    parsers: &[BodyParser],
-) -> Vec<PollResponse> {
-    let request = request
+/// `Err` is a transport failure, which carries no headers and so no interval to learn from.
+fn post(request: reqwest::blocking::RequestBuilder, token: &str) -> Result<Answer, String> {
+    let response = request
         .header(ACCEPT, "application/vnd.github+json")
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header(USER_AGENT, AGENT);
-
-    let response = match request.send() {
-        Ok(response) => response,
-        // A transport failure carries no headers, so there is no interval to learn from it.
-        Err(e) => {
-            return parsers
-                .iter()
-                .map(|_| PollResponse {
-                    result: PollResult::Transient(format!("request failed: {e}")),
-                    poll_interval: None,
-                })
-                .collect();
-        }
-    };
-
+        .header(USER_AGENT, AGENT)
+        .send()
+        .map_err(|e| format!("request failed: {e}"))?;
     let status = response.status();
     let headers = response.headers().clone();
-    let poll_interval = header_u64(&headers, "x-poll-interval").map(Duration::from_secs);
-
     let body = response.text().unwrap_or_default();
-
     log_rate_limit(&body);
-    classify_all(status, &headers, &body, unix_now(), parsers)
-        .into_iter()
-        .map(|result| PollResponse { result, poll_interval })
-        .collect()
+    Ok((status, headers, body))
 }
 
 // ─── The changes-requested payload ────────────────────────────────────────────
@@ -435,6 +472,8 @@ struct Label {
 
 #[derive(Debug, Deserialize)]
 struct ThreadConnection {
+    /// Absent in the first request, which asks only for `totalCount`; see `PR_THREADS_DOCUMENT`.
+    #[serde(default)]
     nodes: Vec<Option<ReviewThread>>,
 }
 
@@ -453,9 +492,13 @@ struct CommentConnection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Comment {
     /// `None` for a comment whose author has since been deleted.
     author: Option<Author>,
+    /// GitHub's own word that Copilot wrote it. Absent from older payloads, hence the login fallback.
+    #[serde(default)]
+    is_copilot_code_review: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -591,8 +634,10 @@ fn copilot_unresolved(pr: &PullRequestNode) -> u32 {
                 .comments
                 .iter()
                 .flat_map(|c| c.nodes.iter().flatten())
-                .filter_map(|comment| comment.author.as_ref())
-                .any(|author| is_copilot(&author.login))
+                .any(|comment| {
+                    comment.is_copilot_code_review == Some(true)
+                        || comment.author.as_ref().is_some_and(|author| is_copilot(&author.login))
+                })
         })
         .count() as u32
 }
@@ -869,6 +914,96 @@ fn log_rate_limit(body: &str) {
             limit.limit.map_or_else(|| "?".to_string(), |v| v.to_string()),
         );
     }
+}
+
+/// The second request: the review threads of the pull requests that can have an open Copilot thread.
+///
+/// Threads are the only place GitHub keeps whether a finding is still open (`isResolved`), and they
+/// are by far the most expensive thing to read: 20 threads under each of 100 hits made up 20 of the
+/// 24 points the own-PR search cost, every minute, whether Copilot ever looked at a pull request or
+/// not. So the first request only says *where* threads are worth reading (`copilotReviews` and the
+/// thread count) and this one reads them for those pull requests alone. See `copilot_thread_ids`.
+const PR_THREADS_DOCUMENT: &str = "\
+query($ids:[ID!]!,$threads:Int!){\
+  rateLimit{limit cost remaining}\
+  nodes(ids:$ids){...on PullRequest{\
+    id reviewThreads(first:$threads){nodes{isResolved isOutdated comments(first:1){nodes{isCopilotCodeReview author{login}}}}}\
+  }}\
+}";
+
+/// The first request's variables. `copilot` asks for the marks that decide the second request, and
+/// is off for the red bar, which never reads threads, and with the Copilot rule off. Off, the
+/// `@include` leaves the fields out of the request, and GitHub charges nothing for them.
+fn search_variables(query: &str, copilot: bool) -> serde_json::Value {
+    serde_json::json!({
+        "q": query,
+        "hits": SEARCH_HITS_CAP,
+        "reviews": CHANGES_REVIEWS_CAP,
+        "labels": LABELS_CAP,
+        "copilot": copilot,
+    })
+}
+
+/// The pull requests in a first answer whose threads are worth the second request: Copilot left a
+/// review on it, and it has threads at all. A Copilot review that found nothing leaves no thread.
+///
+/// Copilot is recognised by `isCopilotCodeReview` or, failing that, by its login (`is_copilot`): the
+/// field is new and undocumented, and the login is what this app matched on before it existed.
+/// Anything unreadable here simply asks for no threads, which errs quiet like everything else.
+fn copilot_thread_ids(body: &str) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(nodes) = json.pointer("/data/search/nodes").and_then(|n| n.as_array()) else {
+        return Vec::new();
+    };
+    nodes
+        .iter()
+        .filter(|node| node.pointer("/reviewThreads/totalCount").and_then(|c| c.as_u64()).unwrap_or(0) > 0)
+        .filter(|node| {
+            node.pointer("/copilotReviews/nodes").and_then(|n| n.as_array()).is_some_and(|reviews| {
+                reviews.iter().any(|review| {
+                    review.get("isCopilotCodeReview").and_then(|f| f.as_bool()) == Some(true)
+                        || review.pointer("/author/login").and_then(|l| l.as_str()).is_some_and(is_copilot)
+                })
+            })
+        })
+        .filter_map(|node| node.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Puts the second answer's threads onto their pull requests in the first answer, so the bars judge
+/// one body exactly as if a single request had carried every thread.
+///
+/// `Err` when the second answer is not a clean one: judging without the threads that were asked for
+/// would quietly drop Copilot's open findings, so the caller fails the poll instead and the bars
+/// hold what they last knew.
+fn splice_threads(body: &str, threads_body: &str) -> Result<String, String> {
+    let threads: serde_json::Value =
+        serde_json::from_str(threads_body).map_err(|e| format!("unparseable review threads payload: {e}"))?;
+    if let Some(errors) = threads.get("errors").and_then(|e| e.as_array()).filter(|e| !e.is_empty()) {
+        let joined = errors.iter().filter_map(|e| e.get("message")?.as_str()).collect::<Vec<_>>().join("; ");
+        return Err(format!("GraphQL reported an error reading review threads: {joined}"));
+    }
+    let by_id: std::collections::HashMap<&str, &serde_json::Value> = threads
+        .pointer("/data/nodes")
+        .and_then(|n| n.as_array())
+        .ok_or("the review threads payload carried no pull requests")?
+        .iter()
+        .filter_map(|node| Some((node.get("id")?.as_str()?, node.get("reviewThreads")?)))
+        .collect();
+
+    let mut json: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("unparseable PR review payload: {e}"))?;
+    if let Some(nodes) = json.pointer_mut("/data/search/nodes").and_then(|n| n.as_array_mut()) {
+        for node in nodes {
+            let id = node.get("id").and_then(|id| id.as_str()).map(str::to_string);
+            if let Some(found) = id.as_deref().and_then(|id| by_id.get(id)) {
+                node["reviewThreads"] = (*found).clone();
+            }
+        }
+    }
+    Ok(json.to_string())
 }
 
 /// [`classify_with`] for several bars judging one response.
@@ -1520,6 +1655,93 @@ mod tests {
 
     const COPILOT: &str = "copilot-pull-request-reviewer";
 
+    // ── Copilot's threads, in two steps ───────────────────────────────────────
+
+    /// A first-step hit: no threads, only how many there are and who left a commenting review.
+    /// `review` is `(isCopilotCodeReview, login)` of one such review, if any.
+    fn marked(id: &str, threads: u32, review: Option<(Option<bool>, &str)>) -> String {
+        let reviews = match review {
+            Some((field, login)) => {
+                let field = field.map_or(String::new(), |f| format!(r#""isCopilotCodeReview":{f},"#));
+                format!(r#"{{{field}"author":{{"login":"{login}"}}}}"#)
+            }
+            None => String::new(),
+        };
+        format!(
+            r#"{{"id":"{id}","url":"https://github.com/o/r/pull/{id}","latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"reviewThreads":{{"totalCount":{threads}}},"copilotReviews":{{"nodes":[{reviews}]}}}}"#
+        )
+    }
+
+    /// Only a pull request Copilot reviewed *and* that has threads at all can have an open Copilot
+    /// thread, so only those are worth the second, expensive request.
+    #[test]
+    fn threads_are_fetched_only_where_copilot_reviewed_and_left_threads() {
+        let body = payload(&[
+            marked("A", 2, Some((Some(true), COPILOT))),
+            marked("B", 0, Some((Some(true), COPILOT))),
+            marked("C", 3, Some((Some(false), "alice"))),
+            marked("D", 3, None),
+        ]);
+        assert_eq!(copilot_thread_ids(&body), vec!["A".to_string()]);
+    }
+
+    /// The field is new and undocumented, so the login match stays as a fallback in both directions.
+    #[test]
+    fn copilot_is_recognised_by_its_field_or_by_its_login() {
+        let body = payload(&[
+            marked("A", 1, Some((None, "copilot-pull-request-reviewer[bot]"))),
+            marked("B", 1, Some((Some(true), "Copilot"))),
+        ]);
+        assert_eq!(copilot_thread_ids(&body), vec!["A".to_string(), "B".to_string()]);
+    }
+
+    /// The second answer's threads land on their pull requests, and the bars then judge exactly what
+    /// a single request carrying every thread would have shown.
+    #[test]
+    fn spliced_threads_judge_like_threads_fetched_in_one_request() {
+        let body = payload(&[marked("A", 1, Some((Some(true), COPILOT))), marked("B", 0, None)]);
+        let threads = format!(
+            r#"{{"data":{{"nodes":[{{"id":"A","reviewThreads":{{"nodes":[{{"isResolved":false,"isOutdated":false,"comments":{{"nodes":[{{"isCopilotCodeReview":true,"author":{{"login":"{COPILOT}"}}}}]}}}}]}}}}]}}}}"#
+        );
+        let merged = splice_threads(&body, &threads).expect("a clean second answer must splice");
+        assert_eq!(changes_count(&merged), 1, "A has an open Copilot thread, B nothing");
+    }
+
+    /// A first answer nobody needed threads for still parses: a thread count without threads is no work.
+    #[test]
+    fn a_thread_count_without_threads_is_no_work() {
+        assert_eq!(changes_count(&payload(&[marked("A", 4, None)])), 0);
+    }
+
+    #[test]
+    fn a_second_answer_with_errors_does_not_splice() {
+        let body = payload(&[marked("A", 1, Some((Some(true), COPILOT)))]);
+        assert!(splice_threads(&body, r#"{"data":null,"errors":[{"message":"boom"}]}"#).is_err());
+        assert!(splice_threads(&body, "not json").is_err());
+    }
+
+    /// Copilot's own field marks a thread as its, whatever its login reads.
+    #[test]
+    fn a_thread_marked_as_copilots_counts_whatever_its_login() {
+        let body = payload(&[
+            r#"{"url":"https://github.com/o/r/pull/1","latestOpinionatedReviews":{"nodes":[]},"reviewRequests":{"nodes":[]},"reviewThreads":{"nodes":[{"isResolved":false,"isOutdated":false,"comments":{"nodes":[{"isCopilotCodeReview":true,"author":{"login":"Copilot"}}]}}]}}"#
+                .to_string(),
+        ]);
+        assert_eq!(changes_count(&body), 1);
+    }
+
+    /// The marks are asked for only where they are used: never by the red bar, and not at all with
+    /// the Copilot rule off. Off, the fields are left out of the request entirely and cost nothing.
+    #[test]
+    fn the_copilot_marks_are_requested_only_where_used() {
+        assert_eq!(search_variables("q", true)["copilot"], true);
+        assert_eq!(search_variables("q", false)["copilot"], false);
+        assert!(search_variables("q", true).get("threads").is_none(), "threads are the second request's");
+        assert!(PR_REVIEWS_DOCUMENT.contains("@include(if:$copilot)"));
+        assert!(!PR_REVIEWS_DOCUMENT.contains("isResolved"), "no thread is read in the first request");
+        assert!(PR_THREADS_DOCUMENT.contains("isCopilotCodeReview"));
+    }
+
     /// Copilot reviews by *commenting* — it never approves and never requests changes — so
     /// `latestOpinionatedReviews` drops it entirely and `still_on_you` has never been able to see it.
     /// An unresolved thread is the only verdict it leaves.
@@ -2116,11 +2338,12 @@ mod tests {
 
     // ── The document ──────────────────────────────────────────────────────────
 
-    /// The document has to fetch every field `entry_from` reads, or the page silently renders a row
-    /// of unknowns and nothing fails loudly enough to notice.
+    /// The documents have to fetch every field `entry_from` reads, or the page silently renders a row
+    /// of unknowns and nothing fails loudly enough to notice. The threads come from the second one.
     #[test]
     fn the_query_document_fetches_every_field_the_entry_reads() {
         for field in [
+            "id",
             "url",
             "title",
             "number",
@@ -2129,9 +2352,6 @@ mod tests {
             "nameWithOwner",
             "statusCheckRollup",
             "mergeable",
-            "reviewThreads",
-            "isResolved",
-            "isOutdated",
             "rateLimit",
             "headRefName",
             "labels",
@@ -2140,6 +2360,9 @@ mod tests {
             "changedFiles",
         ] {
             assert!(PR_REVIEWS_DOCUMENT.contains(field), "document is missing {field}");
+        }
+        for field in ["id", "reviewThreads", "isResolved", "isOutdated", "isCopilotCodeReview", "rateLimit"] {
+            assert!(PR_THREADS_DOCUMENT.contains(field), "threads document is missing {field}");
         }
     }
 

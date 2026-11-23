@@ -110,10 +110,15 @@ comment you never read and the bar goes quiet on it; erring quiet is the directi
 else here. Only the thread's *first* comment is read, so a human replying to Copilot does not make the
 thread theirs. Capped at the first 20 threads per pull request, undercounting like every other cap.
 
+Threads are the most expensive thing GitHoot reads, so they are read in a second, small request, and
+only for the pull requests where Copilot left a review and there are threads at all. Copilot is
+recognised by GitHub's `isCopilotCodeReview` mark, or by its login where that mark is missing. If the
+second request fails, the poll fails and the bars keep what they last knew, rather than dropping
+Copilot's findings for a cycle.
+
 Switch it off with `copilotReviews=off` if your team reads Copilot as suggestions rather than work. That
-also stops the two axes asking GitHub for review threads at all, which is the most expensive part of the
-query — the other axis never asks, since Copilot's comments are the PR author's problem, not its
-reviewer's.
+also stops GitHoot asking for review threads at all. The red bar never asks, since Copilot's comments
+are the PR author's problem, not its reviewer's.
 
 **Only a definite `CONFLICTING` counts.** GitHub computes `mergeable` lazily and answers `UNKNOWN` until
 something asks; asking is what starts the computation, so a cold poll sees `UNKNOWN` and the next cycle
