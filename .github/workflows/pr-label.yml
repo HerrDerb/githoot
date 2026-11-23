@@ -7,8 +7,14 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
+# Deliberately no `concurrency` with `cancel-in-progress`: a cancelled run leaves a `label` check reading
+# CANCELLED on the commit, and GitHub counts that as a failure of the required check even when a newer
+# run passed, so the pull request stays blocked. Every run reads the current labels instead (below), so
+# overlapping runs agree rather than race.
+
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   label:
@@ -19,7 +25,13 @@ jobs:
       - name: Test the check
         run: bash .github/scripts/check-pr-labels.test.sh
       - name: Check the labels
-        # Through the environment, never interpolated into the script: label names are text.
+        # The labels as they are now, read from the API, not from the event: an `opened` event carries
+        # the labels the pull request had at that instant, which for `gh pr create --label` is none,
+        # and a re-run replays that same payload. Passed through the environment, never interpolated
+        # into the script: label names are text.
         env:
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-        run: bash .github/scripts/check-pr-labels.sh "$LABELS"
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" --jq '[.[].name]')
+          bash .github/scripts/check-pr-labels.sh "$labels"
