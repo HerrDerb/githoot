@@ -86,9 +86,8 @@ const MERGE_QUERY: &str = "is:pr author:@me state:open draft:false archived:fals
 /// this bar is news on one; before the conflict half existed the qualifier was absent, and a draft
 /// carrying a changes-requested review did count.
 ///
-/// This is character-for-character `MERGE_QUERY`. Two identical searches per cycle is real waste,
-/// and collapsing them into one poll feeding two rules is worth doing — it is left alone here only so
-/// a semantic change and a poll-loop refactor do not land in the same commit.
+/// This is character-for-character `MERGE_QUERY`, and kept a constant of its own so either bar can
+/// change its question alone. While the two agree, `searches` sends the question once for both bars.
 const CHANGES_QUERY: &str = "is:pr author:@me state:open draft:false archived:false";
 
 /// The red bar's query as the rules shape it: requests naming you only (`user-review-requested`) with
@@ -121,10 +120,41 @@ fn pr_query(axis: PrAxis, rules: super::types::Rules, ignored: &[String]) -> Str
     if skip_drafts { query } else { query.replace(" draft:false", "") }
 }
 
+/// One search a poll sends, and the bars whose dots its hits decide.
+#[derive(Debug, PartialEq, Eq)]
+struct Search {
+    query: String,
+    axes: Vec<PrAxis>,
+}
+
+/// The searches one poll sends for the `axes` that are wanted.
+///
+/// The green and amber bars both search your own open pull requests, with the same document and the
+/// same variables, so while their query strings agree one search feeds both and each bar judges the
+/// same hits by its own rule. That request is the most expensive one this app sends (it reads review
+/// threads, see `api::REVIEW_THREADS_CAP`), and GitHub's GraphQL budget is per user, shared with every
+/// other tool acting for them. The two part only when one bar's draft rule is off and the other's on.
+fn searches(axes: [bool; 3], rules: super::types::Rules, ignored: &[String]) -> Vec<Search> {
+    let mut out: Vec<Search> = Vec::new();
+    for axis in PrAxis::ALL.into_iter().filter(|axis| axes[axis.index()]) {
+        let query = pr_query(axis, rules, ignored);
+        // Only bars judged from your own pull requests share: the red bar sends other variables
+        // (no review threads), so an equal string alone would not make it the same request.
+        let shared = out.iter_mut().find(|s| {
+            s.query == query && s.axes.iter().all(|a| pr_judge(*a) != PrJudge::EveryHit)
+        });
+        match shared {
+            Some(search) if pr_judge(axis) != PrJudge::EveryHit => search.axes.push(axis),
+            _ => out.push(Search { query, axes: vec![axis] }),
+        }
+    }
+    out
+}
+
 /// Which rule decides whether a search hit counts for an axis.
 ///
 /// All three axes issue the same GraphQL document against the same endpoint, so what separates
-/// them is the query string and this. Split out of `poll_axis` because that does I/O and therefore
+/// them is the query string and this. Split out of `poll_search` because that does I/O and therefore
 /// cannot be asserted, while *which rule judges which axis* is exactly the kind of decision that
 /// should not be able to change unnoticed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -148,27 +178,33 @@ fn pr_judge(axis: PrAxis) -> PrJudge {
     }
 }
 
-/// Issues one axis's poll.
+/// Sends one search and answers each of its bars, in the order of `search.axes`.
 ///
-/// One endpoint, one document, three query strings and three rules. The three `api::poll_*`
-/// functions stay separate rather than collapsing into one call taking the rule, because each carries
-/// the argument for why its rule exists — and on this axis that argument is the asset, not the code.
-pub fn poll_axis(
+/// One endpoint, one document, three rules. The three `api::poll_*` functions stay separate rather
+/// than collapsing into one call taking the rule, because each carries the argument for why its rule
+/// exists — and on this axis that argument is the asset, not the code. The one pairing is green with
+/// amber, which `searches` only forms when their requests are identical.
+fn poll_search(
     client: &Client,
     endpoints: &Endpoints,
     token: &str,
-    axis: PrAxis,
+    search: &Search,
     rules: super::types::Rules,
-    ignored: &[String],
-) -> PollResponse {
-    let query = pr_query(axis, rules, ignored);
-    let query = query.as_str();
-    match pr_judge(axis) {
-        PrJudge::EveryHit => api::poll_review_requested(client, &endpoints.graphql, token, query),
-        PrJudge::Approved => api::poll_approved(client, &endpoints.graphql, token, query, rules),
-        PrJudge::StillOnYou => {
-            api::poll_changes_requested(client, &endpoints.graphql, token, query, rules)
+) -> Vec<PollResponse> {
+    let url = endpoints.graphql.as_str();
+    let query = search.query.as_str();
+    match search.axes.as_slice() {
+        [PrAxis::ReadyToMerge, PrAxis::ChangesRequested] => {
+            api::poll_approved_and_changes_requested(client, url, token, query, rules).into()
         }
+        axes => axes
+            .iter()
+            .map(|&axis| match pr_judge(axis) {
+                PrJudge::EveryHit => api::poll_review_requested(client, url, token, query),
+                PrJudge::Approved => api::poll_approved(client, url, token, query, rules),
+                PrJudge::StillOnYou => api::poll_changes_requested(client, url, token, query, rules),
+            })
+            .collect(),
     }
 }
 
@@ -378,24 +414,25 @@ impl Portal for GitHubPortal {
         let mut outcome = PollOutcome::default();
         let rules = self.options.rules.now();
         let ignored = self.options.rules.ignored_authors();
-        for axis in PrAxis::ALL {
-            if !axes[axis.index()] {
-                continue;
-            }
-            let response = match self.store.as_ref() {
-                Some(store) => {
-                    poll_axis(&self.http, &self.endpoints, store.token(), axis, rules, &ignored)
-                }
+        for search in searches(axes, rules, &ignored) {
+            let responses = match self.store.as_ref() {
+                Some(store) => poll_search(&self.http, &self.endpoints, store.token(), &search, rules),
                 // Asked without a credential. Not a transport failure and not a zero: the one
                 // variant that says "only a sign-in fixes this".
-                None => PollResponse { result: PollResult::Unauthorized, poll_interval: None },
+                None => search
+                    .axes
+                    .iter()
+                    .map(|_| PollResponse { result: PollResult::Unauthorized, poll_interval: None })
+                    .collect(),
             };
-            // Only a failed axis speaks up, and it says what actually failed — this is the line
-            // that would have shown the merge-ready `statusCheckRollup` FORBIDDEN outright.
-            if let Some(detail) = response.result.problem() {
-                errorln!("{axis:?} PR poll: {detail}");
+            for (axis, response) in search.axes.iter().zip(responses) {
+                // Only a failed axis speaks up, and it says what actually failed — this is the line
+                // that would have shown the merge-ready `statusCheckRollup` FORBIDDEN outright.
+                if let Some(detail) = response.result.problem() {
+                    errorln!("{axis:?} PR poll: {detail}");
+                }
+                outcome.axes[axis.index()] = Some(response);
             }
-            outcome.axes[axis.index()] = Some(response);
         }
         outcome
     }
@@ -498,6 +535,58 @@ mod tests {
                 let q = pr_query(other, rules, &[]);
                 assert_eq!(q.contains("draft:false"), other != axis, "{axis:?} off, {other:?}: {q}");
                 assert!(q.contains("state:open") && q.contains("archived:false"), "the rest stays: {q}");
+            }
+        }
+    }
+
+    fn searched(axes: [bool; 3], rules: crate::portal::types::Rules) -> Vec<Vec<PrAxis>> {
+        searches(axes, rules, &[]).into_iter().map(|s| s.axes).collect()
+    }
+
+    /// The saving itself: green and amber ask the identical question, so one poll asks it once.
+    #[test]
+    fn green_and_amber_share_one_search_while_their_queries_agree() {
+        use crate::portal::types::Rules;
+        assert_eq!(
+            searched([true, true, true], Rules::ALL),
+            vec![vec![PrAxis::ReviewRequested], vec![PrAxis::ReadyToMerge, PrAxis::ChangesRequested]]
+        );
+        let both_drafts_in = Rules { skip_drafts_green: false, skip_drafts_amber: false, ..Rules::ALL };
+        assert_eq!(
+            searched([false, true, true], both_drafts_in),
+            vec![vec![PrAxis::ReadyToMerge, PrAxis::ChangesRequested]]
+        );
+    }
+
+    /// One bar's draft rule off and the other's on: different questions, so two searches.
+    #[test]
+    fn green_and_amber_search_apart_once_their_draft_rules_differ() {
+        use crate::portal::types::Rules;
+        let rules = Rules { skip_drafts_green: false, ..Rules::ALL };
+        assert_eq!(
+            searched([false, true, true], rules),
+            vec![vec![PrAxis::ReadyToMerge], vec![PrAxis::ChangesRequested]]
+        );
+    }
+
+    /// The red bar's query is about other people's pull requests and never joins the others, and a
+    /// bar that is not wanted is never searched for.
+    #[test]
+    fn only_wanted_bars_are_searched() {
+        use crate::portal::types::Rules;
+        assert_eq!(searched([true, false, false], Rules::ALL), vec![vec![PrAxis::ReviewRequested]]);
+        assert_eq!(searched([false, false, true], Rules::ALL), vec![vec![PrAxis::ChangesRequested]]);
+        assert!(searched([false, false, false], Rules::ALL).is_empty());
+    }
+
+    /// Each search carries the query its bars would have sent on their own.
+    #[test]
+    fn a_shared_search_sends_the_query_each_bar_would_have_sent() {
+        use crate::portal::types::Rules;
+        let list = ignored(&["octo-intern"]);
+        for search in searches([true, true, true], Rules::ALL, &list) {
+            for axis in &search.axes {
+                assert_eq!(search.query, pr_query(*axis, Rules::ALL, &list), "{axis:?}");
             }
         }
     }
