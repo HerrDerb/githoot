@@ -193,8 +193,27 @@ pub fn poll_approved(client: &Client, graphql_url: &str, token: &str, query: &st
     )
 }
 
-/// The shared GraphQL request behind `poll_changes_requested` and `poll_approved`: same document, same
-/// variables, one parser apiece.
+/// Polls your own open pull requests once for both the green and the amber bar, in that order.
+///
+/// Their requests are identical whenever their queries are (see `searches` in the portal), so asking
+/// once and judging the hits twice gives each bar exactly the answer its own request would have, at
+/// half the cost of the most expensive request this app sends.
+pub fn poll_approved_and_changes_requested(
+    client: &Client,
+    graphql_url: &str,
+    token: &str,
+    query: &str,
+    rules: Rules,
+) -> [PollResponse; 2] {
+    let green: BodyParser = &|body| parse_reviewed(body, |pr| approved(pr, rules));
+    let amber: BodyParser = &|body| parse_reviewed(body, |pr| work_required(pr, rules));
+    let [green, amber]: [PollResponse; 2] = poll_reviewed_all(client, graphql_url, token, query, &[green, amber], rules.bot_comments)
+        .try_into()
+        .expect("two parsers, two answers");
+    [green, amber]
+}
+
+/// The shared GraphQL request behind every axis: same document, same variables, one parser apiece.
 fn poll_reviewed(
     client: &Client,
     graphql_url: &str,
@@ -203,6 +222,20 @@ fn poll_reviewed(
     parse_ok: BodyParser,
     threads: bool,
 ) -> PollResponse {
+    poll_reviewed_all(client, graphql_url, token, query, &[parse_ok], threads)
+        .pop()
+        .expect("one parser, one answer")
+}
+
+/// [`poll_reviewed`] for several bars judging one request's hits.
+fn poll_reviewed_all(
+    client: &Client,
+    graphql_url: &str,
+    token: &str,
+    query: &str,
+    parsers: &[BodyParser],
+    threads: bool,
+) -> Vec<PollResponse> {
     let body = serde_json::json!({
         "query": PR_REVIEWS_DOCUMENT,
         "variables": {
@@ -217,7 +250,7 @@ fn poll_reviewed(
     });
     let request = client.post(graphql_url).json(&body);
 
-    send(request, token, parse_ok)
+    send_all(request, token, parsers)
 }
 
 /// Shared request/response plumbing.
@@ -225,11 +258,14 @@ fn poll_reviewed(
 /// No conditional request. `If-None-Match` existed for `/notifications`, the one endpoint that
 /// answered `304`; GraphQL is a POST and never does, so the whole ETag path went with the
 /// notification feature in 2.0.0.
-fn send(
+/// Sends one request and judges its answer once per parser, in order.
+///
+/// A failure is the same failure for every bar that shared the request: one 401 is every bar's 401.
+fn send_all(
     request: reqwest::blocking::RequestBuilder,
     token: &str,
-    parse_ok: BodyParser,
-) -> PollResponse {
+    parsers: &[BodyParser],
+) -> Vec<PollResponse> {
     let request = request
         .header(ACCEPT, "application/vnd.github+json")
         .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -240,10 +276,13 @@ fn send(
         Ok(response) => response,
         // A transport failure carries no headers, so there is no interval to learn from it.
         Err(e) => {
-            return PollResponse {
-                result: PollResult::Transient(format!("request failed: {e}")),
-                poll_interval: None,
-            }
+            return parsers
+                .iter()
+                .map(|_| PollResponse {
+                    result: PollResult::Transient(format!("request failed: {e}")),
+                    poll_interval: None,
+                })
+                .collect();
         }
     };
 
@@ -253,7 +292,11 @@ fn send(
 
     let body = response.text().unwrap_or_default();
 
-    PollResponse { result: classify_with(status, &headers, &body, unix_now(), parse_ok), poll_interval }
+    log_rate_limit(&body);
+    classify_all(status, &headers, &body, unix_now(), parsers)
+        .into_iter()
+        .map(|result| PollResponse { result, poll_interval })
+        .collect()
 }
 
 // ─── The changes-requested payload ────────────────────────────────────────────
@@ -756,15 +799,6 @@ fn parse_reviewed(body: &str, keep: impl Fn(&PullRequestNode) -> bool) -> Result
         .data
         .ok_or_else(|| "GraphQL answered with neither data nor errors".to_string())?;
 
-    if let Some(limit) = &data.rate_limit {
-        infoln!(
-            "GraphQL rate limit: cost {}, {} of {} remaining",
-            limit.cost.map_or_else(|| "?".to_string(), |v| v.to_string()),
-            limit.remaining.map_or_else(|| "?".to_string(), |v| v.to_string()),
-            limit.limit.map_or_else(|| "?".to_string(), |v| v.to_string()),
-        );
-    }
-
     let counted: Vec<&PullRequestNode> =
         data.search.nodes.iter().flatten().filter(|pr| keep(pr)).collect();
     let count = counted.len() as u32;
@@ -817,6 +851,35 @@ fn classify_with(
         },
         Err(why) => PollResult::Transient(why),
     }
+}
+
+/// Logs what one request cost and what is left, once per request however many bars judge it.
+///
+/// Read apart from the parsers for exactly that reason: logged from each, a shared answer would
+/// read as two requests, and this line is how the cost of polling gets measured.
+fn log_rate_limit(body: &str) {
+    let Ok(GraphQlResponse { data: Some(data), .. }) = serde_json::from_str::<GraphQlResponse>(body) else {
+        return;
+    };
+    if let Some(limit) = &data.rate_limit {
+        infoln!(
+            "GraphQL rate limit: cost {}, {} of {} remaining",
+            limit.cost.map_or_else(|| "?".to_string(), |v| v.to_string()),
+            limit.remaining.map_or_else(|| "?".to_string(), |v| v.to_string()),
+            limit.limit.map_or_else(|| "?".to_string(), |v| v.to_string()),
+        );
+    }
+}
+
+/// [`classify_with`] for several bars judging one response.
+fn classify_all(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &str,
+    now: u64,
+    parsers: &[BodyParser],
+) -> Vec<PollResult> {
+    parsers.iter().map(|parse| classify_with(status, headers, body, now, *parse)).collect()
 }
 
 /// GitHub's documented precedence for how long to wait after being limited.
@@ -1149,6 +1212,27 @@ mod tests {
     }
 
     // ── Approved body parsing ─────────────────────────────────────────────────
+
+    /// One answer judged for two bars must say, for each, exactly what that bar's own request would
+    /// have: sharing the request is a saving, never a change in what the bars show.
+    #[test]
+    fn one_body_judged_twice_matches_two_separate_answers() {
+        let green: BodyParser = &|b| parse_reviewed(b, |pr| approved(pr, Rules::ALL));
+        let amber: BodyParser = &|b| parse_reviewed(b, |pr| work_required(pr, Rules::ALL));
+        let body = payload(&[
+            reviewed("https://github.com/o/r/pull/1", &["APPROVED"]),
+            reviewed("https://github.com/o/r/pull/2", &["CHANGES_REQUESTED"]),
+        ]);
+        for status in [StatusCode::OK, StatusCode::UNAUTHORIZED, StatusCode::BAD_GATEWAY] {
+            let both = classify_all(status, &headers(&[]), &body, 0, &[green, amber]);
+            assert_eq!(both.len(), 2, "{status}");
+            assert_eq!(format!("{:?}", both[0]), format!("{:?}", classify_with(status, &headers(&[]), &body, 0, green)), "{status}");
+            assert_eq!(format!("{:?}", both[1]), format!("{:?}", classify_with(status, &headers(&[]), &body, 0, amber)), "{status}");
+        }
+        let ok = classify_all(StatusCode::OK, &headers(&[]), &body, 0, &[green, amber]);
+        assert!(matches!(ok[0], PollResult::Fresh { count: Some(1), .. }), "green: {:?}", ok[0]);
+        assert!(matches!(ok[1], PollResult::Fresh { count: Some(1), .. }), "amber: {:?}", ok[1]);
+    }
 
     /// Shorthand: classify an APPROVED (GraphQL) response.
     fn approved_resp(status: StatusCode, h: &HeaderMap, body: &str, now: u64) -> PollResult {
