@@ -73,4 +73,7 @@ and a Defender exclusion is a decision to make deliberately rather than a step i
 | 🪟 Windows | `tray-icon` + `winit`, no console window |
 | 🍎 macOS | `tray-icon` + `winit`, `LSUIElement` bundle, no Dock icon |
 
-Launching a second copy shows a notice and exits (Windows; macOS handles it itself for bundles).
+Launching a second copy exits at once. Windows shows a notice; macOS exits quietly and writes a line to
+`~/.githoot/log.txt`, since its second copy is usually macOS reopening apps at login next to the Launch
+Agent, and a dialog at every login would only nag. With `logLevel=info`, every start also logs who
+launched it.

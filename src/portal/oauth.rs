@@ -182,6 +182,18 @@ pub fn valid_saved_token(path: &Path) -> Option<String> {
     read_credential(path).filter(|c| !c.needs_refresh()).map(|c| c.access_token)
 }
 
+/// A credential another process saved after rotating the refresh token this one just had rejected.
+///
+/// A GitHub App's refresh token is single-use, so when two copies of the app hold the same one, the
+/// first to refresh wins and the other is rejected. That rejection does not mean the user is signed
+/// out: the winner has already written a fresh credential to the shared file. Adopted only when it
+/// carries a different refresh token (the same one would be the credential that was just rejected) and
+/// is still usable.
+fn rotated_elsewhere(path: &Path, rejected_refresh_token: &str) -> Option<Credential> {
+    read_credential(path)
+        .filter(|c| c.refresh_token.as_deref() != Some(rejected_refresh_token) && !c.needs_refresh())
+}
+
 /// Deletes the saved credential. Nothing there is not an error: the outcome is the same.
 pub fn forget_saved(token_path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(token_path) {
@@ -400,6 +412,10 @@ impl TokenStore {
                 Ok(Some(Self { config: config.clone(), credential: saved, http }))
             }
             Err(e) => {
+                if let Some(credential) = rotated_elsewhere(&config.token_path, &refresh_token) {
+                    errorln!("{} refresh was rejected ({e}), but another copy had already renewed the credential — using that", config.portal_name);
+                    return Ok(Some(Self { config: config.clone(), credential, http }));
+                }
                 errorln!("saved {} credential was rejected ({e}) — waiting for the user to authorize", config.portal_name);
                 Ok(None)
             }
@@ -455,6 +471,11 @@ impl TokenStore {
             // click, so the caller retries next cycle rather than demanding authorization.
             Err(e @ AuthError::Network(_)) => Err(e),
             Err(e) => {
+                if let Some(credential) = rotated_elsewhere(&self.config.token_path, &refresh_token) {
+                    errorln!("{} refresh was rejected ({e}), but another copy had already renewed the credential — using that", self.config.portal_name);
+                    self.credential = credential;
+                    return Ok(());
+                }
                 errorln!("{} credential refresh was rejected ({e}) — authorization required", self.config.portal_name);
                 Err(AuthError::AuthorizationRequired)
             }
@@ -504,6 +525,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prompt_for(&github, 0).url, "https://github.com/login/device");
+    }
+
+    fn saved(dir: &Path, access: &str, refresh: &str, expires_in: Duration) -> PathBuf {
+        let path = dir.join("token.txt");
+        save_credential(
+            &path,
+            &Credential {
+                access_token: access.into(),
+                expires_at: Some(SystemTime::now() + expires_in),
+                refresh_token: Some(refresh.into()),
+            },
+        );
+        path
+    }
+
+    /// The duplicate-instance race: another copy refreshed first and saved the new pair.
+    #[test]
+    fn a_credential_rotated_by_another_copy_is_adopted() {
+        let dir = scratch("rotated-adopted");
+        let path = saved(&dir, "ghu_new", "ghr_new", Duration::from_secs(8 * 3600));
+        let adopted = rotated_elsewhere(&path, "ghr_old").expect("the winner's credential must be adopted");
+        assert_eq!(adopted.access_token, "ghu_new");
+        assert_eq!(adopted.refresh_token.as_deref(), Some("ghr_new"));
+    }
+
+    /// Same refresh token on disk: nobody rotated it, so the rejection is real.
+    #[test]
+    fn the_credential_that_was_just_rejected_is_not_adopted_again() {
+        let dir = scratch("rotated-same");
+        let path = saved(&dir, "ghu_old", "ghr_old", Duration::from_secs(8 * 3600));
+        assert!(rotated_elsewhere(&path, "ghr_old").is_none());
+    }
+
+    #[test]
+    fn a_rotated_credential_that_has_itself_expired_is_not_adopted() {
+        let dir = scratch("rotated-expired");
+        let path = saved(&dir, "ghu_new", "ghr_new", Duration::ZERO);
+        assert!(rotated_elsewhere(&path, "ghr_old").is_none());
+    }
+
+    #[test]
+    fn no_saved_credential_means_nothing_to_adopt() {
+        let dir = scratch("rotated-missing");
+        assert!(rotated_elsewhere(&dir.join("token.txt"), "ghr_old").is_none());
     }
 
     #[test]
