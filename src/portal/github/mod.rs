@@ -125,7 +125,12 @@ fn pr_query(axis: PrAxis, rules: super::types::Rules, ignored: &[String]) -> Str
 struct Search {
     query: String,
     axes: Vec<PrAxis>,
+    /// A second, small search asked in the same request, whose hits count for these bars too.
+    also: Option<String>,
 }
+
+/// The label that puts a pull request on the red bar even when its author is on the ignore list.
+const OVERRIDE_LABEL: &str = "githoot";
 
 /// The searches one poll sends for the `axes` that are wanted.
 ///
@@ -145,7 +150,12 @@ fn searches(axes: [bool; 3], rules: super::types::Rules, ignored: &[String]) -> 
         });
         match shared {
             Some(search) if pr_judge(axis) != PrJudge::EveryHit => search.axes.push(axis),
-            _ => out.push(Search { query, axes: vec![axis] }),
+            _ => {
+                // Only the red bar has an ignore list to lift, and only while someone is on it.
+                let also = (axis == PrAxis::ReviewRequested && !ignored.is_empty())
+                    .then(|| format!("{} label:{OVERRIDE_LABEL}", pr_query(axis, rules, &[])));
+                out.push(Search { query, axes: vec![axis], also });
+            }
         }
     }
     out
@@ -200,7 +210,7 @@ fn poll_search(
         axes => axes
             .iter()
             .map(|&axis| match pr_judge(axis) {
-                PrJudge::EveryHit => api::poll_review_requested(client, url, token, query),
+                PrJudge::EveryHit => api::poll_review_requested(client, url, token, query, search.also.as_deref()),
                 PrJudge::Approved => api::poll_approved(client, url, token, query, rules),
                 PrJudge::StillOnYou => api::poll_changes_requested(client, url, token, query, rules),
             })
@@ -537,6 +547,40 @@ mod tests {
                 assert!(q.contains("state:open") && q.contains("archived:false"), "the rest stays: {q}");
             }
         }
+    }
+
+    fn also_for(rules: crate::portal::types::Rules, list: &[String]) -> Vec<Option<String>> {
+        searches([true, true, true], rules, list).into_iter().map(|s| s.also).collect()
+    }
+
+    /// The override: a review request carrying the `githoot` label counts whoever wrote it. It is the
+    /// red bar's own question without the ignored authors, narrowed to the label.
+    #[test]
+    fn a_githoot_label_overrides_the_ignored_authors_on_the_red_bar() {
+        use crate::portal::types::Rules;
+        let list = ignored(&["app/dependabot", "octo-intern"]);
+        let also = also_for(Rules::ALL, &list);
+        let red = also[0].as_deref().expect("the red bar asks for the override");
+        assert_eq!(red, format!("{} label:githoot", pr_query(PrAxis::ReviewRequested, Rules::ALL, &[])));
+        assert!(!red.contains("-author:"), "the override is exactly the ignored authors' way back: {red}");
+        assert_eq!(&also[1..], &[None], "green and amber are your own pull requests, ignored by nobody");
+    }
+
+    /// Nobody ignored, nothing to override: the request carries no second search at all.
+    #[test]
+    fn no_override_is_asked_for_with_an_empty_ignore_list() {
+        use crate::portal::types::Rules;
+        assert_eq!(also_for(Rules::ALL, &[]), vec![None, None]);
+    }
+
+    /// The red bar's own rules still apply to a labelled pull request: only the ignore list is lifted.
+    #[test]
+    fn the_override_keeps_the_red_bars_draft_rule() {
+        use crate::portal::types::Rules;
+        let list = ignored(&["octo-intern"]);
+        let on = also_for(Rules::ALL, &list)[0].clone().unwrap();
+        let off = also_for(Rules { skip_drafts_red: false, ..Rules::ALL }, &list)[0].clone().unwrap();
+        assert!(on.contains("draft:false") && !off.contains("draft:false"), "{on} / {off}");
     }
 
     fn searched(axes: [bool; 3], rules: crate::portal::types::Rules) -> Vec<Vec<PrAxis>> {

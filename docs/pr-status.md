@@ -33,6 +33,14 @@ requests do not count. Each login is one `-author:` in the search, so GitHub lea
 the list and the hoot alike. Dependabot and Renovate are on it by default, which is all the query used to
 name outright. Green and amber list only your own pull requests, so the list does not touch them.
 
+**The `githoot` label lifts the list for one pull request.** A review request labelled `githoot` counts
+whoever wrote it, Dependabot included: label the one bump you do want to be asked about, and it is on the
+red bar like any other. It is asked in the same request as the red bar's own search, the red bar's query
+without the ignored authors and with `label:githoot`, so it costs nothing extra. It reads at most 10 such
+pull requests at once, and is not asked at all while the list is empty. The label is the pull request's,
+not yours: it lifts the list for everyone using GitHoot who ignores that author, and anyone allowed to
+label the pull request can add it.
+
 Each bar's own **"not a draft"** rule (`ruleRedSkipDrafts`, `ruleGreenSkipDrafts`, `ruleAmberSkipDrafts`)
 is what puts `draft:false` in its query. Switched off, it drops that qualifier from that bar's search
 alone, and drafts are judged by the bar's other rules like any pull request. On GitLab, green and amber
