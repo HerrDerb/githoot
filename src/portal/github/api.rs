@@ -129,21 +129,21 @@ pub fn build_client() -> reqwest::Result<Client> {
 /// `rateLimit` is free — GitHub does not charge a query for asking what it cost — and it is the only
 /// way to turn "three of these per cycle is probably fine" into a number. See `RateLimit`.
 const PR_REVIEWS_DOCUMENT: &str = "\
-query($q:String!,$hits:Int!,$reviews:Int!,$labels:Int!,$copilot:Boolean!){\
+query($q:String!,$hits:Int!,$reviews:Int!,$labels:Int!,$copilot:Boolean!,$also:String!,$withAlso:Boolean!){\
   rateLimit{limit cost remaining}\
-  search(query:$q,type:ISSUE,first:$hits){\
-    nodes{...on PullRequest{\
-      id url title number isDraft isInMergeQueue updatedAt mergeable headRefName additions deletions changedFiles \
-      labels(first:$labels){nodes{name}}\
-      repository{nameWithOwner}\
-      author{login}\
-      statusCheckRollup{state}\
-      latestOpinionatedReviews(first:$reviews){nodes{state author{login}}}\
-      reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login} ...on Team{slug}}}}\
-      reviewThreads(first:0) @include(if:$copilot){totalCount}\
-      copilotReviews: reviews(last:$reviews,states:[COMMENTED]) @include(if:$copilot){nodes{isCopilotCodeReview author{login}}}\
-    }}\
-  }\
+  search(query:$q,type:ISSUE,first:$hits){nodes{...Pr}}\
+  also: search(query:$also,type:ISSUE,first:10) @include(if:$withAlso){nodes{...Pr}}\
+}\
+fragment Pr on PullRequest{\
+  id url title number isDraft isInMergeQueue updatedAt mergeable headRefName additions deletions changedFiles \
+  labels(first:$labels){nodes{name}}\
+  repository{nameWithOwner}\
+  author{login}\
+  statusCheckRollup{state}\
+  latestOpinionatedReviews(first:$reviews){nodes{state author{login}}}\
+  reviewRequests(first:$reviews){nodes{requestedReviewer{__typename ...on User{login} ...on Team{slug}}}}\
+  reviewThreads(first:0) @include(if:$copilot){totalCount}\
+  copilotReviews: reviews(last:$reviews,states:[COMMENTED]) @include(if:$copilot){nodes{isCopilotCodeReview author{login}}}\
 }";
 
 /// Polls the user's own pull requests where a reviewer requested changes and the work is *still on them*.
@@ -173,9 +173,21 @@ pub fn poll_changes_requested(client: &Client, graphql_url: &str, token: &str, q
 /// is handed to `search` unchanged, so the count does not move — except that it now shares the other
 /// two axes' cap: past `SEARCH_HITS_CAP` matches the extras are not seen. That undercounts rather
 /// than overcounts, and is unreachable by the inbox this app exists for.
-pub fn poll_review_requested(client: &Client, graphql_url: &str, token: &str, query: &str) -> PollResponse {
+///
+/// `also` is the override search: review requests carrying the `githoot` label, whoever wrote them.
+/// Its hits count here too, each pull request once (see `merge_also`).
+pub fn poll_review_requested(
+    client: &Client,
+    graphql_url: &str,
+    token: &str,
+    query: &str,
+    also: Option<&str>,
+) -> PollResponse {
     // No threads: Copilot's comments on a pull request are its author's work, never its reviewer's.
-    poll_reviewed(client, graphql_url, token, query, &|body| parse_reviewed(body, |_| true), false)
+    let every_hit: BodyParser = &|body| parse_reviewed(body, |_| true);
+    poll_reviewed_all(client, graphql_url, token, query, also, &[every_hit], false)
+        .pop()
+        .expect("one parser, one answer")
 }
 
 /// Polls the user's own open pull requests and counts the ones a reviewer approved.
@@ -208,7 +220,7 @@ pub fn poll_approved_and_changes_requested(
 ) -> [PollResponse; 2] {
     let green: BodyParser = &|body| parse_reviewed(body, |pr| approved(pr, rules));
     let amber: BodyParser = &|body| parse_reviewed(body, |pr| work_required(pr, rules));
-    let [green, amber]: [PollResponse; 2] = poll_reviewed_all(client, graphql_url, token, query, &[green, amber], rules.bot_comments)
+    let [green, amber]: [PollResponse; 2] = poll_reviewed_all(client, graphql_url, token, query, None, &[green, amber], rules.bot_comments)
         .try_into()
         .expect("two parsers, two answers");
     [green, amber]
@@ -223,7 +235,7 @@ fn poll_reviewed(
     parse_ok: BodyParser,
     threads: bool,
 ) -> PollResponse {
-    poll_reviewed_all(client, graphql_url, token, query, &[parse_ok], threads)
+    poll_reviewed_all(client, graphql_url, token, query, None, &[parse_ok], threads)
         .pop()
         .expect("one parser, one answer")
 }
@@ -234,15 +246,17 @@ fn poll_reviewed_all(
     graphql_url: &str,
     token: &str,
     query: &str,
+    also: Option<&str>,
     parsers: &[BodyParser],
     copilot: bool,
 ) -> Vec<PollResponse> {
-    let first = serde_json::json!({ "query": PR_REVIEWS_DOCUMENT, "variables": search_variables(query, copilot) });
+    let first = serde_json::json!({ "query": PR_REVIEWS_DOCUMENT, "variables": search_variables(query, copilot, also) });
     let (status, headers, body) = match post(client.post(graphql_url).json(&first), token) {
         Ok(answer) => answer,
         Err(why) => return failed(parsers, &why),
     };
     let poll_interval = header_u64(&headers, "x-poll-interval").map(Duration::from_secs);
+    let body = if also.is_some() { merge_also(&body) } else { body };
 
     // The second step only follows a clean first answer. Anything else is judged as it stands, and
     // says exactly what it always did.
@@ -932,15 +946,19 @@ query($ids:[ID!]!,$threads:Int!){\
 }";
 
 /// The first request's variables. `copilot` asks for the marks that decide the second request, and
-/// is off for the red bar, which never reads threads, and with the Copilot rule off. Off, the
-/// `@include` leaves the fields out of the request, and GitHub charges nothing for them.
-fn search_variables(query: &str, copilot: bool) -> serde_json::Value {
+/// is off for the red bar, which never reads threads, and with the Copilot rule off. `also` is the
+/// override search (see `ALSO_HITS_CAP`), the red bar's alone. Either one off, the `@include` leaves
+/// its fields out of the request, and GitHub charges nothing for them.
+fn search_variables(query: &str, copilot: bool, also: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "q": query,
         "hits": SEARCH_HITS_CAP,
         "reviews": CHANGES_REVIEWS_CAP,
         "labels": LABELS_CAP,
         "copilot": copilot,
+        // Declared non-null, so always sent; `withAlso` decides whether it is searched at all.
+        "also": also.unwrap_or_default(),
+        "withAlso": also.is_some(),
     })
 }
 
@@ -1004,6 +1022,49 @@ fn splice_threads(body: &str, threads_body: &str) -> Result<String, String> {
         }
     }
     Ok(json.to_string())
+}
+
+/// How many pull requests the override search reads (`also` in `PR_REVIEWS_DOCUMENT`, where the
+/// number is written out because a `const` cannot be spliced into a `&str`).
+///
+/// GitHub prices a request by the most it could return, rounded once for the whole request. The red
+/// bar's own search is about 301 of those units, so ten more hits (about 31) still round to the same
+/// 3 points: the override is free. Twenty would cost a point a minute. A label meant to be used now and
+/// then never has more than ten pull requests waiting on you at once; past that, the extras are not
+/// seen, which undercounts like every other cap here.
+// Read only by the test that holds it to the `first:10` in the document.
+#[cfg_attr(not(test), allow(dead_code))]
+const ALSO_HITS_CAP: u32 = 10;
+
+/// Moves the override search's hits (`data.also`) in with the red bar's own (`data.search`), each
+/// pull request once, so every parser judges one list exactly as before.
+///
+/// A body with no override, or one that cannot be read, is returned untouched: the parsers then say
+/// what they always said about it.
+fn merge_also(body: &str) -> String {
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    let Some(also) = json.pointer_mut("/data/also").map(serde_json::Value::take) else {
+        return body.to_string();
+    };
+    if let Some(data) = json.get_mut("data").and_then(|d| d.as_object_mut()) {
+        data.remove("also");
+    }
+    let extra = also.get("nodes").and_then(|n| n.as_array()).cloned().unwrap_or_default();
+    if let Some(nodes) = json.pointer_mut("/data/search/nodes").and_then(|n| n.as_array_mut()) {
+        let id = |node: &serde_json::Value| node.get("id").and_then(|i| i.as_str()).map(str::to_string);
+        let mut seen: std::collections::HashSet<String> = nodes.iter().filter_map(id).collect();
+        for node in extra {
+            // A hit without an id cannot be matched, so it is kept: undercounting is the worse error
+            // for a pull request someone labelled precisely so it would be seen.
+            let new = id(&node).is_none_or(|key| seen.insert(key));
+            if new {
+                nodes.push(node);
+            }
+        }
+    }
+    json.to_string()
 }
 
 /// [`classify_with`] for several bars judging one response.
@@ -1338,7 +1399,7 @@ mod tests {
     /// The document has to name every variable it uses, or GitHub rejects the whole query.
     #[test]
     fn the_query_document_declares_the_variables_it_sends() {
-        for var in ["$q", "$hits", "$reviews", "$labels"] {
+        for var in ["$q", "$hits", "$reviews", "$labels", "$copilot", "$also", "$withAlso"] {
             assert!(
                 PR_REVIEWS_DOCUMENT.matches(var).count() >= 2,
                 "{var} should be both declared and used"
@@ -1655,6 +1716,65 @@ mod tests {
 
     const COPILOT: &str = "copilot-pull-request-reviewer";
 
+    // ── The githoot label override ────────────────────────────────────────────
+
+    fn red_hit(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","url":"https://github.com/o/r/pull/{id}","latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}}}}"#
+        )
+    }
+
+    fn red_count(body: &str) -> u32 {
+        match classify_with(StatusCode::OK, &headers(&[]), body, 0, &|b| parse_reviewed(b, |_| true)) {
+            PollResult::Fresh { count: Some(n), .. } => n,
+            other => panic!("expected Fresh with a count, got {other:?}"),
+        }
+    }
+
+    /// The override's hits join the red bar's own, so a labelled pull request from an ignored author
+    /// is counted, listed and hooted like any other review request.
+    #[test]
+    fn override_hits_join_the_red_bars_own() {
+        let body = format!(
+            r#"{{"data":{{"search":{{"nodes":[{}]}},"also":{{"nodes":[{}]}}}}}}"#,
+            red_hit("A"),
+            red_hit("B")
+        );
+        assert_eq!(red_count(&merge_also(&body)), 2);
+    }
+
+    /// A pull request in both answers (labelled, and from someone nobody ignores) counts once.
+    #[test]
+    fn a_pull_request_found_by_both_searches_counts_once() {
+        let body = format!(
+            r#"{{"data":{{"search":{{"nodes":[{a}]}},"also":{{"nodes":[{a},{b}]}}}}}}"#,
+            a = red_hit("A"),
+            b = red_hit("B")
+        );
+        assert_eq!(red_count(&merge_also(&body)), 2);
+    }
+
+    /// No override asked for, or an answer without one: the body is judged exactly as before.
+    #[test]
+    fn a_body_without_an_override_is_left_alone() {
+        let body = payload(&[red_hit("A")]);
+        assert_eq!(merge_also(&body), body);
+        assert_eq!(merge_also("not json"), "not json");
+    }
+
+    /// The override is asked for only when given, and costs nothing otherwise: `@include` leaves it out.
+    #[test]
+    fn the_override_search_is_requested_only_when_given() {
+        let with = search_variables("q", false, Some("q label:githoot"));
+        assert_eq!(with["withAlso"], true);
+        assert_eq!(with["also"], "q label:githoot");
+        let without = search_variables("q", false, None);
+        assert_eq!(without["withAlso"], false);
+        assert!(PR_REVIEWS_DOCUMENT.contains("also: search(query:$also"), "{PR_REVIEWS_DOCUMENT}");
+        assert!(PR_REVIEWS_DOCUMENT.contains("@include(if:$withAlso)"));
+        assert!(PR_REVIEWS_DOCUMENT.contains(&format!("first:{ALSO_HITS_CAP}")));
+    }
+
     // ── Copilot's threads, in two steps ───────────────────────────────────────
 
     /// A first-step hit: no threads, only how many there are and who left a commenting review.
@@ -1734,9 +1854,9 @@ mod tests {
     /// the Copilot rule off. Off, the fields are left out of the request entirely and cost nothing.
     #[test]
     fn the_copilot_marks_are_requested_only_where_used() {
-        assert_eq!(search_variables("q", true)["copilot"], true);
-        assert_eq!(search_variables("q", false)["copilot"], false);
-        assert!(search_variables("q", true).get("threads").is_none(), "threads are the second request's");
+        assert_eq!(search_variables("q", true, None)["copilot"], true);
+        assert_eq!(search_variables("q", false, None)["copilot"], false);
+        assert!(search_variables("q", true, None).get("threads").is_none(), "threads are the second request's");
         assert!(PR_REVIEWS_DOCUMENT.contains("@include(if:$copilot)"));
         assert!(!PR_REVIEWS_DOCUMENT.contains("isResolved"), "no thread is read in the first request");
         assert!(PR_THREADS_DOCUMENT.contains("isCopilotCodeReview"));

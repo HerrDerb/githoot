@@ -444,7 +444,7 @@ pub const GITHUB: &[Setting] = &[
         key: KEY_IGNORE_AUTHORS,
         label: "Review requests from these accounts stay off the red bar",
         kind: Kind::Logins { placeholder: "Add a GitHub login" },
-        help: "Not counted, not listed, no hoot. Dependabot and Renovate are here by default. Your own pull requests are not affected.",
+        help: "Not counted, not listed, no hoot. Dependabot and Renovate are here by default. Your own pull requests are not affected. Label a pull request githoot to count it anyway.",
         group: "Ignored authors",
         live: true,
     },

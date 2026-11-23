@@ -230,7 +230,7 @@ existed — the key is appended rather than the file regenerated.
 | `ruleAmberSkipDrafts` | `on` | Drafts stay off the amber bar. Off judges a draft's objections, conflicts, checks and comments like any pull request's |
 | `ruleRunningChecks` | `on` | Checks still running keep an approved pull request off green until they finish. Off shows it at once |
 | `ruleTeamRequests` | `on` | A review asked of a team you are in lights the red bar, not only one naming you (GitHub) |
-| `ignoreAuthors` | `app/dependabot, app/renovate` | GitHub accounts whose review requests stay off the red bar, comma separated; a bot is `app/<name>`. On the GitHub page as **Ignored authors**, with suggestions as you type |
+| `ignoreAuthors` | `app/dependabot, app/renovate` | GitHub accounts whose review requests stay off the red bar, comma separated; a bot is `app/<name>`. On the GitHub page as **Ignored authors**, with suggestions as you type. A pull request labelled `githoot` counts anyway; see [PR status](pr-status.md) |
 | `sound` | `on` | Play the hoot whenever a PR count goes up |
 | `logLevel` | `error` | How much `log.txt` records: `error` logs only failures, `info` adds lifecycle detail for diagnosing |
 | `statusComponents` | the parts a PR tray uses | Which parts of GitHub may raise the outage mark — see below |
