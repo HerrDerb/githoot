@@ -7,12 +7,10 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
-# One run per pull request at a time: a newer event cancels the older run instead of racing it. Without
-# this, `gh pr create --label` fired `opened` and `labeled` a second apart, and whichever finished last
-# decided the check.
-concurrency:
-  group: pr-label-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# Deliberately no `concurrency` with `cancel-in-progress`: a cancelled run leaves a `label` check reading
+# CANCELLED on the commit, and GitHub counts that as a failure of the required check even when a newer
+# run passed, so the pull request stays blocked. Every run reads the current labels instead (below), so
+# overlapping runs agree rather than race.
 
 permissions:
   contents: read
