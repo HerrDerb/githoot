@@ -1109,6 +1109,46 @@ pub fn clean_up_after_update() {
     }
 }
 
+/// A `/bin/sh -c <script>` that outlives the process starting it, for the macOS restart hand-over.
+///
+/// In a process group of its own, because the app's group is not safe to stay in: when the app was
+/// started by its Launch Agent, `launchd` kills the job's whole process group as the app exits (no
+/// `AbandonProcessGroup`), and the waiter that should restart it would die with it. The update would
+/// then install and never come back, leaving the user to start it by hand.
+#[cfg(unix)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn detached_shell(script: &str) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std::process::Command::new("/bin/sh");
+    // 0: a new group led by the shell itself.
+    command.arg("-c").arg(script).process_group(0);
+    command
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    fn process_group_of(pid: &str) -> String {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", pid])
+            .output()
+            .expect("ps must run");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The fix for the waiter killed with its parent: it must not share the app's process group.
+    #[test]
+    fn the_restart_waiter_leaves_the_apps_process_group() {
+        let out = detached_shell("ps -o pgid= -p $$").output().expect("the waiter must start");
+        let waiter_group = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let own_group = process_group_of(&std::process::id().to_string());
+        assert!(!waiter_group.is_empty(), "ps must report the waiter's group");
+        assert_ne!(waiter_group, own_group, "the waiter must be in a group of its own");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

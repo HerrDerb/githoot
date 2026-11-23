@@ -19,6 +19,7 @@ mod scheduler;
 mod serve;
 mod setting;
 mod settings_watch;
+mod single_instance;
 mod sound;
 mod state;
 mod ui;
@@ -317,6 +318,8 @@ fn main() {
     // earlier (icon setup, a first-run default-config write) ran at the quiet default, which is the
     // right floor for them anyway.
     log::set_level(config.log_level);
+    // Who started this copy. A report of several instances then carries its own cause.
+    infoln!("{}", single_instance::launch_line());
     // Straight after the level is applied, so the line it logs lands at the verbosity the user asked
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
@@ -711,9 +714,8 @@ fn main() {
     // SetLastError(0) clears any stale error left by DLL/runtime init so that
     // the GetLastError check is always based on CreateMutexW's own result.
     //
-    // Not ported to macOS: LaunchServices already declines to start a second copy of the same
-    // `.app` from Finder, so the gap only shows if you deliberately run the inner binary twice,
-    // and closing it properly would mean a file lock and a new dependency for no real user.
+    // macOS has its own guard, a file lock, after `log::init` below (see `single_instance`).
+    // LaunchServices alone is not enough there: the Launch Agent runs the inner binary directly.
     #[cfg(target_os = "windows")]
     unsafe {
         use std::ptr::null_mut;
@@ -743,6 +745,22 @@ fn main() {
         }
     };
     log::init(&app_asset_path);
+    // macOS's counterpart of the Windows mutex above, and before anything else touches `~/.githoot`:
+    // a duplicate must not clean up after an update or race the running copy for the refresh token.
+    // Held in a binding for the whole of `main`; the OS releases it when the process ends, however it
+    // ends. Logged at error level so the quiet default still records a duplicate that was turned away.
+    #[cfg(target_os = "macos")]
+    let _single_instance = match single_instance::acquire(&app_asset_path) {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => {
+            errorln!("another copy is already running, so this one exits ({})", single_instance::launch_line());
+            return;
+        }
+        Err(e) => {
+            errorln!("{e} — starting without the single-instance guard");
+            None
+        }
+    };
     mute::init(&app_asset_path);
     // After `log::init` so its findings are recorded, and at startup rather than at the end of an
     // install: on Windows the previous `.exe` cannot be deleted until the process holding it has gone,
@@ -753,6 +771,8 @@ fn main() {
     // Apply the configured verbosity before anything past startup logs (see the other platform's
     // entry point for the reasoning).
     log::set_level(config.log_level);
+    // Who started this copy. A report of several instances then carries its own cause.
+    infoln!("{}", single_instance::launch_line());
     // Straight after the level is applied, so the line it logs lands at the verbosity the user asked
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
@@ -1314,9 +1334,7 @@ fn main() {
                  done; exec open '{target}'",
                 pid = std::process::id()
             );
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(script)
+            update::detached_shell(&script)
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| e.to_string())
