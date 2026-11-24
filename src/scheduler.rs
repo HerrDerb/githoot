@@ -1170,7 +1170,10 @@ fn run_poll_loop(
                                 std::thread::spawn(move || match crate::update::install(&available) {
                                     // Hands the plan to the UI thread, which is the only one that can
                                     // take the tray down cleanly before the process ends.
-                                    Ok(plan) => restart(plan),
+                                    Ok(plan) => {
+                                        crate::update::await_followers();
+                                        restart(plan)
+                                    }
                                     Err(e) => {
                                         errorln!("update failed: {e}");
                                         crate::update::fail(&e.to_string());
