@@ -9,7 +9,7 @@ by default and a typo leaves it off.
 It is part of GitHoot, with its own **Agents** page in the settings. It used to be the *Herdr
 dispatcher*, an integration; see [Upgrading from the Herdr dispatcher](#upgrading-from-the-herdr-dispatcher-34x).
 
-**It is experimental**, and says so beside its name in the sidebar and on its page. It may miss a pull
+**It is experimental**, and says so on its page. It may miss a pull
 request or fail to start an agent. When it does, [its log](#its-log) says what it did and why, and the
 page lists each pull request with what happened to it.
 
@@ -102,7 +102,7 @@ Below the switch, two cards, both folded shut until you open them:
 | `agentsApproved` | `off` | Start agents for the green bar: your approved pull requests |
 | `agentsCloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
 | `agentsWorktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
-| `agentsDeleteMerged` | `off` | Close the agent and delete the worktree and its branch once the pull request is merged. GitHub only. See [Deleting the worktrees of merged pull requests](#deleting-the-worktrees-of-merged-pull-requests) |
+| `agentsDeleteMerged` | `off` | Close the agent and delete the worktree and its branch once the pull request is merged. GitHub only. Experimental. See [Deleting the worktrees of merged pull requests](#deleting-the-worktrees-of-merged-pull-requests) |
 
 Under the client radio sits the chosen client's card: the programs it needs as chips, how to get one
 that is missing, and what it needs from you, such as Orca's permission setting.
@@ -233,7 +233,7 @@ never runs `herdr-app` itself, so the app does not need to be open:
 
 ## Orca
 
-With **Orca** chosen, GitHoot drives [Orca](https://orca.dev) through its own command line, which
+**Experimental**, tagged so beside its option on the page. With **Orca** chosen, GitHoot drives [Orca](https://orca.dev) through its own command line, which
 is `orca-ide` on Linux, where `orca` is the GNOME screen reader, and `orca` on Windows and macOS. **Orca must
 be running**: GitHoot never starts it, since that would mean opening a window on its own. If it is
 not, nothing is done for the pull request yet: GitHoot shows a **desktop notification**, "An agent is
@@ -290,8 +290,9 @@ request waits, the log says which client and why, and the next pass tries again.
 
 ## Deleting the worktrees of merged pull requests
 
-Off by default: **Delete the worktree when its pull request is merged** under Cleanup on its page
-(`agentsDeleteMerged=on`). With it on, once a pull request GitHoot started an agent for is merged,
+Off by default, and **experimental**, tagged so on its page: **Delete the worktree when its pull
+request is merged** under Cleanup (`agentsDeleteMerged=on`). It can delete a worktree you still wanted,
+such as one you only keep around to look at, as long as it holds no uncommitted changes or new commits. With it on, once a pull request GitHoot started an agent for is merged,
 its agent is closed and its worktree and `githoot/pr-<number>-<repo>` branch are deleted.
 
 **It goes by what is on disk, not by what left a bar.** Each pass lists the worktrees under

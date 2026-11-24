@@ -1160,7 +1160,7 @@ pub static SETTINGS: &[Setting] = &[
         key: super::sweep::KEY,
         label: "Delete the worktree when its pull request is merged",
         kind: Kind::Flag { default_on: false },
-        help: "Closes the agent and deletes the worktree and its branch once the pull request is merged. Kept when it holds uncommitted changes or commits that are not in the pull request. GitHub only.",
+        help: "Closes the agent and deletes the worktree and its branch once the pull request is merged. Kept when it holds uncommitted changes or commits that are not in the pull request. Experimental: it can delete a worktree you still wanted, such as one you only keep around to look at. GitHub only.",
         group: "Cleanup",
         live: true,
     },
