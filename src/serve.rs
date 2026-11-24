@@ -1136,7 +1136,7 @@ fn site_page(stream: &mut TcpStream, request: &Request, token: &str, place: &cra
     // The Updates page's script asking how an install stands. Before anything reads `config.txt`: an
     // install runs whatever the settings say, and this is asked several times a second.
     if *place == Place::Updates && query_value(request.query.as_deref(), "progress").is_some() {
-        let body = crate::update::progress().json();
+        let body = crate::update::poll().json();
         return respond(stream, 200, "application/json", body.as_bytes(), request.body_wanted);
     }
     let nonce = new_token().unwrap_or_default();

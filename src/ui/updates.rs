@@ -41,6 +41,10 @@ pub struct UpdatesView<'a> {
 /// Follows an install in place: polls `?progress=1`, marks the steps, counts the bytes, and says when
 /// it failed or the app is restarting. Pressing Install posts in the background and starts following,
 /// so the page never reloads; without the script the form posts and the page renders the same steps.
+///
+/// Once the app has restarted, every link and form here points at a port and token that are gone, so
+/// the whole page gives way to one message. It names no version: if the new binary would not start,
+/// the previous one is restarted instead, and from here the two look the same.
 const PROGRESS_SCRIPT: &str = "(function(){\
 var card=document.querySelector('[data-progress-url]');if(!card)return;\
 var url=card.getAttribute('data-progress-url'),order=['signature','download','digest','test','replace'];\
@@ -57,10 +61,13 @@ if(j.state==='failed'){mark(null);q('.bytes').textContent='';note('The update wa
 var r=document.querySelector('[data-retry]');if(r)r.hidden=false;return 0;}\
 return 0;}\
 var restarting=false;\
+function gone(){document.title='GitHoot restarted';var m=document.querySelector('main');\
+var h=document.createElement('h1');h.textContent='GitHoot restarted';\
+var p=document.createElement('p');p.textContent='This tab belongs to the previous run and no longer works. Close it and open GitHoot from the tray.';\
+m.replaceChildren(h,p);}\
 function tick(){fetch(url,{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){\
 restarting=j.state==='restarting';var next=show(j);if(next)setTimeout(tick,next);})\
-.catch(function(){if(restarting){note('GitHoot has restarted on the new version. You can close this tab.');card.setAttribute('data-state','done');}\
-else setTimeout(tick,2000);});}\
+.catch(function(){if(restarting)gone();else setTimeout(tick,2000);});}\
 document.addEventListener('submit',function(ev){var f=ev.target;if(!f.hasAttribute('data-install')&&!f.hasAttribute('data-retry'))return;\
 ev.preventDefault();document.querySelectorAll('#version form,[data-retry]').forEach(function(x){x.hidden=true;});\
 card.closest('section').hidden=false;mark(null);note('Starting…');card.setAttribute('data-state','running');\
@@ -631,3 +638,4 @@ mod tests {
         assert!(notes_html("<b>x</b>").contains("&lt;b&gt;"), "other raw HTML still shows as text");
     }
 }
+

@@ -355,6 +355,45 @@ impl Progress {
     }
 }
 
+/// Whether a page is following the install, as the restart sees it.
+///
+/// The restart takes this server down, and the next one listens on a new port with a new token, so a
+/// page that has not been told `restarting` by then never will be: it would sit on the last step it
+/// saw. The restart therefore waits until a following page has heard it, or has gone quiet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Followers {
+    last_poll: Option<std::time::Instant>,
+    told_restarting: Option<std::time::Instant>,
+}
+
+/// How long after a page was told `restarting` the restart still waits, so a second tab polling
+/// alongside it gets its answer too. One shared flag cannot tell tabs apart.
+const AFTER_TOLD: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long without a poll before a page counts as closed. The script polls every 700 ms, and a
+/// background tab is throttled to about once a second.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest the restart ever waits, whatever the bookkeeping says.
+const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl Followers {
+    /// A page asked how the install stands, and was answered `progress`.
+    pub fn polled(&mut self, progress: &Progress, now: std::time::Instant) {
+        self.last_poll = Some(now);
+        if matches!(progress, Progress::Restarting { .. }) && self.told_restarting.is_none() {
+            self.told_restarting = Some(now);
+        }
+    }
+
+    /// Whether the restart may go ahead, `since` being when the install finished.
+    pub fn may_restart(&self, since: std::time::Instant, now: std::time::Instant) -> bool {
+        let passed = |from: std::time::Instant, wait| now.saturating_duration_since(from) >= wait;
+        let Some(last_poll) = self.last_poll else { return true };
+        passed(since, MAX_WAIT)
+            || passed(last_poll, QUIET)
+            || self.told_restarting.is_some_and(|told| passed(told, AFTER_TOLD))
+    }
+}
+
 /// The one install's progress. A `static` because the page that starts it, the thread that runs it
 /// and the page that watches it are three different threads with nothing else in common.
 static PROGRESS: std::sync::Mutex<Progress> = std::sync::Mutex::new(Progress::Idle);
@@ -369,7 +408,36 @@ pub fn progress() -> Progress {
 
 /// Claims the install for `version`. `false` while another one runs, which makes a second click a no-op.
 pub fn begin(version: &str) -> bool {
-    with_progress(|p| p.begin(version)).unwrap_or(false)
+    let begun = with_progress(|p| p.begin(version)).unwrap_or(false);
+    if begun && let Ok(mut f) = FOLLOWERS.lock() {
+        // A page that polled an earlier install is not following this one until it polls again.
+        *f = Followers::default();
+    }
+    begun
+}
+
+static FOLLOWERS: std::sync::Mutex<Followers> = std::sync::Mutex::new(Followers { last_poll: None, told_restarting: None });
+
+/// The page script's poll: how the install stands, noting that a page asked and what it was told.
+pub fn poll() -> Progress {
+    let progress = progress();
+    if let Ok(mut f) = FOLLOWERS.lock() {
+        f.polled(&progress, std::time::Instant::now());
+    }
+    progress
+}
+
+/// Holds the restart until a page following the install has been told `restarting`, or has gone
+/// quiet. Off the UI thread, so the tray keeps working meanwhile.
+pub fn await_followers() {
+    let since = std::time::Instant::now();
+    loop {
+        let ready = FOLLOWERS.lock().map(|f| f.may_restart(since, std::time::Instant::now())).unwrap_or(true);
+        if ready {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// Ends the install as failed, with `message` for the page.
@@ -1302,6 +1370,72 @@ mod tests {
             j(&Progress::Failed { version: "1.4.0".into(), message: "<x>".into() }),
             serde_json::json!({ "state": "failed", "version": "1.4.0", "message": "<x>" })
         );
+    }
+
+    // ── Followers ──────────────────────────────────────────────────────────
+
+    fn restarting() -> Progress {
+        Progress::Restarting { version: "1.4.0".into() }
+    }
+
+    fn running() -> Progress {
+        Progress::Running { version: "1.4.0".into(), step: Some(Step::Download), done: 0, total: None }
+    }
+
+    /// No page polled during the install: nobody is watching, so nothing is worth waiting for.
+    #[test]
+    fn with_no_page_following_the_restart_goes_at_once() {
+        let t = std::time::Instant::now();
+        assert!(Followers::default().may_restart(t, t));
+    }
+
+    /// The bug: the page last heard "download", and the restart took the server away before its next
+    /// poll. A page that is still polling must be told `restarting` first.
+    #[test]
+    fn a_polling_page_holds_the_restart_until_it_is_told() {
+        let t = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let mut f = Followers::default();
+        f.polled(&running(), t);
+        assert!(!f.may_restart(t + ms(100), t + ms(100)), "the page has only heard download");
+        f.polled(&restarting(), t + ms(700));
+        assert!(!f.may_restart(t + ms(100), t + ms(800)), "a second tab still gets its poll in");
+        assert!(f.may_restart(t + ms(100), t + ms(1700)), "told, and a poll interval later");
+    }
+
+    /// Being told `running` again does not count as being told `restarting`.
+    #[test]
+    fn only_a_restarting_answer_counts_as_told() {
+        let t = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let mut f = Followers::default();
+        f.polled(&running(), t);
+        f.polled(&running(), t + ms(700));
+        assert!(!f.may_restart(t + ms(700), t + ms(2000)));
+    }
+
+    /// A page that stopped polling was closed: it does not hold the restart up for long.
+    #[test]
+    fn a_page_gone_quiet_lets_the_restart_go() {
+        let t = std::time::Instant::now();
+        let s = std::time::Duration::from_secs;
+        let mut f = Followers::default();
+        f.polled(&running(), t);
+        assert!(!f.may_restart(t, t + s(4)));
+        assert!(f.may_restart(t, t + s(5)));
+    }
+
+    /// Whatever the bookkeeping says, the restart never waits past the cap.
+    #[test]
+    fn the_restart_never_waits_past_the_cap() {
+        let t = std::time::Instant::now();
+        let s = std::time::Duration::from_secs;
+        let mut f = Followers::default();
+        for i in 0..20 {
+            f.polled(&running(), t + s(i));
+        }
+        assert!(!f.may_restart(t, t + s(9)));
+        assert!(f.may_restart(t, t + s(10)));
     }
 
     /// The steps in the order `install` runs them, each with a key for the script and a label.
