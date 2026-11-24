@@ -10,9 +10,10 @@
 //! [`QUESTIONS`]; the poll thread asks the portal after its next poll and leaves the answers in
 //! [`FATES`], for the pass after.
 //!
-//! **Remembered for this run only.** An answer is kept in memory until the app quits, so a pull request
-//! is asked about once per run, not every pass. One that comes back into a bar is forgotten, and asked
-//! about again when it leaves. Nothing is written to disk.
+//! **Open is asked again, closed is remembered.** A reviewed pull request leaves the bar while still
+//! open, so open is asked about after every poll until it is merged or closed. Closed is kept in memory
+//! until the app quits, so it is asked about once per run. One that comes back into a bar is forgotten,
+//! and asked about again when it leaves. Nothing is written to disk.
 //!
 //! **GitHoot never deletes work.** A merged pull request's worktree is kept, with one line in the log,
 //! when it holds uncommitted changes or commits that are not in the merged head, when a client did not
@@ -64,7 +65,7 @@ pub fn origin(url: &str) -> Option<(String, String)> {
 /// What a pass does with one worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
-    /// Its pull request is in a bar, was not merged, or its worktree was kept.
+    /// Its pull request is in a bar, was closed, or its worktree was kept.
     Leave,
     /// Not known yet: ask the portal.
     Ask,
@@ -77,7 +78,8 @@ pub enum Next {
 pub fn next(in_bar: bool, fate: Option<&PrFate>, kept: bool) -> Next {
     match fate {
         _ if in_bar || kept => Next::Leave,
-        None => Next::Ask,
+        // Open is not final: a reviewed pull request leaves the bar long before it is merged.
+        None | Some(PrFate::Open) => Next::Ask,
         Some(PrFate::Merged { head }) => Next::Clean { head: head.clone() },
         Some(_) => Next::Leave,
     }
@@ -321,12 +323,19 @@ mod tests {
         assert_eq!(next(false, None, false), Next::Ask);
     }
 
-    /// Asked once, answered once: open, closed or unknown stays as it is for the rest of the run.
+    /// Closed or unknown is final for the run: asked once, answered once.
     #[test]
-    fn an_answer_other_than_merged_leaves_it() {
-        for fate in [PrFate::Open, PrFate::Closed, PrFate::Unknown] {
+    fn a_closed_or_unknown_one_is_left() {
+        for fate in [PrFate::Closed, PrFate::Unknown] {
             assert_eq!(next(false, Some(&fate), false), Next::Leave, "{fate:?}");
         }
+    }
+
+    /// Open is not final: a pull request you reviewed leaves the bar long before it is merged, so it
+    /// is asked about again after every poll until it is merged or closed.
+    #[test]
+    fn an_open_one_is_asked_again() {
+        assert_eq!(next(false, Some(&PrFate::Open), false), Next::Ask);
     }
 
     #[test]

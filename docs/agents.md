@@ -300,10 +300,11 @@ clone's `origin`. Any other folder or branch is never touched. Those whose pull 
 are asked about, all in one GitHub request, after the next poll. So a merge while GitHoot was closed
 is caught when it next runs, and so is a pull request that left as another one arrived.
 
-**Asked once per run.** The answer is kept in memory until GitHoot quits, so a closed or still-open
-pull request costs one question, not one per pass. One that comes back into a bar is forgotten, and
-asked about again once it leaves. Nothing is written to disk. Before any bar has its first answer
-from a poll, nothing is asked.
+**Open is asked again, closed is not.** A pull request you reviewed leaves the bar while it is still
+open, so an open one is asked about again after every poll, in that same one request, until it is
+merged or closed. A closed one is kept in memory until GitHoot quits, so it costs one question, not
+one per pass. One that comes back into a bar is forgotten, and asked about again once it leaves.
+Nothing is written to disk. Before any bar has its first answer from a poll, nothing is asked.
 
 **It never deletes work.** A merged pull request's worktree is kept, with a line in [its log](#its-log),
 when:
