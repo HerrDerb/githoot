@@ -10,7 +10,8 @@
 //! is gone. The move was a hard cut: nothing reads `integration.herdr.*` or its old folder.
 //!
 //! - **Pull requests, already judged.** It never polls a forge. It gets the lists the icon and the
-//!   pages use, per bar, with muted pull requests taken out ([`batches`]).
+//!   pages use, per bar, with muted pull requests taken out ([`batches`]). The one question it has
+//!   for a forge, whether a pull request was merged, the poll thread asks for it ([`sweep`]).
 //! - **One runner, off the poll thread.** Woken each time a poll publishes, and every thirty seconds
 //!   regardless, so a slow `git fetch` never holds up the icon, and switching it on takes effect within
 //!   one pass without a restart.
@@ -21,6 +22,7 @@ pub mod clients;
 pub mod dispatch;
 pub mod journal;
 pub mod prompts;
+pub mod sweep;
 
 use crate::config::Config;
 use crate::portal::types::PrEntry;
@@ -329,6 +331,18 @@ pub fn start(app_asset_path: PathBuf) {
                 // The setup complaint, when it changed: what is wrong before any pull request needs it.
                 if *last != before {
                     journal.push(if last.is_empty() { "everything it needs is back".to_string() } else { last.clone() });
+                }
+                if dispatch::SETTINGS.iter().find(|s| s.key == sweep::KEY).is_some_and(|s| ctx.flag(s)) {
+                    let root = dispatch::settings_now(&ctx, false).worktree_root;
+                    let swept = sweep::pass(&root, &current_batches(), &clients::CLIENTS, &mut |exe, args| dispatch::output(exe, args));
+                    for (error, line) in swept {
+                        if error {
+                            crate::errorln!("agents: {line}");
+                        } else {
+                            crate::infoln!("agents: {line}");
+                        }
+                        journal.push(line);
+                    }
                 }
                 journal::append(&ctx.dir, &journal);
                 for (error, line) in lines {

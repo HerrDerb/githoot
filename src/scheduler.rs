@@ -1066,6 +1066,19 @@ fn run_poll_loop(
         // After the lock is released: the Agents runner reads these lists as soon as it wakes.
         crate::agents::poll_published();
 
+        // What the Agents sweep wants to know about merged pull requests, asked here because the
+        // credential is this thread's. The answers serve its next pass. See `agents::sweep`.
+        let questions = crate::agents::sweep::questions();
+        if !questions.is_empty() {
+            for run in runs.iter_mut().filter(|r| r.live && r.portal.info().capabilities.merged_state) {
+                match run.portal.fates(&questions) {
+                    Some(Ok(answers)) => crate::agents::sweep::answered(answers),
+                    Some(Err(e)) => crate::infoln!("agents: could not ask which pull requests were merged: {e}"),
+                    None => {}
+                }
+            }
+        }
+
         // Read here, right after the axes were applied, rather than after `emit`: the flags belong to
         // this cycle's responses, and taking them next to the code that produced them is what keeps a
         // rise meaning one poll's worth of change. The sound itself waits until after `emit`.

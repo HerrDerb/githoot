@@ -381,6 +381,13 @@ fn install_page<'a>(state: &CredentialState, endpoints: &'a Endpoints) -> Option
     }
 }
 
+/// The pull requests of `prs` on the host `link_prefix` (`https://github.com/`) names, matched without
+/// regard to case. A clone of a GHES repository is not github.com's to answer, nor the other way round.
+fn on_host(prs: &[crate::portal::types::PrRef], link_prefix: &str) -> Vec<crate::portal::types::PrRef> {
+    let host = link_prefix.split("://").nth(1).unwrap_or(link_prefix).trim_end_matches('/');
+    prs.iter().filter(|pr| pr.host.eq_ignore_ascii_case(host)).cloned().collect()
+}
+
 impl Portal for GitHubPortal {
     fn info(&self) -> &PortalInfo {
         &self.info
@@ -447,6 +454,16 @@ impl Portal for GitHubPortal {
         outcome
     }
 
+    fn fates(&mut self, prs: &[crate::portal::types::PrRef]) -> Option<Result<Vec<(crate::portal::types::PrRef, crate::portal::types::PrFate)>, String>> {
+        let mine = on_host(prs, &self.info.link_prefix);
+        if mine.is_empty() {
+            return Some(Ok(Vec::new()));
+        }
+        // Only a token that is there now: the poll's own refresh is what keeps it fresh.
+        let store = self.store.as_ref()?;
+        Some(api::ask_fates(&self.http, &self.endpoints.graphql, store.token(), &mine))
+    }
+
     fn health(&mut self) -> Option<Result<HealthReport, String>> {
         self.info.status_page.as_ref()?;
         Some(super::statuspage::check(&self.http, STATUS_PAGE, &self.options.status_components))
@@ -455,6 +472,16 @@ impl Portal for GitHubPortal {
 
 #[cfg(test)]
 mod tests {
+
+    /// A portal answers for its own host only: github.com for github.com, a GHES host for itself.
+    #[test]
+    fn fates_are_asked_only_of_the_portal_on_that_host() {
+        let pr = |host: &str, n| crate::portal::types::PrRef { host: host.into(), repo: "o/r".into(), number: n };
+        let prs = [pr("github.com", 1), pr("GitHub.com", 2), pr("ghe.example.com", 3)];
+        assert_eq!(on_host(&prs, "https://github.com/"), vec![prs[0].clone(), prs[1].clone()]);
+        assert_eq!(on_host(&prs, "https://ghe.example.com/"), vec![prs[2].clone()]);
+    }
+
     use super::*;
     use crate::portal::AuthStyle;
 

@@ -67,6 +67,7 @@ impl FakePortal {
                     rereview_pending: false,
                     team_reviewers: false,
                     bot_reviewer: None,
+                    merged_state: false,
                 },
                 min_poll_interval: Duration::from_secs(60),
             },

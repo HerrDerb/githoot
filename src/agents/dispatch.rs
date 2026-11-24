@@ -679,7 +679,7 @@ pub fn agent_in(agents: &[(String, String)], worktree: &Path) -> Option<String> 
         .map(|(_, name)| name.clone())
 }
 
-fn fold(path: &str) -> String {
+pub(crate) fn fold(path: &str) -> String {
     path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
@@ -1156,6 +1156,14 @@ pub static SETTINGS: &[Setting] = &[
         group: "Folders",
         live: true,
     },
+    Setting {
+        key: super::sweep::KEY,
+        label: "Delete the worktree when its pull request is merged",
+        kind: Kind::Flag { default_on: false },
+        help: "Closes the agent and deletes the worktree and its branch once the pull request is merged. Kept when it holds uncommitted changes or commits that are not in the pull request. GitHub only.",
+        group: "Cleanup",
+        live: true,
+    },
 ];
 
 /// Brings any prompt you have not edited up to this release's default, and leaves the ones you have
@@ -1493,7 +1501,7 @@ fn bar_on(ctx: &Context, axis: PrAxis) -> bool {
 /// The environment comes second rather than first because it is the exception: it is there for a
 /// one-off `GITHOOT_CLONE_ROOT=... githoot` while trying something, and a value somebody wrote in
 /// `config.txt` should not be quietly overridden by a stale variable in a shell profile.
-fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
+pub(super) fn settings_now(ctx: &Context, dry_run: bool) -> Settings {
     let home = dirs::home_dir().unwrap_or_default();
     let pick = |set: &str, env: &str, fallback: PathBuf| {
         if !set.is_empty() {

@@ -78,6 +78,12 @@ pub trait Client: Sync + std::fmt::Debug {
     fn create(&self, w: &NewWorktree, run: &mut Run) -> Result<String, Trouble>;
     /// Starts the agent and gives it its prompt.
     fn start(&self, l: &Launch, run: &mut Run) -> Result<(), Trouble>;
+    /// Closes the agent `name` working in `worktree`, as `agents` reported it, so its worktree can go.
+    /// Only for a pull request that was merged. A client that cannot close one says so, and the
+    /// worktree stays until you close the agent yourself.
+    fn close(&self, _worktree: &str, _name: &str, _run: &mut Run) -> Result<(), String> {
+        Err(format!("GitHoot cannot close an agent in {}. Close it there", self.name()))
+    }
 }
 
 /// Every client, the default first.

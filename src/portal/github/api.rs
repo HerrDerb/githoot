@@ -6,6 +6,7 @@
 //! token or a rate limit rendered as a confident "nothing is waiting for you".
 
 use crate::infoln;
+use crate::portal::types::{PrFate, PrRef};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, RETRY_AFTER, USER_AGENT};
 use reqwest::StatusCode;
@@ -280,6 +281,67 @@ fn poll_reviewed_all(
         .into_iter()
         .map(|result| PollResponse { result, poll_interval })
         .collect()
+}
+
+// ─── What became of a pull request ───────────────────────────────────────────
+
+/// How many pull requests one fates request asks about. Each is a small aliased lookup; this keeps the
+/// query well under GitHub's node limits.
+const FATES_PER_REQUEST: usize = 50;
+
+/// The GraphQL request asking what became of `prs`: one aliased `repository { pullRequest }` lookup
+/// per pull request, every value a variable so nothing in a repository name is spliced into the query.
+pub fn fates_request(prs: &[PrRef]) -> serde_json::Value {
+    let mut params = Vec::new();
+    let mut lookups = Vec::new();
+    let mut variables = serde_json::Map::new();
+    for (i, pr) in prs.iter().enumerate() {
+        let (owner, name) = pr.repo.split_once('/').unwrap_or(("", pr.repo.as_str()));
+        params.push(format!("$o{i}: String!, $n{i}: String!, $k{i}: Int!"));
+        lookups.push(format!("p{i}: repository(owner: $o{i}, name: $n{i}) {{ pullRequest(number: $k{i}) {{ state headRefOid }} }}"));
+        variables.insert(format!("o{i}"), owner.into());
+        variables.insert(format!("n{i}"), name.into());
+        variables.insert(format!("k{i}"), pr.number.into());
+    }
+    let query = format!("query({}) {{ {} }}", params.join(", "), lookups.join(" "));
+    serde_json::json!({ "query": query, "variables": variables })
+}
+
+/// Reads a fates answer. A lookup that came back empty (deleted, or no access) is `Unknown`, never an
+/// error for the rest. A body with no `data` at all is an error.
+pub fn parse_fates(body: &str, prs: &[PrRef]) -> Result<Vec<(PrRef, PrFate)>, String> {
+    let answer: serde_json::Value = serde_json::from_str(body).map_err(|e| format!("unreadable answer: {e}"))?;
+    let Some(data) = answer.get("data").filter(|d| d.is_object()) else {
+        let why = answer["errors"][0]["message"].as_str().unwrap_or("no data in the answer");
+        return Err(why.to_string());
+    };
+    Ok(prs
+        .iter()
+        .enumerate()
+        .map(|(i, pr)| {
+            let node = &data[format!("p{i}")]["pullRequest"];
+            let fate = match (node["state"].as_str(), node["headRefOid"].as_str()) {
+                (Some("MERGED"), Some(head)) if !head.is_empty() => PrFate::Merged { head: head.to_string() },
+                (Some("CLOSED"), _) => PrFate::Closed,
+                (Some("OPEN"), _) => PrFate::Open,
+                _ => PrFate::Unknown,
+            };
+            (pr.clone(), fate)
+        })
+        .collect())
+}
+
+/// Asks GitHub what became of `prs`, `FATES_PER_REQUEST` at a time.
+pub fn ask_fates(client: &Client, graphql_url: &str, token: &str, prs: &[PrRef]) -> Result<Vec<(PrRef, PrFate)>, String> {
+    let mut out = Vec::new();
+    for chunk in prs.chunks(FATES_PER_REQUEST) {
+        let (status, _, body) = post(client.post(graphql_url).json(&fates_request(chunk)), token)?;
+        if !status.is_success() {
+            return Err(describe(status, &body));
+        }
+        out.extend(parse_fates(&body, chunk)?);
+    }
+    Ok(out)
 }
 
 /// A raw answer: status, headers and body.
@@ -1143,6 +1205,63 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    // ── Fates ──────────────────────────────────────────────────────────────
+
+    fn pr(repo: &str, number: u64) -> PrRef {
+        PrRef { host: "github.com".into(), repo: repo.into(), number }
+    }
+
+    /// Every value goes in as a variable, aliased per pull request, so a repository name can never
+    /// change the query's shape.
+    #[test]
+    fn the_fates_request_asks_each_pull_request_through_variables() {
+        let req = fates_request(&[pr("acme/web", 7), pr("acme/api", 12)]);
+        let query = req["query"].as_str().unwrap();
+        assert!(query.contains("p0: repository(owner: $o0, name: $n0)") && query.contains("pullRequest(number: $k0)"), "{query}");
+        assert!(query.contains("p1: repository(owner: $o1, name: $n1)"), "{query}");
+        assert!(query.contains("state") && query.contains("headRefOid"), "{query}");
+        assert!(!query.contains("acme"), "names stay out of the query: {query}");
+        assert_eq!(req["variables"], serde_json::json!({ "o0": "acme", "n0": "web", "k0": 7, "o1": "acme", "n1": "api", "k1": 12 }));
+    }
+
+    /// Merged carries the head it was merged at; closed and open say so; a lookup GitHub could not
+    /// answer is unknown, and does not spoil the others.
+    #[test]
+    fn fates_are_read_per_pull_request() {
+        let prs = [pr("acme/web", 7), pr("acme/web", 8), pr("acme/web", 9), pr("gone/repo", 1)];
+        let body = r#"{"data":{
+            "p0":{"pullRequest":{"state":"MERGED","headRefOid":"abc123"}},
+            "p1":{"pullRequest":{"state":"CLOSED","headRefOid":"def"}},
+            "p2":{"pullRequest":{"state":"OPEN","headRefOid":"fed"}},
+            "p3":null},
+          "errors":[{"type":"NOT_FOUND","path":["p3"],"message":"Could not resolve to a Repository"}]}"#;
+        assert_eq!(
+            parse_fates(body, &prs).unwrap(),
+            vec![
+                (prs[0].clone(), PrFate::Merged { head: "abc123".into() }),
+                (prs[1].clone(), PrFate::Closed),
+                (prs[2].clone(), PrFate::Open),
+                (prs[3].clone(), PrFate::Unknown),
+            ]
+        );
+    }
+
+    /// No `data` at all is the request failing, not every pull request being unknown.
+    #[test]
+    fn a_fates_answer_without_data_is_an_error() {
+        let body = r#"{"errors":[{"message":"Bad credentials"}]}"#;
+        assert!(parse_fates(body, &[pr("acme/web", 7)]).is_err());
+        assert!(parse_fates("not json", &[pr("acme/web", 7)]).is_err());
+    }
+
+    /// Merged without a head commit is not trusted as merged: the cleanup has nothing to compare with.
+    #[test]
+    fn merged_without_a_head_is_unknown() {
+        let body = r#"{"data":{"p0":{"pullRequest":{"state":"MERGED"}}}}"#;
+        assert_eq!(parse_fates(body, &[pr("acme/web", 7)]).unwrap(), vec![(pr("acme/web", 7), PrFate::Unknown)]);
+    }
+
     use super::*;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

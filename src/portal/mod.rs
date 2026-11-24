@@ -79,6 +79,7 @@ impl PortalKind {
                 rereview_pending: true,
                 team_reviewers: true,
                 bot_reviewer: Some("Copilot"),
+                merged_state: true,
             },
             PortalKind::GitLab => Capabilities {
                 auth_style: AuthStyle::DeviceFlow,
@@ -89,6 +90,8 @@ impl PortalKind {
                 // GitLab Duo reviews by commenting, like Copilot, but its account name is not
                 // documented, and guessing it would fail silently.
                 bot_reviewer: None,
+                // Not asked yet: `fates` is GitHub only for now.
+                merged_state: false,
             },
         }
     }
@@ -129,6 +132,8 @@ pub struct Capabilities {
     /// The automatic reviewer whose unresolved comments count as work, when the portal has one.
     /// `Some("Copilot")` for GitHub.
     pub bot_reviewer: Option<&'static str>,
+    /// Whether it answers `Portal::fates`, which deleting the worktrees of merged pull requests needs.
+    pub merged_state: bool,
 }
 
 /// A portal's status page and how the menu names it.
@@ -350,6 +355,13 @@ pub trait Portal: Send {
     /// Asks for the axes marked `true`, indexed by `PrAxis::index`. An axis marked `false` must cost
     /// no request: the caller has already decided it is not in play.
     fn poll(&mut self, axes: [bool; 3]) -> PollOutcome;
+
+    /// What became of each of `prs`, in one request where the portal allows it. Only the ones on this
+    /// portal's host are answered; the rest are left out. `None` means it cannot say at all, which is
+    /// what `Capabilities::merged_state` declares ahead of time.
+    fn fates(&mut self, _prs: &[types::PrRef]) -> Option<Result<Vec<(types::PrRef, types::PrFate)>, String>> {
+        None
+    }
 
     /// The portal's own view of its health. `None` means it publishes none and nothing should be
     /// shown; `Some(Err)` means we could not find out, which is not an outage. How often to ask is

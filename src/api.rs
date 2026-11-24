@@ -189,6 +189,7 @@ mod tests {
                 rereview_pending: true,
                 team_reviewers: true,
                 bot_reviewer: Some("Copilot"),
+                merged_state: true,
             },
             min_poll_interval: Duration::from_secs(60),
         }

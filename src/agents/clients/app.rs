@@ -80,6 +80,12 @@ impl Client for HerdrApp {
             ))
         })
     }
+
+    /// `hc kill`, then `hc rm`, by the name or address `agents` reported, as hc's own docs clean up.
+    fn close(&self, _worktree: &str, name: &str, run: &mut Run) -> Result<(), String> {
+        run("hc", &["kill", name])?;
+        run("hc", &["rm", name]).map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -89,6 +95,16 @@ mod tests {
 
     fn launch(kind: &str) -> Launch<'_> {
         Launch { slug: "pr-1-x", kind, prompt: "Review it", worktree: "/w/pr-1-x", place: "/w/pr-1-x" }
+    }
+
+    /// Closing an agent kills its terminal and removes it, by the name `agents` reported.
+    #[test]
+    fn closing_an_agent_kills_and_removes_its_terminal() {
+        let (mut run, ran) = recorder(|_| Ok(String::new()));
+        assert_eq!(HerdrApp.close("/w/pr-1-x", "pr-1-x", &mut run), Ok(()));
+        assert_eq!(*ran.borrow(), ["hc kill pr-1-x", "hc rm pr-1-x"]);
+        let (mut failed, _) = recorder(|_| Err("no such terminal".into()));
+        assert!(HerdrApp.close("/w/pr-1-x", "pr-1-x", &mut failed).is_err());
     }
 
     /// Only a named terminal is a claim, as in the terminal client: an agent you opened yourself is not.

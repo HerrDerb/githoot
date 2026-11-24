@@ -181,6 +181,16 @@ mod tests {
 
     const TOOL: &str = if cfg!(target_os = "linux") { "orca-ide" } else { "orca" };
 
+    /// Orca's way of closing an agent by its worktree is not verified, so GitHoot does not guess: it
+    /// says so and runs nothing.
+    #[test]
+    fn an_agent_in_orca_is_not_closed_by_guesswork() {
+        let (mut run, ran) = recorder(|_| Ok(String::new()));
+        let said = Orca.close("/w/pr-1-x", "orca", &mut run).unwrap_err();
+        assert!(said.contains("Orca"), "{said}");
+        assert!(ran.borrow().is_empty());
+    }
+
     /// Trimmed from a real `agent list --json` (Orca 1.4.263).
     const AGENT_LIST: &str = r#"{
   "id": "6c3c0dab",

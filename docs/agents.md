@@ -29,7 +29,7 @@ Agents is switched on for (all but **approved**, by default; see [Settings](#set
 4. Somebody already in the worktree: say so and leave them alone. Nobody home: fetch the pull
    request's head, cut a branch of its own, open a worktree, start an agent, hand it the prompt.
 
-**It works the same for every portal and asks no forge anything.** What is in a bar comes from
+**It works the same for every portal and asks no forge anything to start an agent.** What is in a bar comes from
 GitHoot's own poll, who is already working from the clients, and the checkout from git: each portal says
 which ref holds a pull request's head on the base repository (`refs/pull/<n>/head` on GitHub,
 `refs/merge-requests/<iid>/head` on GitLab), and both forges publish that ref for forks too. A portal
@@ -102,6 +102,7 @@ Below the switch, two cards, both folded shut until you open them:
 | `agentsApproved` | `off` | Start agents for the green bar: your approved pull requests |
 | `agentsCloneRoot` | `~/projects` | Where your clones live, one directory per repository name |
 | `agentsWorktreeRoot` | `~/worktrees` | Where the per-pull-request worktrees go |
+| `agentsDeleteMerged` | `off` | Close the agent and delete the worktree and its branch once the pull request is merged. GitHub only. See [Deleting the worktrees of merged pull requests](#deleting-the-worktrees-of-merged-pull-requests) |
 
 Under the client radio sits the chosen client's card: the programs it needs as chips, how to get one
 that is missing, and what it needs from you, such as Orca's permission setting.
@@ -286,6 +287,47 @@ client that is not installed, or not running, has nobody working and is skipped.
 there and fails to answer (a timeout, a server restarting) might be hiding the agent standing in that
 worktree. So while any client fails to answer, no worktree is recycled: the pull
 request waits, the log says which client and why, and the next pass tries again.
+
+## Deleting the worktrees of merged pull requests
+
+Off by default: **Delete the worktree when its pull request is merged** under Cleanup on its page
+(`agentsDeleteMerged=on`). With it on, once a pull request GitHoot started an agent for is merged,
+its agent is closed and its worktree and `githoot/pr-<number>-<repo>` branch are deleted.
+
+**It goes by what is on disk, not by what left a bar.** Each pass lists the worktrees under
+`agentsWorktreeRoot` that are on one of GitHoot's own branches, and reads the repository off the
+clone's `origin`. Any other folder or branch is never touched. Those whose pull request is in no bar
+are asked about, all in one GitHub request, after the next poll. So a merge while GitHoot was closed
+is caught when it next runs, and so is a pull request that left as another one arrived.
+
+**Asked once per run.** The answer is kept in memory until GitHoot quits, so a closed or still-open
+pull request costs one question, not one per pass. One that comes back into a bar is forgotten, and
+asked about again once it leaves. Nothing is written to disk. Before any bar has its first answer
+from a poll, nothing is asked.
+
+**It never deletes work.** A merged pull request's worktree is kept, with a line in [its log](#its-log),
+when:
+
+- it holds uncommitted changes, or commits that are not in the merged pull request's head. That head
+  is fetched first, so commits you pushed to the pull request count as merged and any other commit
+  counts as work. Kept for the rest of the run.
+- a client did not answer, so an agent in it could be hidden, or its agent could not be closed, or
+  the head could not be fetched. Tried again on the next pass, said once.
+
+The checks run **before** the agent is closed, so an agent is never closed for a worktree that then
+stays, and once more after, for whatever it did meanwhile. `git worktree remove` runs without
+`--force`, so git itself refuses a dirty worktree too.
+
+**Closing the agent, by client:**
+
+- **Herdr in a terminal:** the workspace GitHoot opened for the worktree is closed (`workspace close`).
+- **Herdr app:** its terminal is killed and removed (`hc kill`, `hc rm`), named or not.
+- **Orca:** not closed. GitHoot has no verified way to close one by its worktree, so a live Orca agent
+  keeps its worktree, and the log asks you to close it in Orca. The next pass deletes it.
+
+**GitHub only.** Only GitHub answers whether a pull request was merged so far; on GitLab the setting
+does nothing. It is the one part of Agents that asks the forge anything, and it asks on the poll
+thread, with the poll's own credential.
 
 ## When something goes wrong
 
