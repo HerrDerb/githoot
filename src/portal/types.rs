@@ -11,6 +11,27 @@
 
 use std::time::Duration;
 
+/// A pull request by where it lives, for asking what became of it. `repo` is `owner/name`; `host` is
+/// the web host its clone points at (`github.com`, or a GHES host), so a portal answers only for its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrRef {
+    pub host: String,
+    pub repo: String,
+    pub number: u64,
+}
+
+/// What became of a pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrFate {
+    Open,
+    /// Closed without being merged.
+    Closed,
+    /// Merged, with the head commit it was merged at.
+    Merged { head: String },
+    /// The portal could not see it: deleted, or no access. Never read as merged.
+    Unknown,
+}
+
 /// One pull request, as the page shows it.
 ///
 /// `url` is the only field the *count* depends on, and the only one that is not `Option`: a counted

@@ -147,7 +147,7 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
             items.push(link(place, &esc(name), true));
         }
     }
-    items.push(link(Place::Agents, &format!("{}{}", crate::agents::NAME, place_tag(&Place::Agents)), false));
+    items.push(link(Place::Agents, crate::agents::NAME, false));
     let muted = if site.muted > 0 { format!("Muted ({})", site.muted) } else { "Muted".to_string() };
     items.push(link(Place::Muted, &muted, false));
     let updates = match &site.update {
@@ -157,15 +157,6 @@ pub fn sidebar(site: &Site, current: &Place) -> String {
     items.push(link(Place::Updates, &updates, false));
     items.push(link(Place::Advanced, "Advanced", false));
     format!("<nav class=\"side\" aria-label=\"GitHoot settings\">{}</nav>", items.join(""))
-}
-
-/// The tag a page carries beside its name, in the sidebar and its heading. Only Agents has one: it
-/// starts agents, it is new, and it may misbehave, which a page that only reads cannot.
-fn place_tag(place: &Place) -> &'static str {
-    match place {
-        Place::Agents => "<span class=\"tag tag-exp\">Experimental</span>",
-        _ => "",
-    }
 }
 
 /// A whole page: the shared head, the sidebar, and `body`.
@@ -198,7 +189,7 @@ pub fn layout_with_note(site: &Site, place: &Place, title: &str, refresh: Option
             None => format!("<span>{}</span>", esc(label)),
         })
         .collect();
-    let heading = format!("<h1 class=\"crumbs\">{}{}</h1>", crumbs.join(sep), place_tag(place));
+    let heading = format!("<h1 class=\"crumbs\">{}</h1>", crumbs.join(sep));
     let tab: Vec<&str> = trail.iter().map(|(label, _)| label.as_str()).collect();
     let mut h = crate::page::shell_with(
         &tab.join(" › "),
@@ -867,7 +858,7 @@ pub(crate) mod tests {
     fn an_item_in_the_sidebar_carries_its_collections_name_for_the_narrow_row() {
         let html = sidebar(&site(), &Place::General);
         assert!(html.contains(r#"href="/tok/portals/github"><span class="up-name">Portals › </span>GitHub</a>"#), "{html}");
-        assert!(html.contains(r#"href="/tok/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#), "a page of its own, no collection to name: {html}");
+        assert!(html.contains(r#"href="/tok/agents">Agents</a>"#), "a page of its own, no collection to name: {html}");
     }
 
     /// The green bar's rules are drawn as the path a pull request walks to green: two fixed steps,
@@ -1044,7 +1035,7 @@ pub(crate) mod tests {
     fn the_sidebar_has_agents_between_portals_and_muted_and_no_integrations() {
         let html = sidebar(&site(), &Place::General);
         let portals = html.find("/tok/portals\"").unwrap();
-        let agents = html.find(r#"href="/tok/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#).expect("always there");
+        let agents = html.find(r#"href="/tok/agents">Agents</a>"#).expect("always there");
         let muted = html.find("/tok/muted").unwrap();
         assert!(portals < agents && agents < muted, "{html}");
         assert!(!html.contains("integrations"), "{html}");

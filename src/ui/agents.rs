@@ -343,18 +343,17 @@ mod tests {
     fn it_is_a_page_of_its_own() {
         let html = page(&view(false, &[]));
         assert!(html.contains("<title>Settings › Agents — GitHoot</title>"), "{html}");
-        assert!(html.contains(r#"<a class="on" aria-current="page" href="/tok/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#), "{html}");
+        assert!(html.contains(r#"<a class="on" aria-current="page" href="/tok/agents">Agents</a>"#), "{html}");
     }
 
-    /// Experimental, where you look for it: beside its name in the sidebar and the heading, and in one
-    /// line on its card saying what that means and where to look when it misbehaves.
+    /// Experimental in one line on its card, saying what that means and where to look when it
+    /// misbehaves. No pill beside its name, in the heading or the sidebar.
     #[test]
-    fn it_says_it_is_experimental() {
+    fn it_says_it_is_experimental_on_its_card_only() {
         let html = page(&view(false, &[]));
-        assert!(html.contains(r#"<span>Agents</span><span class="tag tag-exp">Experimental</span></h1>"#), "{html}");
+        assert!(html.contains("<span>Agents</span></h1>"), "{html}");
+        assert!(!html.contains("<span class=\"tag"), "{html}");
         assert!(html.contains("Experimental: it may miss a pull request or fail to start an agent."), "{html}");
-        let other = crate::ui::layout(&site(), &crate::ui::Place::Muted, "Muted", None, "");
-        assert_eq!(other.matches("class=\"tag tag-exp\"").count(), 1, "only Agents, only in the sidebar, on another page");
     }
 
     /// Each pull request in its bars, folded shut until asked for, with what happened and the press

@@ -53,7 +53,9 @@ the address. The optional [local API](local-api.md) is off unless you turn it on
 
 [Agents](agents.md) is off until you switch it on. It uses tools already on your computer: it fetches
 the pull request with `git`, creates a branch and a worktree, and starts a coding agent in the client
-you chose (Herdr, the Herdr app or Orca) with a prompt about that pull request. With Orca it tells
+you chose (Herdr, the Herdr app or Orca) with a prompt about that pull request. With **Delete the worktree when its pull request is merged** on, it also asks GitHub, with your
+existing sign-in, whether the pull requests of its worktrees were merged: the repository and number,
+nothing else. With Orca it tells
 Orca's command line not to report usage (`ORCA_TELEMETRY_DISABLED=1`); what Orca itself does is
 covered by Orca's own policy. Whatever that agent then sends, for example code to an AI provider, is decided by how you
 set up that agent and is covered by its provider's policy, not by GitHoot.

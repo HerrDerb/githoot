@@ -71,6 +71,13 @@ impl Client for HerdrTui {
         let pane = json_string(&panes, "pane_id").ok_or_else(|| Trouble::Passing(format!("no pane in {}", l.place)))?;
         hand_over(l.slug, l.kind, &pane, l.prompt, &mut |args| run("herdr", args))
     }
+
+    /// The workspace GitHoot opened for the worktree, found by its path the way `reopen` finds it.
+    /// Closing it ends the agent's pane with it.
+    fn close(&self, worktree: &str, _name: &str, run: &mut Run) -> Result<(), String> {
+        let place = self.reopen(worktree, run).ok_or_else(|| format!("Herdr does not know the workspace at {worktree}"))?;
+        run("herdr", &["workspace", "close", &place]).map(|_| ())
+    }
 }
 
 /// How often, and how many times, to look for a server just started. Ten seconds in all.
@@ -136,6 +143,16 @@ mod tests {
         assert_eq!(ran.borrow()[0], "herdr worktree open --path /w/pr-1-x --no-focus");
         let (mut forgot, _) = recorder(|_| Err("not found".into()));
         assert_eq!(HerdrTui.reopen("/w/pr-1-x", &mut forgot), None);
+    }
+
+    /// Closing an agent closes the workspace GitHoot opened for its worktree, found by its path.
+    #[test]
+    fn closing_an_agent_closes_its_workspace() {
+        let (mut run, ran) = recorder(|_| Ok(r#"{"result":{"workspace_id":"w3"}}"#.into()));
+        assert_eq!(HerdrTui.close("/w/pr-1-x", "pr-1-x", &mut run), Ok(()));
+        assert_eq!(*ran.borrow(), ["herdr worktree open --path /w/pr-1-x --no-focus", "herdr workspace close w3"]);
+        let (mut failed, _) = recorder(|line| if line.contains("close") { Err("busy".into()) } else { Ok(r#"{"result":{"workspace_id":"w3"}}"#.into()) });
+        assert!(HerdrTui.close("/w/pr-1-x", "pr-1-x", &mut failed).is_err(), "a close that failed is not a closed agent");
     }
 
     const NO_SERVER: &str = r#"{"id":"cli:agent:list","error":{"code":"server_not_running","message":"no herdr server is running at /x/herdr.sock"}}"#;

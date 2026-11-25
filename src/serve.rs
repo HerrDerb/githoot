@@ -2100,7 +2100,7 @@ mod tests {
         let r = round_trip(&format!("GET /{TOKEN}/portals HTTP/1.1\r\nHost: githoot.localhost:{{PORT}}\r\n\r\n"));
         assert!(r.starts_with("HTTP/1.1 200 OK\r\n"), "{r}");
         assert!(r.contains("Referrer-Policy: same-origin") && r.contains(r#"aria-current="page" href="/"#), "{r}");
-        assert!(r.contains(&format!(r#"href="/{TOKEN}/agents">Agents<span class="tag tag-exp">Experimental</span></a>"#)), "Agents is in the sidebar: {r}");
+        assert!(r.contains(&format!(r#"href="/{TOKEN}/agents">Agents</a>"#)), "Agents is in the sidebar: {r}");
     }
 
     #[test]

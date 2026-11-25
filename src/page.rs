@@ -312,8 +312,9 @@ white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .tag{font-size:.78rem;line-height:1;padding:.3rem .55rem;border-radius:6px;font-weight:600}\
 .tag-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}\
 .tag-no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}\
-.tag-exp{font-size:.68rem;padding:.08rem .45rem;border-radius:999px;border:1px solid var(--warn);color:var(--warn);\
-margin-left:.4rem;vertical-align:middle}\
+label:has(>input[name=agentsDeleteMerged])::after,label:has(>input[name=agentsClient][value=orca])::after{content:'Experimental';\
+font-size:.68rem;line-height:1;font-weight:600;padding:.08rem .45rem;border-radius:999px;border:1px solid var(--warn);\
+color:var(--warn);margin-left:.4rem;vertical-align:middle}\
 details.fold>summary{display:flex;align-items:baseline;gap:.8rem;cursor:pointer;list-style:none}\
 details.fold>summary::-webkit-details-marker{display:none}\
 details.fold>summary::before{content:\"\u{25b8}\";color:var(--dim);transition:transform .15s}\
@@ -977,6 +978,7 @@ mod tests {
             rereview_pending: true,
             team_reviewers: true,
             bot_reviewer: Some("Copilot"),
+            merged_state: true,
         },
         min_poll_interval: Duration::from_secs(60),
     });
@@ -1538,6 +1540,19 @@ mod tests {
         assert!(STYLESHEET.contains(".client-card .head{display:flex;align-items:center"), "on the name's line");
         assert!(STYLESHEET.contains(".tag-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}"));
         assert!(STYLESHEET.contains(".tag-no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}"));
+    }
+
+    /// Experimental settings are marked by the stylesheet alone, picked by their input: the cleanup
+    /// checkbox and the Orca option. The names it picks must be the real ones, or the pill vanishes.
+    #[test]
+    fn the_experimental_pill_is_drawn_by_the_stylesheet_for_its_inputs() {
+        let cleanup = format!("label:has(>input[name={}])::after", crate::agents::sweep::KEY);
+        let orca = "label:has(>input[name=agentsClient][value=orca])::after";
+        assert!(STYLESHEET.contains(&cleanup), "{cleanup}");
+        assert!(STYLESHEET.contains(orca), "{orca}");
+        assert!(STYLESHEET.contains("content:'Experimental'"));
+        assert!(crate::agents::clients::CHOICES.iter().any(|(v, _)| *v == "orca"), "the option it picks exists");
+        assert!(crate::agents::dispatch::SETTINGS.iter().any(|s| s.key == "agentsClient"), "the radio it picks exists");
     }
 
     /// Every link a page renders is caught by a rule that names its container: `.card a`,
