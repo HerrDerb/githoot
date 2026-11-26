@@ -777,6 +777,8 @@ fn main() {
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
     autostart::offer_on_first_run(first_run);
+    // macOS only: moves an old Launch Agent onto the login item, once. A no-op on Windows.
+    autostart::migrate_legacy();
 
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.

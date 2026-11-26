@@ -65,7 +65,7 @@ only for now; GitLab is in beta.
 `~/.githoot/config.txt` is written on first run with every setting at its default.
 
 **A first run also asks once whether to start GitHoot when you sign in** — Windows `Run` value, XDG
-autostart entry or macOS Launch Agent, for your account only, removable with your OS's own startup
+autostart entry or macOS login item, for your account only, removable with your OS's own startup
 tool. Declining writes nothing and nothing asks again; a prompt that cannot be shown counts as no. On
 Windows it then offers to open the taskbar settings, where you keep the owl out of the **^** overflow
 flyout yourself → [the whole thing](docs/startup.md).

@@ -31,7 +31,12 @@ const RETIRED: [&str; 6] = [
 const RETIRED_PREFIXES: [&str; 3] = ["GHT_", "ght/", "ght-dispatch"];
 
 /// `(file, retired name)` pairs where the old name is the subject of the line, not a leftover.
-const ALLOWED: [(&str, &str); 11] = [
+const ALLOWED: [(&str, &str); 15] = [
+    // The macOS migration finds and removes the Launch Agent the old name left behind.
+    ("src/autostart.rs", "githoottray"),
+    ("src/autostart.rs", "githoot-tray"),
+    ("docs/startup.md", "githoottray"),
+    ("docs/startup.md", "githoot-tray"),
     // The GitHub App was registered under the old name, and its slug is GitHub's to keep.
     ("src/portal/github/auth.rs", "githoot-tray"),
     ("docs/pr-status.md", "githoot-tray"),
