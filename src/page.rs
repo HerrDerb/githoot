@@ -312,7 +312,7 @@ white-space:pre-wrap;overflow-wrap:anywhere;color:var(--dim)}\
 .tag{font-size:.78rem;line-height:1;padding:.3rem .55rem;border-radius:6px;font-weight:600}\
 .tag-ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}\
 .tag-no{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}\
-label:has(>input[name=agentsDeleteMerged])::after,label:has(>input[name=agentsClient][value=orca])::after{content:'Experimental';\
+label:has(>input[name=agentsDeleteMerged])::after,label:has(>input[name=agentsClient][value=orca])::after,\nlabel:has(>input[name=agentsClient][value=claude-desktop])::after{content:'Experimental';\
 font-size:.68rem;line-height:1;font-weight:600;padding:.08rem .45rem;border-radius:999px;border:1px solid var(--warn);\
 color:var(--warn);margin-left:.4rem;vertical-align:middle}\
 details.fold>summary{display:flex;align-items:baseline;gap:.8rem;cursor:pointer;list-style:none}\
@@ -1552,6 +1552,9 @@ mod tests {
         assert!(STYLESHEET.contains(orca), "{orca}");
         assert!(STYLESHEET.contains("content:'Experimental'"));
         assert!(crate::agents::clients::CHOICES.iter().any(|(v, _)| *v == "orca"), "the option it picks exists");
+        let desktop = "label:has(>input[name=agentsClient][value=claude-desktop])::after";
+        assert!(STYLESHEET.contains(desktop), "{desktop}");
+        assert!(crate::agents::clients::CHOICES.iter().any(|(v, _)| *v == "claude-desktop"), "the option it picks exists");
         assert!(crate::agents::dispatch::SETTINGS.iter().any(|s| s.key == "agentsClient"), "the radio it picks exists");
     }
 

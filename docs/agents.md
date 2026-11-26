@@ -95,7 +95,7 @@ Below the switch, two cards, both folded shut until you open them:
 | Key | Default | Meaning |
 |---|---|---|
 | `agents` | `off` | On or off. What Switch on and Switch off write. An unrecognised value leaves it off |
-| `agentsClient` | `herdr` | Where agents open: `herdr` (Herdr in a terminal), `herdr-app` (the [Herdr app](#the-herdr-app)) or `orca` ([Orca](#orca)). An unrecognised value is `herdr` |
+| `agentsClient` | `herdr` | Where agents open: `herdr` (Herdr in a terminal), `herdr-app` (the [Herdr app](#the-herdr-app)), `orca` ([Orca](#orca)) or `claude-desktop` ([Claude Desktop](#claude-desktop)). An unrecognised value is `herdr` |
 | `agentsKind` | `claude` | Which agent starts. Claude is the only one for now; the page shows it as a choice of one |
 | `agentsWorkRequired` | `on` | Start agents for the amber bar: your pull requests that need work |
 | `agentsRequestedReviews` | `on` | Start agents for the red bar: reviews requested of you |
@@ -136,7 +136,8 @@ shortcut or autostart, none of which carry a shell's environment.
 ### What it needs
 
 The chosen client's program and `git`, on `PATH`: `herdr` for Herdr in a terminal, `hc` for the Herdr
-app, `orca-ide` for Orca (`orca` on Windows and macOS). The client card shows each as a chip and names any that
+app, `orca-ide` for Orca (`orca` on Windows and macOS). Claude Desktop is an app with no program on `PATH`,
+so its chip is green once its data folder is there, which is after its first Code session. The client card shows each as a chip and names any that
 will not run, and nothing is started until they all do. No forge tool is required by GitHoot; the agent reads
 its pull request with the one that fits (`gh` for GitHub, `glab` for GitLab), signed in as you, so
 have that installed for the portals you use.
@@ -266,6 +267,48 @@ What a dispatch does there:
 - **Who is working:** every agent `agent list` shows in one of these worktrees, finished ones
   included, since Orca keeps those listed while they sleep.
 
+## Claude Desktop
+
+**Experimental**, tagged so beside its option on the page. With **Claude Desktop** chosen, GitHoot
+opens each agent as a new session in the Code tab of [Claude Desktop](https://claude.com/download),
+through the link Claude Desktop documents for other programs:
+[`claude://code/new`](https://support.claude.com/en/articles/14729294-open-claude-desktop-with-a-link).
+Claude Desktop starts itself if it is not running.
+
+**It is semi-manual: you confirm and you send.** Claude Desktop treats a folder that comes from a link
+as untrusted, so it asks you to confirm the worktree every time, even one you trusted before. The
+prompt is only filled in: nothing runs until you press send. GitHoot cannot see whether you did, so
+the log says "started" once the session is opened, and a pull request you never sent for waits in its
+open session until you send or archive it.
+
+**Your default permission mode must ask before acting.** No link parameter or command sets the mode
+a session starts in. A new folder starts in `permissions.defaultMode` from managed settings, or from
+your own `~/.claude/settings.json`; Claude Desktop ignores `auto` and bypass in a project's
+`.claude/` folder. So GitHoot reads those two files, and a launch that would start in anything but
+`default` (Manual), `acceptEdits` or `plan`, such as `auto` or `bypassPermissions`, is refused before
+the link is opened, with this in the log until the setting is changed:
+
+> `Claude Desktop would start the session in auto, set by permissions.defaultMode in C:\Users\you\.claude\settings.json, which lets it act without asking you, so it was not opened. Set it to default, acceptEdits or plan`
+
+The mode picker under the prompt box shows the mode before you send. Check it there too: Claude
+Desktop remembers a mode you picked per folder, and a recycled worktree has the same path as before.
+
+What a dispatch does there:
+
+- **The worktree** is made with plain `git worktree add`, as for the Herdr app. Leave Claude
+  Desktop's **Worktree** switch off for these sessions: the worktree is already one.
+- **The agent** opens with `claude://code/new?folder=<worktree>&q=<prompt>`, both URL-encoded, handed
+  to the system: `rundll32 url.dll,FileProtocolHandler` on Windows, `open` on macOS, `xdg-open` on
+  Linux. Claude Desktop cuts a prompt in a link at about 14,000 characters, so a longer one is not
+  opened at all rather than sent cut.
+- **Who is working:** Claude Desktop has no command that lists its sessions. It keeps one file per
+  Code session in its data folder, with the folder the session was opened on and whether you archived
+  it, and GitHoot reads those: every session you have not archived holds its worktree. That file
+  format is Claude Desktop's own and undocumented, so a file GitHoot cannot read makes it unsure, and
+  no worktree is recycled until it can.
+- **Closing:** GitHoot cannot close a Claude Desktop session, so a merged pull request's worktree
+  stays until you archive its session.
+
 Adding another client is one new file in `src/agents/clients/` and one more option on the radio.
 
 ## Who is already working a pull request
@@ -275,10 +318,11 @@ somebody working that pull request. A live agent sitting in the worktree is the 
 agent counts, not a shell: in Herdr in a terminal that is a named agent, one GitHoot started,
 because Herdr keeps a plain shell pane in a worktree after its agent has gone. In the app it is a
 named terminal or any terminal reporting an agent status, since there only an agent reports one. In
-Orca it is every agent it lists.
+Orca it is every agent it lists. In Claude Desktop it is every Code session it keeps and you have not
+archived.
 
 When the agent has gone but its worktree is still on disk, the worktree is reused if Herdr in a
-terminal still knows it, recycled if it does not (the app and Orca never do) **and** it holds no
+terminal still knows it, recycled if it does not (the app, Orca and Claude Desktop never do) **and** it holds no
 uncommitted changes and no unpushed commits, and **left alone with a line in the log** if it holds
 either. GitHoot never deletes work.
 
