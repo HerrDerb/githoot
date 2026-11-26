@@ -152,9 +152,14 @@ lacks. Install the tool, reload the page, and its chip turns green.
 
 An app started from the Dock, Finder or a login item does not get your shell's `PATH`, only
 `/usr/bin:/bin:/usr/sbin:/sbin`. So on macOS every program Agents runs gets that `PATH` with
-`~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` added after it, where they are missing. The
-agent it starts inherits the same `PATH`. A tool installed anywhere else is reported as missing; link
-it into one of those folders.
+`~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` added after it, where they are missing, and
+last the folder Orca keeps its CLI in, inside the app: `/Applications/Orca.app/Contents/Resources/bin`,
+then the same under `~/Applications`. An `orca` on the `PATH` you started GitHoot with still comes
+first. The agent it starts inherits the same `PATH`. A tool installed anywhere else is reported as
+missing; link it into one of those folders.
+
+If the Orca chip stays red with Orca installed in one of those places, turn on its command line under
+Orca's **Settings ▸ Experimental ▸ CLI**, which Orca's own docs ask for before `orca` is used.
 
 **Agents has not been run on a Mac yet.** The macOS build compiles and the tests pass on Linux, but
 nothing has been tried on macOS itself: not the `PATH` above, not the CLI names (`herdr`, `hc`,

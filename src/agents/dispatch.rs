@@ -265,7 +265,7 @@ pub fn command(exe: &str) -> Command {
 }
 
 /// The PATH every program it runs gets on macOS: the inherited one, then the folders installers use
-/// that it lacks.
+/// that it lacks, then the `bin` folder inside Orca's app bundle.
 ///
 /// An app started from the Dock, Finder or a login item gets launchd's `/usr/bin:/bin:/usr/sbin:/sbin`,
 /// not your shell's PATH, so `hc` and `claude` in `~/.local/bin` and anything from Homebrew would read
@@ -280,7 +280,13 @@ pub fn mac_tool_path(inherited: Option<&std::ffi::OsStr>, home: Option<&Path>) -
         None => ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from).to_vec(),
     };
     let local = home.map(|h| h.join(".local/bin"));
-    for dir in local.into_iter().chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)) {
+    // Orca keeps its CLI inside the app bundle, and a Dock-started app sees no PATH entry for it. Last,
+    // so an `orca` you put on your PATH yourself still wins. `/Applications` first, then the per-user
+    // `~/Applications` some installs use.
+    let orca = |root: &Path| root.join("Applications/Orca.app/Contents/Resources/bin");
+    let bundles = std::iter::once(orca(Path::new("/"))).chain(home.map(orca));
+    let added = local.into_iter().chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from)).chain(bundles);
+    for dir in added {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
@@ -2070,7 +2076,17 @@ mod tests {
     fn a_mac_app_finds_tools_where_installers_put_them() {
         let path = path_of(&["/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
         let got = mac_tool_path(Some(&path), Some(Path::new("/Users/u")));
-        let want = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/Users/u/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"];
+        let want = [
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            "/Users/u/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/Applications/Orca.app/Contents/Resources/bin",
+            "/Users/u/Applications/Orca.app/Contents/Resources/bin",
+        ];
         assert_eq!(dirs_of(&got), want.map(PathBuf::from));
     }
 
@@ -2079,7 +2095,8 @@ mod tests {
     fn a_path_that_has_them_keeps_its_own_order() {
         let path = path_of(&["/opt/homebrew/bin", "/usr/bin", "/Users/u/.local/bin"]);
         let got = mac_tool_path(Some(&path), Some(Path::new("/Users/u")));
-        assert_eq!(dirs_of(&got), ["/opt/homebrew/bin", "/usr/bin", "/Users/u/.local/bin", "/usr/local/bin"].map(PathBuf::from));
+        let want = ["/opt/homebrew/bin", "/usr/bin", "/Users/u/.local/bin", "/usr/local/bin", "/Applications/Orca.app/Contents/Resources/bin", "/Users/u/Applications/Orca.app/Contents/Resources/bin"];
+        assert_eq!(dirs_of(&got), want.map(PathBuf::from));
     }
 
     /// No PATH at all must not become a PATH of only the added folders, which would lose git.
@@ -2087,8 +2104,23 @@ mod tests {
     #[test]
     fn no_path_starts_from_the_system_default_and_no_home_skips_local_bin() {
         let got = mac_tool_path(None, None);
-        let want = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin"];
+        let want = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/opt/homebrew/bin", "/usr/local/bin", "/Applications/Orca.app/Contents/Resources/bin"];
         assert_eq!(dirs_of(&got), want.map(PathBuf::from));
+    }
+
+    /// Orca ships its CLI inside the app bundle and puts it on no PATH a Dock-started app sees, so
+    /// `orca` read as not installed (#47). Its `bin` folder comes last, for both install locations, so an
+    /// `orca` on the PATH you started GitHoot with still wins.
+    #[test]
+    fn a_mac_app_finds_the_orca_cli_inside_its_bundle_after_your_own() {
+        let path = path_of(&["/Users/u/bin", "/usr/bin"]);
+        let got = dirs_of(&mac_tool_path(Some(&path), Some(Path::new("/Users/u"))));
+        let at = |dir: &str| got.iter().position(|d| d == Path::new(dir));
+        let system = at("/Applications/Orca.app/Contents/Resources/bin").expect("the /Applications bundle must be searched");
+        let user = at("/Users/u/Applications/Orca.app/Contents/Resources/bin").expect("the ~/Applications bundle must be searched");
+        assert!(at("/Users/u/bin").unwrap() < system, "your own PATH must come first: {got:?}");
+        assert!(system < user, "/Applications before ~/Applications: {got:?}");
+        assert_eq!(user, got.len() - 1, "the bundles come last: {got:?}");
     }
 
     /// A Mac widens it with the installers' folders, and Windows with what the registry's PATH gained
