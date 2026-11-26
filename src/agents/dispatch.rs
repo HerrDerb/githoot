@@ -449,7 +449,10 @@ pub fn required(client: &dyn clients::Client) -> [&'static str; 2] {
 pub fn missing_tools(client: &dyn clients::Client) -> Vec<&'static str> {
     required(client)
         .into_iter()
-        .filter(|exe| command(exe).arg("--version").output().is_err())
+        .filter(|exe| match client.installed() {
+            Some(there) if *exe == client.tool() => !there,
+            _ => command(exe).arg("--version").output().is_err(),
+        })
         .collect()
 }
 
@@ -2020,6 +2023,29 @@ mod tests {
         assert_eq!(required(&clients::HerdrApp), ["hc", "git"]);
         let html = client_card_for(&clients::HerdrApp, &["hc"]);
         assert!(html.contains("hc not found") && !html.contains("herdr not found"), "{html}");
+    }
+
+    /// Claude Desktop is an app with no program on `PATH` to ask for `--version`, so it answers for
+    /// itself whether it is there, and the card names the app and links where to get it.
+    #[test]
+    fn a_client_without_a_program_says_itself_whether_it_is_there() {
+        #[derive(Debug)]
+        struct Gone;
+        impl clients::Client for Gone {
+            fn id(&self) -> &'static str { "gone" }
+            fn name(&self) -> &'static str { "Gone" }
+            fn tool(&self) -> &'static str { "Gone app" }
+            fn install_url(&self) -> &'static str { "https://example.invalid" }
+            fn note(&self) -> &'static str { "" }
+            fn installed(&self) -> Option<bool> { Some(false) }
+            fn agents(&self, _: &mut clients::Run) -> Result<Vec<(String, String)>, String> { Ok(vec![]) }
+            fn create(&self, _: &clients::NewWorktree, _: &mut clients::Run) -> Result<String, Trouble> { unreachable!() }
+            fn start(&self, _: &clients::Launch, _: &mut clients::Run) -> Result<(), Trouble> { unreachable!() }
+        }
+        assert_eq!(missing_tools(&Gone), ["Gone app"], "its own answer, and git still asked as a program");
+        assert_eq!(required(&clients::ClaudeDesktop), ["Claude Desktop", "git"]);
+        let html = client_card_for(&clients::ClaudeDesktop, &["Claude Desktop"]);
+        assert!(html.contains("✗ Claude Desktop not found") && html.contains("https://claude.com/download"), "{html}");
     }
 
     /// A program that is not there says so in one recognisable way, so a client can tell "not installed"

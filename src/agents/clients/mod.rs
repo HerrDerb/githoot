@@ -14,10 +14,12 @@
 //! other one is still somebody working that pull request.
 
 mod app;
+mod desktop;
 mod orca;
 mod tui;
 
 pub use app::HerdrApp;
+pub use desktop::ClaudeDesktop;
 pub use orca::Orca;
 pub use tui::HerdrTui;
 
@@ -62,6 +64,11 @@ pub trait Client: Sync + std::fmt::Debug {
     /// its server is not running: nobody can be working there. `Err` when it is there and did not
     /// answer, because then nobody can say, and an empty list would read as "nobody home".
     fn agents(&self, run: &mut Run) -> Result<Vec<(String, String)>, String>;
+    /// Whether it is there, for a client whose `tool` is an app rather than a program that answers
+    /// `--version`. `None` asks `tool --version`, as for every program.
+    fn installed(&self) -> Option<bool> {
+        None
+    }
     /// Before anything is touched for a pull request: make sure the client is there to take it. A client
     /// that can start itself does so here. `Trouble::Setup` when it is not there, so nothing is done for
     /// the pull request yet and it is tried again on the next pass.
@@ -87,11 +94,11 @@ pub trait Client: Sync + std::fmt::Debug {
 }
 
 /// Every client, the default first.
-pub static CLIENTS: [&dyn Client; 3] = [&HerdrTui, &HerdrApp, &Orca];
+pub static CLIENTS: [&dyn Client; 4] = [&HerdrTui, &HerdrApp, &Orca, &ClaudeDesktop];
 
 /// The radio buttons, in the order of `CLIENTS`: `(id, label)`. A literal because a setting's options
 /// are a constant; a test keeps the two in step.
-pub const CHOICES: &[(&str, &str)] = &[("herdr", "Herdr in a terminal"), ("herdr-app", "Herdr app"), ("orca", "Orca")];
+pub const CHOICES: &[(&str, &str)] = &[("herdr", "Herdr in a terminal"), ("herdr-app", "Herdr app"), ("orca", "Orca"), ("claude-desktop", "Claude Desktop")];
 
 /// The client `id` names. Empty or unknown is the first, so a typo in `config.txt` keeps the default.
 pub fn by_id(id: &str) -> &'static dyn Client {
@@ -175,6 +182,8 @@ mod tests {
         assert_eq!(by_id("orca?").id(), "herdr", "a typo keeps the default");
         assert_eq!(by_id("herdr-app").id(), "herdr-app");
         assert_eq!(by_id("orca").id(), "orca");
+        assert_eq!(by_id("claude-desktop").id(), "claude-desktop");
+        assert_eq!(ids.last(), Some(&"claude-desktop"), "after orca");
     }
 
     /// An agent in either client is somebody working, whichever one the radio names. Missing programs
@@ -188,7 +197,8 @@ mod tests {
         });
         let found = agents_everywhere(&mut run);
         assert_eq!(found.agents, [("/w/pr-1-a".to_string(), "pr-1-a".to_string()), ("/w/pr-2-b".to_string(), "pr-2-b".to_string())]);
-        assert_eq!(ran.borrow().len(), CLIENTS.len(), "{:?}", ran.borrow());
+        // One program per client, but Claude Desktop, which is asked through its data folder, not a program.
+        assert_eq!(ran.borrow().len(), CLIENTS.len() - 1, "{:?}", ran.borrow());
 
         let (mut none, _) = recorder(|line| Err(format!("{}: not installed", line.split(' ').next().unwrap())));
         assert_eq!(agents_everywhere(&mut none), Inventory::default(), "a client you do not have is nobody working");
