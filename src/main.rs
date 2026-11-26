@@ -65,6 +65,14 @@ fn handle_startup_flags() -> bool {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == FLAG_PRINT_VERSION {
+            // macOS below 13 answers nothing and fails. The updater of a release already shipped runs
+            // this before it swaps the bundle and reads no `LSMinimumSystemVersion`, so refusing here
+            // is what keeps it from replacing a working install with one this Mac cannot run.
+            #[cfg(target_os = "macos")]
+            if !macos_is_supported() {
+                eprintln!("GitHoot {} needs macOS {MIN_MACOS_MAJOR} or later", version::VERSION);
+                std::process::exit(1);
+            }
             // Deliberately plain stdout with no logging: the updater parses this, and a log line or a
             // banner would have to be stripped back off. On Windows this still works under
             // `windows_subsystem = "windows"` when the caller supplies the pipe.
@@ -77,6 +85,18 @@ fn handle_startup_flags() -> bool {
         }
     }
     false
+}
+
+/// The oldest macOS this build runs on: `SMAppService` in `autostart.rs` needs 13. Kept in step with
+/// `LSMinimumSystemVersion` in `scripts/bundle-macos.sh` and `MACOSX_DEPLOYMENT_TARGET` in `release.yml`.
+#[cfg(target_os = "macos")]
+const MIN_MACOS_MAJOR: isize = 13;
+
+#[cfg(target_os = "macos")]
+fn macos_is_supported() -> bool {
+    use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
+    let min = NSOperatingSystemVersion { majorVersion: MIN_MACOS_MAJOR, minorVersion: 0, patchVersion: 0 };
+    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(min)
 }
 
 /// Blocks until the process identified by `pid` has exited, or a timeout elapses.
@@ -777,6 +797,8 @@ fn main() {
     // for, and before the credential work below, which can take a network round trip. Returns at once
     // on every start but the first — see `autostart::offer_on_first_run`.
     autostart::offer_on_first_run(first_run);
+    // macOS only: moves an old Launch Agent onto the login item, once. A no-op on Windows.
+    autostart::migrate_legacy();
 
     // Two handles on one flag: the menu's checkbox writes it, the poll loop reads it. See
     // `config::Switch` for why this is shared state rather than a value copied into the loop.

@@ -187,6 +187,8 @@ jobs:
       - name: Build release binary
         env:
           GITHOOT_VERSION: ${{ github.ref_name }}
+          # In step with `LSMinimumSystemVersion` in the bundle and `MIN_MACOS_MAJOR` in `main.rs`.
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: |
           export GITHOOT_VERSION="${GITHOOT_VERSION#v}"
           cargo build --release --target aarch64-apple-darwin

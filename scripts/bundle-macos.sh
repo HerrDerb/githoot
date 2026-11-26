@@ -45,13 +45,15 @@ chmod +x "$APP/Contents/MacOS/$NAME"
 
 # ── Info.plist ────────────────────────────────────────────────────────────────
 # LSUIElement is the reason this bundle exists at all: menu-bar only, no Dock icon, no app menu.
+# CFBundleName is the name System Settings shows for the login item `autostart.rs` registers, so it
+# is spelled like the app; the folder and executable stay lowercase `githoot`.
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>$NAME</string>
+	<string>GitHoot</string>
 	<key>CFBundleDisplayName</key>
 	<string>GitHoot</string>
 	<key>CFBundleIdentifier</key>
@@ -69,7 +71,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>LSUIElement</key>
 	<true/>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 </dict>

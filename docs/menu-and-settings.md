@@ -50,7 +50,7 @@ If the local listener cannot start at all, the entries open that inbox directly.
 | Item | Does | Where the answer is kept |
 |---|---|---|
 | ☑ **Hoot on new pull requests** | Silences the hoot, or brings it back | `sound` in `config.txt` |
-| ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a Launch Agent |
+| ☑ **Start at sign-in** | Registers or removes the startup entry | The OS itself — a registry value, a `.desktop` file, a macOS login item |
 | **Open settings page** | Opens every setting as a form in your browser, served locally — see [the PR page](pr-page.md) | — |
 | **Open GitHoot on GitHub** | Opens this app's own repository: releases, issues, and these docs | — |
 
@@ -210,8 +210,9 @@ existed — the key is appended rather than the file regenerated.
 >   mutes, sign-in and dispatcher prompts. Started without it, the new version treats it as a first
 >   run: defaults, a fresh sign-in, and the startup question again.
 > - **Remove the old startup entry**, or the old binary starts next to the new one: the `GitHootTray`
->   value in Windows startup apps, `~/.config/autostart/githoot-tray.desktop`, or
->   `~/Library/LaunchAgents/com.githoot.GitHootTray.plist`.
+>   value in Windows startup apps, or `~/.config/autostart/githoot-tray.desktop` on Linux. On macOS,
+>   GitHoot removes
+>   `~/Library/LaunchAgents/com.githoot.GitHootTray.plist` itself, see [Starting with your session](startup.md).
 >
 > From the even older `git-system-tray`, the same applies, with settings in `~/.github-trayicon/`.
 
@@ -257,7 +258,7 @@ their options, and the two folders take text, where empty means that setting's d
 
 **Two things are deliberately not keys here:** whether GitHoot starts when you sign in, and whether its
 icon sits on the Windows taskbar or in the overflow flyout. Both are stored by the operating system
-already — a registry value, an autostart entry, a Launch Agent, the taskbar settings — so a copy in this file would be a
+already — a registry value, an autostart entry, a login item, the taskbar settings — so a copy in this file would be a
 second source of truth to keep in step with reality. That is why **Start at sign-in** is a checkbox and
 not a key: it reads the OS entry every time the menu opens and writes the same one when you click, so
 there is still exactly one record of the answer. The startup question is also asked once, on a first run

@@ -38,15 +38,28 @@ Nothing is registered for other users of the machine, and nothing needs elevatio
 |---|---|---|
 | 🪟 Windows | A `GitHoot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, holding the quoted path to the `.exe` | **Task Manager › Startup apps**, or **Settings › Apps › Startup** |
 | 🐧 Linux | `$XDG_CONFIG_HOME/autostart/githoot.desktop` (`~/.config/autostart/…` when that is unset) | Delete the file, or use your desktop's own startup-applications tool |
-| 🍎 macOS | `~/Library/LaunchAgents/com.githoot.GitHoot.plist`, with `RunAtLoad` and no `KeepAlive` | Delete the plist, or **System Settings › General › Login Items** |
+| 🍎 macOS | A login item for the `githoot.app` bundle, registered with `SMAppService` (macOS 13 or later) | **System Settings › General › Login Items**, under Open at Login |
 
 The path written is wherever the running binary is, which is also where the self-updater installs, so
 an update does not invalidate the entry. A build inside `target/` is registered too if you say yes to
 the prompt on a fresh `cargo run` — deliberately, since refusing would make the feature impossible to
 try out by hand, but it is worth remembering before `cargo clean`.
 
-No `KeepAlive` on macOS on purpose: it would make the app unquittable, restarting it every time you
-used the tray's own **Quit**.
+On macOS the login item belongs to the bundle, so it shows the app's own name and icon, and a binary
+started outside `githoot.app`, such as a `cargo run`, cannot register one. If macOS asks you to approve
+it, the entry waits under Login Items until you switch it on; the checkbox already shows it as on.
+
+**Older builds wrote a Launch Agent instead**: `~/Library/LaunchAgents/com.githoot.GitHoot.plist`, and
+before the rename from `githoot-tray`, `com.githoot.GitHootTray.plist`. System Settings listed those as
+a second, lowercase entry with a generic icon. At every start GitHoot looks for both, registers the
+login item, and removes them once it is enabled, and the log says so once. If the registration fails,
+or the login item still waits for your approval, the plists stay, so the app still starts at sign-in,
+and the next start tries again. Until then Login Items lists both entries.
+
+macOS does not drop the old entry from its records the moment the plist goes. It can stay listed, now
+pointing at nothing, until macOS cleans up, which opening **Login Items** or a restart usually
+triggers. If it outlives a restart, `sfltool resetbtm` followed by a restart clears it, together with
+every other app's approvals, which macOS then asks for again.
 
 ## Windows only: keeping the icon out of the overflow flyout
 

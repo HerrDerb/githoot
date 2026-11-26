@@ -63,6 +63,13 @@ libappindicator = "0.9.0"
 tray-icon = "0.21.1"
 winit = "0.30.12"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# `autostart.rs`: start at sign-in as an `SMAppService` login item, which needs macOS 13, and
+# `main.rs`: refusing `--print-version` below that, through `NSProcessInfo`. The same
+# objc2 0.6 family `tray-icon` already pulls in, so these add bindings rather than a second runtime.
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSProcessInfo", "NSString"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # `winver` is used only by `tests/version_resource.rs`, which reads the VERSIONINFO resource back
 # out of the linked binary. Listed here rather than in `dev-dependencies` because a test target links

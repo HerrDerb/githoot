@@ -8,17 +8,17 @@
 //! this same file.
 //!
 //! **Why the OS entry is the only record.** No `autostart=` setting is written anywhere. The registry
-//! value, the desktop entry and the Launch Agent *are* the state, so there is nothing to drift out of
+//! value, the desktop entry and the login item *are* the state, so there is nothing to drift out of
 //! step with them — no case where the config says on and the machine says off. Changing your mind later
 //! means removing the entry with the tool your OS already gives you for it, which is documented in the
 //! README; the alternative (a setting the app reconciles on every start) would fight anyone who removed
 //! the entry by hand.
 //!
 //! **Why three implementations.** There is no cross-platform autostart. Windows has an `HKCU` registry
-//! value, freedesktop has `~/.config/autostart/*.desktop`, and macOS has a per-user Launch Agent. They
-//! agree on nothing but the intent, so each arm is written out rather than abstracted, and the pure
-//! parts (what the command line, entry or plist *says*) are split from the I/O so they can be tested
-//! without touching the machine running the tests.
+//! value, freedesktop has `~/.config/autostart/*.desktop`, and macOS has an `SMAppService` login
+//! item. They agree on nothing but the intent, so each arm is written out rather than abstracted, and
+//! the pure parts (what the command line or entry *says*, and the macOS migration) are split from the
+//! I/O so they can be tested without touching the machine running the tests.
 
 use crate::config::FirstRun;
 use crate::{errorln, infoln};
@@ -26,16 +26,17 @@ use std::path::Path;
 
 /// The name the entry carries wherever it is registered.
 ///
-/// One constant for all three platforms: it is the registry value name on Windows, the desktop entry's
-/// `Name` on Linux and the plist `Label`'s tail on macOS. A user looking at any of the three sees the
-/// same word, which is what makes the entry findable when they want it gone.
+/// The registry value name on Windows and the desktop entry's `Name` on Linux. A user looking at either
+/// sees the same word, which is what makes the entry findable when they want it gone. macOS names its
+/// login item after the bundle, so it needs none.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const ENTRY_NAME: &str = "GitHoot";
 
 /// Where the entry ends up, named in the prompt so removing it later is not a research task.
 #[cfg(target_os = "windows")]
 const ENTRY_LOCATION: &str = "Startup apps in Windows Settings";
 #[cfg(target_os = "macos")]
-const ENTRY_LOCATION: &str = "~/Library/LaunchAgents";
+const ENTRY_LOCATION: &str = "Login Items in System Settings";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const ENTRY_LOCATION: &str = "~/.config/autostart";
 
@@ -519,10 +520,10 @@ fn run_command(exe: &Path) -> String {
 
 /// Deletes a file, treating "it was not there" as success.
 ///
-/// Shared by the two platforms whose entry is a file. An entry the user has already deleted by hand is
-/// the state they are asking for, so reporting it as a failure would put an error in front of someone
-/// who got what they wanted.
-#[cfg(not(target_os = "windows"))]
+/// For the Linux desktop entry and the old macOS Launch Agents. An entry the user has already deleted by
+/// hand is the state they are asking for, so reporting it as a failure would put an error in front of
+/// someone who got what they wanted.
+#[cfg(any(not(target_os = "windows"), test))]
 fn remove_if_present(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -532,119 +533,190 @@ fn remove_if_present(path: &Path) -> Result<(), String> {
 }
 
 // ─── macOS ────────────────────────────────────────────────────────────────────
+//
+// A login item registered through `SMAppService.mainApp` (macOS 13 and later), not a hand-written Launch
+// Agent. A Launch Agent names a binary and nothing ties it to the bundle, so System Settings listed it
+// under the executable's lowercase name with a generic icon, next to any entry the app got another way.
+// `mainApp` registers the bundle itself: one entry, the app's own name and icon, and the switch under
+// System Settings › General › Login Items is the same record the menu's checkbox reads.
+//
+// Earlier builds wrote a Launch Agent, and before the rename to plain `githoot` another one under the
+// `GitHootTray` label. Both are moved onto the login item once, at startup, by [`migrate_legacy`].
+
+/// The Launch Agents earlier builds wrote into `~/Library/LaunchAgents`: the one up to this change, and
+/// the one from before the app was renamed from `githoot-tray`, which nothing ever cleaned up.
+#[cfg(any(target_os = "macos", test))]
+const LEGACY_PLISTS: [&str; 2] = ["com.githoot.GitHoot.plist", "com.githoot.GitHootTray.plist"];
 
 #[cfg(target_os = "macos")]
-pub fn enable(exe: &Path) -> Result<(), String> {
-    let dir = launch_agents_dir()?;
-    write_launch_agent(&dir, exe)
+pub fn enable(_exe: &Path) -> Result<(), String> {
+    login_item::register()?;
+    // Registered first, so a failure leaves the old entry starting the app rather than nothing.
+    retire_legacy_in(&launch_agents_dir()?, login_item::status)?;
+    if login_item::status() == STATUS_REQUIRES_APPROVAL {
+        infoln!("the login item waits for your approval under System Settings › General › Login Items");
+    }
+    Ok(())
 }
 
-/// Whether a Launch Agent is installed. Presence, not correctness — see the Windows [`is_enabled`].
-///
-/// A home directory that cannot be resolved reads as "not enabled": nothing can be starting from a
-/// plist nobody can find, and the alternative is a checkbox showing a state it could not verify.
+/// Whether the app starts at sign-in, by the login item or by a Launch Agent not migrated yet, so the
+/// checkbox shows what will actually happen at the next sign-in.
 #[cfg(target_os = "macos")]
 pub fn is_enabled() -> bool {
-    launch_agents_dir().is_ok_and(|dir| is_enabled_in(&dir))
+    reads_as_enabled(login_item::status()) || launch_agents_dir().is_ok_and(|dir| !legacy_plists_in(&dir).is_empty())
 }
 
-/// Removes the Launch Agent.
-///
-/// Deleting the plist is the whole of it, with no `launchctl unload` to match: the agent carries
-/// `RunAtLoad` and deliberately no `KeepAlive`, so nothing of it is still running once the app has
-/// been started. `launchd` reads the directory again at the next sign-in, the only moment it matters.
+/// Unregisters the login item and removes any Launch Agent left over, so nothing starts it at sign-in.
 #[cfg(target_os = "macos")]
 pub fn disable() -> Result<(), String> {
+    // ServiceManagement answers an error for unregistering what is not registered, and that is the state
+    // the user asked for, so it is only asked when there is something to undo.
+    if reads_as_enabled(login_item::status()) {
+        login_item::unregister()?;
+    }
+    remove_legacy_plists()
+}
+
+/// Moves a Mac that starts GitHoot from an older Launch Agent onto the login item. Runs at every start
+/// and does nothing once no such plist is left. A failure, or a login item still waiting for approval,
+/// keeps the plists, so the app still starts at sign-in, and the next start tries again.
+#[cfg(target_os = "macos")]
+pub fn migrate_legacy() {
+    let Ok(dir) = launch_agents_dir() else { return };
+    let names = |paths: &[std::path::PathBuf]| paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+    match migrate_in(&dir, login_item::register, login_item::status) {
+        Ok(Migration::Nothing) => {}
+        Ok(Migration::Done(gone)) => {
+            infoln!("now starting at sign-in as a login item; removed the old {}", names(&gone));
+        }
+        Ok(Migration::AwaitingApproval(kept)) => infoln!(
+            "the login item waits for your approval under System Settings › General › Login Items; {} stays until then",
+            names(&kept)
+        ),
+        Err(e) => errorln!("could not move the start at sign-in onto a login item ({e}); the old Launch Agent stays"),
+    }
+}
+
+/// Nothing to migrate anywhere but macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn migrate_legacy() {}
+
+#[cfg(target_os = "macos")]
+fn remove_legacy_plists() -> Result<(), String> {
     let dir = launch_agents_dir()?;
-    disable_in(&dir)
+    LEGACY_PLISTS.iter().try_for_each(|name| remove_if_present(&dir.join(name)))
 }
 
-/// The two operations against a named directory, so the tests need no `~/Library/LaunchAgents`.
-#[cfg(target_os = "macos")]
-fn is_enabled_in(dir: &Path) -> bool {
-    launch_agent_path(dir).exists()
+/// The legacy plists present in `dir`.
+#[cfg(any(target_os = "macos", test))]
+fn legacy_plists_in(dir: &Path) -> Vec<std::path::PathBuf> {
+    LEGACY_PLISTS.iter().map(|name| dir.join(name)).filter(|path| path.exists()).collect()
 }
 
-#[cfg(target_os = "macos")]
-fn disable_in(dir: &Path) -> Result<(), String> {
-    remove_if_present(&launch_agent_path(dir))
+/// What a pass over the legacy plists did.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq)]
+enum Migration {
+    /// No legacy plist was there.
+    Nothing,
+    /// The login item is enabled and these plists were removed.
+    Done(Vec<std::path::PathBuf>),
+    /// The login item waits for approval, so these plists stay and keep starting the app.
+    AwaitingApproval(Vec<std::path::PathBuf>),
 }
 
-/// Where the plist goes. One definition, so what `enable` writes is what `disable` deletes and what
-/// `is_enabled` looks for.
-#[cfg(target_os = "macos")]
-fn launch_agent_path(dir: &Path) -> std::path::PathBuf {
-    dir.join(format!("{}.plist", launch_agent_label()))
+/// The migration against a named directory, with stand-ins for the registration and the status, so it
+/// is tested on every platform. With any legacy plist present, `register` runs first, then
+/// [`retire_legacy_in`] decides whether the plists go.
+#[cfg(any(target_os = "macos", test))]
+fn migrate_in(
+    dir: &Path,
+    register: impl FnOnce() -> Result<(), String>,
+    status: impl FnOnce() -> isize,
+) -> Result<Migration, String> {
+    if legacy_plists_in(dir).is_empty() {
+        return Ok(Migration::Nothing);
+    }
+    register()?;
+    retire_legacy_in(dir, status)
 }
 
-/// The reverse-DNS label `launchd` files everything under, and the plist's file name bar the suffix.
-///
-/// Built from [`ENTRY_NAME`] rather than spelled out, so the same word appears here as in the Windows
-/// registry value and the Linux desktop entry. A function and not a `const` only because `const` cannot
-/// interpolate one, and repeating the name to keep it a `const` is exactly the drift worth avoiding.
-#[cfg(target_os = "macos")]
-fn launch_agent_label() -> String {
-    format!("com.githoot.{ENTRY_NAME}")
+/// Removes the legacy plists in `dir` once the login item is enabled. An item waiting for approval does
+/// not start the app at sign-in, so until then the plists stay and keep doing it; both entries are
+/// listed meanwhile, and `single_instance.rs` turns the second start away.
+#[cfg(any(target_os = "macos", test))]
+fn retire_legacy_in(dir: &Path, status: impl FnOnce() -> isize) -> Result<Migration, String> {
+    let found = legacy_plists_in(dir);
+    if found.is_empty() {
+        return Ok(Migration::Nothing);
+    }
+    if status() != STATUS_ENABLED {
+        return Ok(Migration::AwaitingApproval(found));
+    }
+    found.iter().try_for_each(|path| remove_if_present(path))?;
+    Ok(Migration::Done(found))
 }
 
-/// `~/Library/LaunchAgents`, the per-user agent directory.
-///
-/// Never `/Library/LaunchAgents`, which is machine-wide and needs root: this registers a tray icon for
-/// one person, and nothing here should ever want a privilege it cannot get.
+/// Whether an `SMAppServiceStatus` value means the app starts at sign-in. `RequiresApproval` counts: it
+/// is registered and listed, and waits only for the switch in System Settings, so the checkbox shows it
+/// on and unticking it unregisters it.
+#[cfg(any(target_os = "macos", test))]
+fn reads_as_enabled(status: isize) -> bool {
+    matches!(status, STATUS_ENABLED | STATUS_REQUIRES_APPROVAL)
+}
+
+/// The two `SMAppServiceStatus` values this acts on.
+#[cfg(any(target_os = "macos", test))]
+const STATUS_ENABLED: isize = 1;
+#[cfg(any(target_os = "macos", test))]
+const STATUS_REQUIRES_APPROVAL: isize = 2;
+
+/// Registers the login item unless it already is, given its status and the raw registration as
+/// stand-ins, so it is tested on every platform. An item enabled or waiting for approval is left alone,
+/// as Apple's `register()` answers `kSMErrorAlreadyRegistered` for it. A registration that errs but
+/// leaves the item waiting for approval counts as done: it is listed, and only the switch is missing.
+#[cfg(any(target_os = "macos", test))]
+fn register_with(mut status: impl FnMut() -> isize, register: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    if reads_as_enabled(status()) {
+        return Ok(());
+    }
+    register().or_else(|e| if status() == STATUS_REQUIRES_APPROVAL { Ok(()) } else { Err(e) })
+}
+
+/// `~/Library/LaunchAgents`, where the legacy plists live.
 #[cfg(target_os = "macos")]
 fn launch_agents_dir() -> Result<std::path::PathBuf, String> {
     let home = dirs::home_dir().ok_or("could not find home directory")?;
     Ok(home.join("Library").join("LaunchAgents"))
 }
 
+/// The four calls this needs on `SMAppService.mainApp`, the login item of the running bundle.
 #[cfg(target_os = "macos")]
-fn write_launch_agent(dir: &Path, exe: &Path) -> Result<(), String> {
-    // `create_dir_all`: `~/Library/LaunchAgents` genuinely does not exist on an account that has never
-    // installed one, so a plain write would fail on exactly the fresh machine this runs on.
-    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let path = launch_agent_path(dir);
-    std::fs::write(&path, launch_agent(exe))
-        .map_err(|e| format!("could not write {}: {e}", path.display()))
-}
+mod login_item {
+    use objc2_service_management::SMAppService;
 
-/// The Launch Agent property list.
-///
-/// `ProgramArguments` names the executable inside the bundle rather than the `.app` itself, which is
-/// what `launchd` wants — it launches a process, not a document. The bundle is still found from the
-/// executable's path, so the app's `LSUIElement` still applies and no Dock icon appears.
-///
-/// Only `RunAtLoad`. Deliberately no `KeepAlive`: that would make the app unquittable, restarting it
-/// every time someone used the tray's own Quit entry.
-#[cfg(target_os = "macos")]
-fn launch_agent(exe: &Path) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-         \t<key>Label</key>\n\
-         \t<string>{}</string>\n\
-         \t<key>ProgramArguments</key>\n\
-         \t<array>\n\
-         \t\t<string>{}</string>\n\
-         \t</array>\n\
-         \t<key>RunAtLoad</key>\n\
-         \t<true/>\n\
-         </dict>\n\
-         </plist>\n",
-        launch_agent_label(),
-        xml_escape(&exe.display().to_string())
-    )
-}
+    /// The raw `SMAppServiceStatus`: 0 not registered, 1 enabled, 2 requires approval, 3 not found.
+    pub fn status() -> isize {
+        // SAFETY: `mainAppService` and `status` take no arguments and are documented as safe to call
+        // from any thread.
+        unsafe { SMAppService::mainAppService().status() }.0
+    }
 
-/// Escapes a path for an XML text node.
-///
-/// `&` first, or the entities the other two produce would have their own ampersands escaped again.
-/// `&`, `<` and `>` are all legal in a macOS file name and all illegal raw in XML, and the failure is
-/// silent: `launchd` simply refuses to load a malformed plist, and nothing in this app reads it back.
-#[cfg(target_os = "macos")]
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    /// Registers unless already registered; see [`super::register_with`]. Fails outside an app bundle,
+    /// such as a binary started from `target/`: there is no bundle to list.
+    pub fn register() -> Result<(), String> {
+        super::register_with(status, || {
+            // SAFETY: as for `status`; the error comes back as a value.
+            unsafe { SMAppService::mainAppService().registerAndReturnError() }
+                .map_err(|e| format!("could not register the login item ({})", e.localizedDescription()))
+        })
+    }
+
+    pub fn unregister() -> Result<(), String> {
+        // SAFETY: as for `register`.
+        unsafe { SMAppService::mainAppService().unregisterAndReturnError() }
+            .map_err(|e| format!("could not unregister the login item ({})", e.localizedDescription()))
+    }
 }
 
 // ─── Linux and other unixes ───────────────────────────────────────────────────
@@ -949,65 +1021,148 @@ mod windows_tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod macos_tests {
+/// The macOS login item's pure parts, run on every platform: what counts as enabled, and the one-off
+/// move from the old Launch Agents, against a temp directory rather than `~/Library/LaunchAgents`.
+#[cfg(test)]
+mod login_item_tests {
     use super::*;
 
+    fn fresh_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("githoot-login-item-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the temp directory must be created");
+        dir
+    }
+
     #[test]
-    fn the_launch_agent_runs_the_binary_at_load() {
-        let plist = launch_agent(Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot"));
-        assert!(plist.starts_with("<?xml"), "must be a plist, got {plist:?}");
-        assert!(plist.contains("<key>RunAtLoad</key>\n\t<true/>"), "got {plist:?}");
-        assert!(
-            plist.contains("/Applications/GitHoot.app/Contents/MacOS/githoot"),
-            "must name the binary, got {plist:?}"
+    fn enabled_and_waiting_for_approval_read_as_enabled() {
+        assert!(!reads_as_enabled(0), "not registered");
+        assert!(reads_as_enabled(1), "enabled");
+        assert!(reads_as_enabled(2), "requires approval: registered, listed, waiting for the switch");
+        assert!(!reads_as_enabled(3), "not found");
+    }
+
+    #[test]
+    fn both_old_launch_agents_are_found_and_nothing_else() {
+        let dir = fresh_dir("find");
+        for name in [LEGACY_PLISTS[0], LEGACY_PLISTS[1], "com.example.Other.plist"] {
+            std::fs::write(dir.join(name), "<plist/>").unwrap();
+        }
+        let mut found = legacy_plists_in(&dir);
+        found.sort();
+        assert_eq!(found, vec![dir.join("com.githoot.GitHoot.plist"), dir.join("com.githoot.GitHootTray.plist")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrating_registers_then_removes_the_old_launch_agents() {
+        let dir = fresh_dir("migrate");
+        std::fs::write(dir.join("com.githoot.GitHootTray.plist"), "<plist/>").unwrap();
+        std::fs::write(dir.join("com.example.Other.plist"), "<plist/>").unwrap();
+        let mut registered = false;
+
+        let gone = migrate_in(
+            &dir,
+            || {
+                registered = true;
+                Ok(())
+            },
+            || 1,
+        )
+        .expect("the migration must succeed");
+
+        assert!(registered, "the login item must be registered");
+        assert_eq!(gone, Migration::Done(vec![dir.join("com.githoot.GitHootTray.plist")]));
+        assert!(!dir.join("com.githoot.GitHootTray.plist").exists(), "the old plist must be gone");
+        assert!(dir.join("com.example.Other.plist").exists(), "another app's plist must stay");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_registration_keeps_the_old_launch_agent() {
+        let dir = fresh_dir("fail");
+        std::fs::write(dir.join("com.githoot.GitHoot.plist"), "<plist/>").unwrap();
+
+        let result = migrate_in(&dir, || Err("not in an app bundle".to_string()), || 0);
+
+        assert_eq!(result, Err("not in an app bundle".to_string()));
+        assert!(dir.join("com.githoot.GitHoot.plist").exists(), "the app must still start at sign-in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Apple: `register()` answers `kSMErrorAlreadyRegistered` for a registered item. Asked anyway, an
+    /// old plist next to a login item that is already on would fail the migration on every start.
+    #[test]
+    fn an_item_already_registered_or_waiting_is_not_registered_again() {
+        for status in [1, 2] {
+            let result = register_with(|| status, || panic!("must not call register at status {status}"));
+            assert_eq!(result, Ok(()), "status {status}");
+        }
+    }
+
+    #[test]
+    fn an_unregistered_item_is_registered() {
+        let mut called = false;
+        let result = register_with(
+            || 0,
+            || {
+                called = true;
+                Ok(())
+            },
         );
-        assert!(plist.contains(ENTRY_NAME), "must carry the shared entry name, got {plist:?}");
+        assert_eq!(result, Ok(()));
+        assert!(called);
     }
 
-    /// `&` is legal in a macOS path and illegal raw in XML, so an unescaped path would produce a plist
-    /// `launchd` refuses to load — silently, since nothing in this app reads it back.
+    /// Reported in the field: `register()` can throw "Operation not permitted" while it did register the
+    /// item, which now waits for approval in System Settings. That is a registered item, not a failure.
     #[test]
-    fn a_path_with_xml_significant_characters_is_escaped() {
-        let plist = launch_agent(Path::new("/Users/me/R&D/<app>/githoot"));
-        assert!(plist.contains("R&amp;D/&lt;app&gt;"), "got {plist:?}");
-        assert!(!plist.contains("R&D"), "the raw ampersand must not survive, got {plist:?}");
+    fn an_error_that_left_the_item_waiting_for_approval_is_success() {
+        let mut checks = vec![0, 2].into_iter();
+        let result = register_with(|| checks.next().unwrap(), || Err("Operation not permitted".to_string()));
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
-    fn the_launch_agent_is_written_into_the_directory_it_is_given() {
-        let dir = std::env::temp_dir().join(format!("githoot-launchagent-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn an_error_that_registered_nothing_is_reported() {
+        let result = register_with(|| 0, || Err("Operation not permitted".to_string()));
+        assert_eq!(result, Err("Operation not permitted".to_string()));
+    }
 
-        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot");
-        write_launch_agent(&dir, exe).expect("must create the directory and the plist");
-
-        let written = std::fs::read_to_string(dir.join(format!("com.githoot.{ENTRY_NAME}.plist")))
-            .expect("the plist must be where the loader looks for it");
-        assert_eq!(written, launch_agent(exe));
-
+    #[test]
+    fn nothing_to_migrate_registers_nothing() {
+        let dir = fresh_dir("none");
+        let gone = migrate_in(&dir, || panic!("must not register without an old Launch Agent"), || 1);
+        assert_eq!(gone, Ok(Migration::Nothing));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The three states the menu's checkbox turns on, against a temp directory rather than the real
-    /// `~/Library/LaunchAgents`. Removing twice is included because a user can uncheck a box whose
-    /// plist they have already deleted by hand.
+    /// A login item waiting for approval does not start the app at sign-in, so removing the Launch
+    /// Agent then would leave nothing that does. The plist stays until the item is enabled.
     #[test]
-    fn a_launch_agent_can_be_written_read_back_and_removed() {
-        let dir = std::env::temp_dir().join(format!("githoot-agent-toggle-{}", std::process::id()));
+    fn a_login_item_waiting_for_approval_keeps_the_old_launch_agent() {
+        let dir = fresh_dir("approval");
+        std::fs::write(dir.join("com.githoot.GitHoot.plist"), "<plist/>").unwrap();
+
+        let result = migrate_in(&dir, || Ok(()), || 2);
+
+        assert_eq!(result, Ok(Migration::AwaitingApproval(vec![dir.join("com.githoot.GitHoot.plist")])));
+        assert!(dir.join("com.githoot.GitHoot.plist").exists(), "the app must still start at sign-in");
         let _ = std::fs::remove_dir_all(&dir);
-        let exe = Path::new("/Applications/GitHoot.app/Contents/MacOS/githoot");
+    }
 
-        assert!(!is_enabled_in(&dir), "an empty directory holds no agent");
+    /// Ticking the box runs the same retirement: the plists left by a failed migration stay while the
+    /// item waits for approval, and go once it is enabled.
+    #[test]
+    fn the_old_launch_agent_goes_only_once_the_login_item_is_enabled() {
+        let dir = fresh_dir("retire");
+        std::fs::write(dir.join("com.githoot.GitHootTray.plist"), "<plist/>").unwrap();
 
-        write_launch_agent(&dir, exe).expect("the plist must be written");
-        assert!(is_enabled_in(&dir), "a written plist must read back as enabled");
+        assert!(matches!(retire_legacy_in(&dir, || 2), Ok(Migration::AwaitingApproval(_))));
+        assert!(dir.join("com.githoot.GitHootTray.plist").exists(), "kept while waiting for approval");
 
-        disable_in(&dir).expect("removing the plist must succeed");
-        assert!(!is_enabled_in(&dir), "a removed plist must read back as disabled");
-
-        disable_in(&dir).expect("removing a plist that is already gone is not a failure");
-
+        assert_eq!(retire_legacy_in(&dir, || 1), Ok(Migration::Done(vec![dir.join("com.githoot.GitHootTray.plist")])));
+        assert!(!dir.join("com.githoot.GitHootTray.plist").exists(), "removed once enabled");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
