@@ -52,8 +52,9 @@ it, the entry waits under Login Items until you switch it on; the checkbox alrea
 **Older builds wrote a Launch Agent instead**: `~/Library/LaunchAgents/com.githoot.GitHoot.plist`, and
 before the rename from `githoot-tray`, `com.githoot.GitHootTray.plist`. System Settings listed those as
 a second, lowercase entry with a generic icon. At every start GitHoot looks for both, registers the
-login item, and removes them, and the log says so once. If the registration fails, the plists stay, so
-the app still starts at sign-in, and the next start tries again.
+login item, and removes them once it is enabled, and the log says so once. If the registration fails,
+or the login item still waits for your approval, the plists stay, so the app still starts at sign-in,
+and the next start tries again. Until then Login Items lists both entries.
 
 macOS does not drop the old entry from its records the moment the plist goes. It can stay listed, now
 pointing at nothing, until macOS cleans up, which opening **Login Items** or a restart usually

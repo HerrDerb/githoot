@@ -30,7 +30,8 @@ Each release publishes `sha256sums.txt` and a detached `sha256sums.txt.minisig`.
    your machine**.
 2. The asset's SHA-256 must match its entry in that signed file.
 3. It must look like the right kind of artefact, at a plausible size.
-4. It is run with `--print-version` and must report the version expected.
+4. It is run with `--print-version` and must report the version expected. On macOS below 13 a build that needs 13
+   refuses to answer, so an older Mac keeps the version it has rather than get one it cannot run.
 
 **Only step 1 proves authenticity.** The rest catch corruption and wrong-artefact mistakes. The transport
 alone is not enough: TLS trust comes from the system certificate store, so a corporate TLS-inspecting

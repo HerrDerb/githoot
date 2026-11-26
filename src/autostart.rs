@@ -552,8 +552,8 @@ const LEGACY_PLISTS: [&str; 2] = ["com.githoot.GitHoot.plist", "com.githoot.GitH
 pub fn enable(_exe: &Path) -> Result<(), String> {
     login_item::register()?;
     // Registered first, so a failure leaves the old entry starting the app rather than nothing.
-    remove_legacy_plists()?;
-    if login_item::status() == login_item::REQUIRES_APPROVAL {
+    retire_legacy_in(&launch_agents_dir()?, login_item::status)?;
+    if login_item::status() == STATUS_REQUIRES_APPROVAL {
         infoln!("the login item waits for your approval under System Settings › General › Login Items");
     }
     Ok(())
@@ -578,17 +578,21 @@ pub fn disable() -> Result<(), String> {
 }
 
 /// Moves a Mac that starts GitHoot from an older Launch Agent onto the login item. Runs at every start
-/// and does nothing once no such plist is left. A failure keeps the plists, so the app still starts at
-/// sign-in, and is tried again at the next start.
+/// and does nothing once no such plist is left. A failure, or a login item still waiting for approval,
+/// keeps the plists, so the app still starts at sign-in, and the next start tries again.
 #[cfg(target_os = "macos")]
 pub fn migrate_legacy() {
     let Ok(dir) = launch_agents_dir() else { return };
-    match migrate_in(&dir, login_item::register) {
-        Ok(gone) if gone.is_empty() => {}
-        Ok(gone) => {
-            let names: Vec<String> = gone.iter().map(|p| p.display().to_string()).collect();
-            infoln!("now starting at sign-in as a login item; removed the old {}", names.join(", "));
+    let names = |paths: &[std::path::PathBuf]| paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+    match migrate_in(&dir, login_item::register, login_item::status) {
+        Ok(Migration::Nothing) => {}
+        Ok(Migration::Done(gone)) => {
+            infoln!("now starting at sign-in as a login item; removed the old {}", names(&gone));
         }
+        Ok(Migration::AwaitingApproval(kept)) => infoln!(
+            "the login item waits for your approval under System Settings › General › Login Items; {} stays until then",
+            names(&kept)
+        ),
         Err(e) => errorln!("could not move the start at sign-in onto a login item ({e}); the old Launch Agent stays"),
     }
 }
@@ -609,18 +613,48 @@ fn legacy_plists_in(dir: &Path) -> Vec<std::path::PathBuf> {
     LEGACY_PLISTS.iter().map(|name| dir.join(name)).filter(|path| path.exists()).collect()
 }
 
-/// The migration against a named directory and a stand-in for the registration, so it is tested on every
-/// platform. Answers the plists it removed, empty when there was none. With any present, `register` runs
-/// first and the plists are removed only once it succeeded.
+/// What a pass over the legacy plists did.
 #[cfg(any(target_os = "macos", test))]
-fn migrate_in(dir: &Path, register: impl FnOnce() -> Result<(), String>) -> Result<Vec<std::path::PathBuf>, String> {
-    let found = legacy_plists_in(dir);
-    if found.is_empty() {
-        return Ok(found);
+#[derive(Debug, PartialEq)]
+enum Migration {
+    /// No legacy plist was there.
+    Nothing,
+    /// The login item is enabled and these plists were removed.
+    Done(Vec<std::path::PathBuf>),
+    /// The login item waits for approval, so these plists stay and keep starting the app.
+    AwaitingApproval(Vec<std::path::PathBuf>),
+}
+
+/// The migration against a named directory, with stand-ins for the registration and the status, so it
+/// is tested on every platform. With any legacy plist present, `register` runs first, then
+/// [`retire_legacy_in`] decides whether the plists go.
+#[cfg(any(target_os = "macos", test))]
+fn migrate_in(
+    dir: &Path,
+    register: impl FnOnce() -> Result<(), String>,
+    status: impl FnOnce() -> isize,
+) -> Result<Migration, String> {
+    if legacy_plists_in(dir).is_empty() {
+        return Ok(Migration::Nothing);
     }
     register()?;
+    retire_legacy_in(dir, status)
+}
+
+/// Removes the legacy plists in `dir` once the login item is enabled. An item waiting for approval does
+/// not start the app at sign-in, so until then the plists stay and keep doing it; both entries are
+/// listed meanwhile, and `single_instance.rs` turns the second start away.
+#[cfg(any(target_os = "macos", test))]
+fn retire_legacy_in(dir: &Path, status: impl FnOnce() -> isize) -> Result<Migration, String> {
+    let found = legacy_plists_in(dir);
+    if found.is_empty() {
+        return Ok(Migration::Nothing);
+    }
+    if status() != STATUS_ENABLED {
+        return Ok(Migration::AwaitingApproval(found));
+    }
     found.iter().try_for_each(|path| remove_if_present(path))?;
-    Ok(found)
+    Ok(Migration::Done(found))
 }
 
 /// Whether an `SMAppServiceStatus` value means the app starts at sign-in. `RequiresApproval` counts: it
@@ -628,8 +662,14 @@ fn migrate_in(dir: &Path, register: impl FnOnce() -> Result<(), String>) -> Resu
 /// on and unticking it unregisters it.
 #[cfg(any(target_os = "macos", test))]
 fn reads_as_enabled(status: isize) -> bool {
-    matches!(status, 1 | 2)
+    matches!(status, STATUS_ENABLED | STATUS_REQUIRES_APPROVAL)
 }
+
+/// The two `SMAppServiceStatus` values this acts on.
+#[cfg(any(target_os = "macos", test))]
+const STATUS_ENABLED: isize = 1;
+#[cfg(any(target_os = "macos", test))]
+const STATUS_REQUIRES_APPROVAL: isize = 2;
 
 /// Registers the login item unless it already is, given its status and the raw registration as
 /// stand-ins, so it is tested on every platform. An item enabled or waiting for approval is left alone,
@@ -640,7 +680,7 @@ fn register_with(mut status: impl FnMut() -> isize, register: impl FnOnce() -> R
     if reads_as_enabled(status()) {
         return Ok(());
     }
-    register().or_else(|e| if status() == 2 { Ok(()) } else { Err(e) })
+    register().or_else(|e| if status() == STATUS_REQUIRES_APPROVAL { Ok(()) } else { Err(e) })
 }
 
 /// `~/Library/LaunchAgents`, where the legacy plists live.
@@ -654,8 +694,6 @@ fn launch_agents_dir() -> Result<std::path::PathBuf, String> {
 #[cfg(target_os = "macos")]
 mod login_item {
     use objc2_service_management::SMAppService;
-
-    pub const REQUIRES_APPROVAL: isize = 2;
 
     /// The raw `SMAppServiceStatus`: 0 not registered, 1 enabled, 2 requires approval, 3 not found.
     pub fn status() -> isize {
@@ -1023,14 +1061,18 @@ mod login_item_tests {
         std::fs::write(dir.join("com.example.Other.plist"), "<plist/>").unwrap();
         let mut registered = false;
 
-        let gone = migrate_in(&dir, || {
-            registered = true;
-            Ok(())
-        })
+        let gone = migrate_in(
+            &dir,
+            || {
+                registered = true;
+                Ok(())
+            },
+            || 1,
+        )
         .expect("the migration must succeed");
 
         assert!(registered, "the login item must be registered");
-        assert_eq!(gone, vec![dir.join("com.githoot.GitHootTray.plist")]);
+        assert_eq!(gone, Migration::Done(vec![dir.join("com.githoot.GitHootTray.plist")]));
         assert!(!dir.join("com.githoot.GitHootTray.plist").exists(), "the old plist must be gone");
         assert!(dir.join("com.example.Other.plist").exists(), "another app's plist must stay");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1041,7 +1083,7 @@ mod login_item_tests {
         let dir = fresh_dir("fail");
         std::fs::write(dir.join("com.githoot.GitHoot.plist"), "<plist/>").unwrap();
 
-        let result = migrate_in(&dir, || Err("not in an app bundle".to_string()));
+        let result = migrate_in(&dir, || Err("not in an app bundle".to_string()), || 0);
 
         assert_eq!(result, Err("not in an app bundle".to_string()));
         assert!(dir.join("com.githoot.GitHoot.plist").exists(), "the app must still start at sign-in");
@@ -1090,8 +1132,37 @@ mod login_item_tests {
     #[test]
     fn nothing_to_migrate_registers_nothing() {
         let dir = fresh_dir("none");
-        let gone = migrate_in(&dir, || panic!("must not register without an old Launch Agent"));
-        assert_eq!(gone, Ok(Vec::new()));
+        let gone = migrate_in(&dir, || panic!("must not register without an old Launch Agent"), || 1);
+        assert_eq!(gone, Ok(Migration::Nothing));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A login item waiting for approval does not start the app at sign-in, so removing the Launch
+    /// Agent then would leave nothing that does. The plist stays until the item is enabled.
+    #[test]
+    fn a_login_item_waiting_for_approval_keeps_the_old_launch_agent() {
+        let dir = fresh_dir("approval");
+        std::fs::write(dir.join("com.githoot.GitHoot.plist"), "<plist/>").unwrap();
+
+        let result = migrate_in(&dir, || Ok(()), || 2);
+
+        assert_eq!(result, Ok(Migration::AwaitingApproval(vec![dir.join("com.githoot.GitHoot.plist")])));
+        assert!(dir.join("com.githoot.GitHoot.plist").exists(), "the app must still start at sign-in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ticking the box runs the same retirement: the plists left by a failed migration stay while the
+    /// item waits for approval, and go once it is enabled.
+    #[test]
+    fn the_old_launch_agent_goes_only_once_the_login_item_is_enabled() {
+        let dir = fresh_dir("retire");
+        std::fs::write(dir.join("com.githoot.GitHootTray.plist"), "<plist/>").unwrap();
+
+        assert!(matches!(retire_legacy_in(&dir, || 2), Ok(Migration::AwaitingApproval(_))));
+        assert!(dir.join("com.githoot.GitHootTray.plist").exists(), "kept while waiting for approval");
+
+        assert_eq!(retire_legacy_in(&dir, || 1), Ok(Migration::Done(vec![dir.join("com.githoot.GitHootTray.plist")])));
+        assert!(!dir.join("com.githoot.GitHootTray.plist").exists(), "removed once enabled");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
